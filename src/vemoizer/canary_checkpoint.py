@@ -40,9 +40,7 @@ def _dequant_grouped(
     """
     w = weight_u32.astype(np.uint32)
     out, groups = w.shape
-    b = (w[:, :, None] >> np.array([0, 8, 16, 24], dtype=np.uint32)).astype(
-        np.uint8
-    )
+    b = (w[:, :, None] >> np.array([0, 8, 16, 24], dtype=np.uint32)).astype(np.uint8)
     b = b.reshape(out, groups, 4, 2)
     # two 16-bit halves -> 8 bytes; simpler: view as 4 bytes little-endian
     b = np.stack(

@@ -87,9 +87,7 @@ class _DecoderBlock(nn.Module):
         self.ff1 = nn.Linear(d_model, inner, bias=True)
         self.ff2 = nn.Linear(inner, d_model, bias=True)
 
-    def __call__(
-        self, x: mx.array, enc: mx.array, mask: mx.array | None
-    ) -> mx.array:
+    def __call__(self, x: mx.array, enc: mx.array, mask: mx.array | None) -> mx.array:
         x = x + self.self_attn(self.self_attn_norm(x), mask)[0]
         x = x + self.cross_attn(self.cross_attn_norm(x), enc)
         x = x + self.ff2(nn.relu(self.ff1(self.ff_norm(x))))

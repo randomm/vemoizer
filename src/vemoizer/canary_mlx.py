@@ -55,11 +55,13 @@ def _hann_window(n: int) -> np.ndarray:
 @functools.lru_cache(maxsize=None)  # noqa: UP033
 def _mel_filterbank(n_mels: int, n_fft: int, sr: int) -> np.ndarray:
     """Hand-rolled mel filterbank (no scipy/librosa)."""
+
     def hz_to_mel(hz):
         return 2595.0 * np.log10(1.0 + hz / 700.0)
 
     def mel_to_hz(m):
         return 700.0 * (10.0 ** (m / 2595.0) - 1.0)
+
     mel_pts = np.linspace(0.0, hz_to_mel(sr / 2.0), n_mels + 2)
     hz_pts = mel_to_hz(mel_pts)
     bins = np.floor((n_fft + 1) * hz_pts / sr).astype(np.int32)
@@ -102,7 +104,7 @@ def compute_features(audio: np.ndarray, *, dtype: mx.Dtype = mx.float32) -> mx.a
     )
     spec = np.ascontiguousarray(frames) * window
     spec_c = np.fft.rfft(spec, n=n_fft)
-    power = spec_c.real ** 2 + spec_c.imag ** 2
+    power = spec_c.real**2 + spec_c.imag**2
     mel = power @ _mel_filterbank(n_mels, n_fft, SAMPLE_RATE).T
     mel = np.log(mel + 1e-5)
     # per-feature (per mel-bin) normalization over time
@@ -261,7 +263,12 @@ class ConformerConvolution(nn.Module):
             d, 2 * d, 1, stride=1, padding=0, bias=args.use_bias
         )
         self.depthwise_conv = nn.Conv1d(
-            d, d, args.conv_kernel_size, stride=1, padding=0, groups=d,
+            d,
+            d,
+            args.conv_kernel_size,
+            stride=1,
+            padding=0,
+            groups=d,
             bias=args.use_bias,
         )
         self.batch_norm = nn.BatchNorm(d)
@@ -360,6 +367,8 @@ class ConformerEncoder(nn.Module):
         for layer in self.layers:
             enc = layer(enc, pos_emb)
         return enc, lengths
+
+
 class CanaryModel(nn.Module):
     def __init__(self, config: CanaryConfig, tokenizer: CanaryTokenizer) -> None:
         super().__init__()
@@ -395,5 +404,3 @@ class CanaryModel(nn.Module):
         special_vals = self.tokenizer.special_tokens.values()
         decoded = [t for t in generated[len(prompt_ids) :] if t not in special_vals]
         return self.tokenizer.decode(decoded)
-
-

@@ -186,5 +186,3 @@ class CanaryTokenizer:
             f"<|noitn|><|notimestamp|><|nodiarize|>"
         )
         return self.encode(prompt, "spl_tokens")
-
-
