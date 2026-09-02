@@ -9,6 +9,8 @@ dependencies = [
     "onnxruntime==1.29.0",
     "numpy",
     "soundfile==0.14.0",
+    "huggingface-hub",
+    "parakeet-mlx",
 ]
 
 [dependency-groups]
