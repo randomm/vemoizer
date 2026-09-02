@@ -1,18 +1,21 @@
 [project]
 name = "vemoizer"
 version = "0.1.0"
-description = "Local-first CLI that turns voice memos into text and Markdown"
+description = "Local-first CLI: Finnish/English code-switched voice memos to text and Markdown via a consensus ASR pipeline."
 requires-python = ">=3.11"
 dependencies = [
+    "silero-vad==6.2.1",
+    "onnxruntime>=1.16.1",
     "numpy",
+    "soundfile",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
-    "ruff>=0.4.0",
-    "ty==0.0.73",
+    "ruff>=0.16.3",
+    "ty>=0.0.73",
 ]
 
 [build-system]
@@ -24,6 +27,16 @@ packages = ["src/vemoizer"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "models: model-backed tests that download real weights; opt-in via `uv run pytest -m models` (AGENTS.md: unit tests must not touch the network)",
+]
 
 [tool.ruff]
-src = ["src"]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.ty.environment]
+python-version = "3.11"
