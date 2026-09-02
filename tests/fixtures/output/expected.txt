@@ -1,0 +1,3 @@
+Käytimme aamupäivän debuggaamassa deploy pipeline issuea.
+Ei mitään outoa, mutta CI oli aivan flaky.
+Testataan uudestaan illalla, ehkä kun infra on ehtinyt vääntyä takaisin.
