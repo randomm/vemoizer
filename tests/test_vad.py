@@ -16,9 +16,9 @@ from dataclasses import FrozenInstanceError
 import numpy as np
 import pytest
 
+from vemoizer.audio_contract import SUPPORTED_SAMPLE_RATES
 from vemoizer.vad import (
     CONTRACT_SAMPLE_RATE,
-    SUPPORTED_SAMPLE_RATES,
     SpeechSegment,
     load_model,
     vad_segments,
@@ -140,6 +140,14 @@ def test_empty_audio_returns_no_segments():
     audio = np.zeros(0, dtype=np.float32)
     model = ProbModel([])
     assert vad_segments(audio, model) == []
+
+
+def test_empty_float64_audio_is_rejected():
+    """The float32 contract is enforced even for empty arrays."""
+    audio = np.zeros(0, dtype=np.float64)
+    model = ProbModel([])
+    with pytest.raises(ValueError, match="float32"):
+        vad_segments(audio, model)
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +303,8 @@ def test_default_max_speech_is_60_seconds():
     sr = 16000
     total = 70 * sr
     n_windows = total // 512
-    probs = _speech(n_windows)
+    s60 = int(60 * sr) // 512
+    probs = _speech(s60) + _silence(2) + _speech(n_windows - s60 - 2)
     audio = np.zeros(total, dtype=np.float32)
     model = ProbModel(probs)
     segs = vad_segments(audio, model)  # default max_speech_s=60

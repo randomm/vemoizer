@@ -20,6 +20,8 @@ from pathlib import Path
 
 import numpy as np
 
+from vemoizer.audio_contract import SAMPLE_RATE
+
 # ffmpeg argv contract (issue #2, AGENTS.md invariants):
 #   -nostdin      : never block on stdin
 #   -v error      : only surface real errors
@@ -42,8 +44,6 @@ _FFMPEG_AUDIO_ARGS = (
     "f32le",
     "-",
 )
-
-SAMPLE_RATE = 16_000
 
 
 class IngestError(RuntimeError):
