@@ -15,9 +15,10 @@ from pathlib import Path
 
 import pytest
 
+from vemoizer.audio_contract import SAMPLE_RATE
+
 CORPUS_DIR = Path(__file__).resolve().parent / "fixtures" / "corpus"
 
-SAMPLE_RATE = 16_000
 SAMPLE_WIDTH = 2  # 16-bit PCM
 
 #: Duration bounds (seconds) for a single fixture.
@@ -27,11 +28,6 @@ SAMPLE_WIDTH = 2  # 16-bit PCM
 #: WAVs. Tunes with the fixtures in ``scripts/gen_fixtures.py``.
 MIN_SECONDS = 1.0
 MAX_SECONDS = 10.0
-
-
-def _wav_path_and_stem(fixture: Path) -> tuple[Path, str]:
-    assert fixture.suffix == ".wav", f"expected a .wav fixture, got {fixture.name}"
-    return fixture, fixture.stem
 
 
 def _read_headers(fixture: Path) -> wave.Wave_read:

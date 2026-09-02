@@ -39,8 +39,11 @@ import subprocess
 import wave
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import numpy as np
+
+from vemoizer.audio_contract import SAMPLE_RATE  # single home for the 16 kHz contract
 
 # piper-tts is an optional dependency (see the --piper flag below). We keep
 # it out of pyproject.toml's runtime deps on purpose — the checked-in
@@ -55,7 +58,6 @@ except ImportError:  # pragma: no cover - depends on install-time state
     PiperVoice = None  # type: ignore[assignment, misc]
     _PIPER_AVAILABLE = False
 
-SAMPLE_RATE = 16_000
 SAMPLE_WIDTH = 2  # 16-bit PCM
 
 
@@ -129,6 +131,25 @@ FIXTURES: tuple[Fixture, ...] = (
 CORPUS_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "corpus"
 
 
+def resolve_corpus_dir(out: Path) -> Path:
+    """Resolve *out* and verify it stays under the project root.
+
+    Guards against a symlinked corpus dir (or its parent) pointing outside
+    the project — ffmpeg would otherwise follow the symlink and overwrite an
+    arbitrary file when resampling in place.
+    """
+    resolved = out.resolve()
+    project_root = Path(__file__).resolve().parent.parent
+    # Allow the directory itself or any descendant of the project root — this
+    # blocks a symlinked corpus dir (or its parent) from pointing outside.
+    if not (resolved == project_root or project_root in resolved.parents):
+        raise RuntimeError(
+            f"refusing to write corpus outside the project root: {resolved} "
+            f"(project root: {project_root})"
+        )
+    return resolved
+
+
 def synthesize_wav(fix: Fixture, out_path: Path) -> None:
     """Write a 16 kHz mono 16-bit WAV approximating the fixture's transcript.
 
@@ -148,14 +169,13 @@ def synthesize_wav(fix: Fixture, out_path: Path) -> None:
             continue
         t = np.arange(end - start) / SAMPLE_RATE
         tone = np.sin(2.0 * math.pi * freq_hz * t)
-        # Short attack/release envelope to avoid clicks at segment edges.
+        # Short attack/release envelope (always symmetric) to avoid clicks
+        # at segment edges.
         env = np.ones_like(t)
-        attack = min(8, len(t) // 4)
-        release = min(8, len(t) // 4)
-        if attack > 0:
-            env[:attack] *= np.linspace(0.0, 1.0, attack)
-        if release > 0:
-            env[-release:] *= np.linspace(1.0, 0.0, release)
+        env_len = min(8, len(t) // 4)
+        if env_len > 0:
+            env[:env_len] *= np.linspace(0.0, 1.0, env_len)
+            env[-env_len:] *= np.linspace(1.0, 0.0, env_len)
         peak = int(amplitude * 32767)
         frames[start:end] += (tone * env * peak).astype(np.int16)
 
@@ -176,25 +196,39 @@ def resample_piper_output(src: Path, dst: Path) -> None:
             "ffmpeg not found on PATH; required for Piper resampling. "
             "Install ffmpeg or use the default (non-Piper) fixture mode."
         )
-    subprocess.run(
-        [
-            ffmpeg,
-            "-nostdin",
-            "-v",
-            "error",
-            "-y",
-            "-i",
-            str(src),
-            "-ac",
-            "1",
-            "-ar",
-            str(SAMPLE_RATE),
-            "-c:a",
-            "pcm_s16le",
-            str(dst),
-        ],
-        check=True,
-    )
+    try:
+        subprocess.run(
+            [
+                ffmpeg,
+                "-nostdin",
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                str(src),
+                "-ac",
+                "1",
+                "-ar",
+                str(SAMPLE_RATE),
+                "-c:a",
+                "pcm_s16le",
+                str(dst),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"ffmpeg timed out after 300s resampling {src} -> {dst}"
+        ) from e
+    except subprocess.CalledProcessError as e:
+        stderr_tail = (e.stderr or "").strip()[-2000:]
+        raise RuntimeError(
+            f"ffmpeg failed (returncode {e.returncode}) resampling {src} -> {dst}:\n"
+            f"{stderr_tail}"
+        ) from e
 
 
 def _require_piper() -> None:
@@ -207,13 +241,25 @@ def _require_piper() -> None:
 
 
 def generate_piper(fix: Fixture, corpus_dir: Path, piper_voice: str) -> None:
-    """Synthesize a fixture with Piper TTS and resample to 16 kHz mono."""
+    """Synthesize a fixture with Piper TTS and resample to 16 kHz mono.
+
+    Piper output lands in a ``.tmp`` file and is atomically moved into
+    place only after resampling succeeds, so a mid-write Piper failure
+    cannot leave a corrupt ``<stem>.wav`` behind.
+    """
     _require_piper()
-    assert PiperVoice is not None  # guard for ty: checked via _require_piper()
-    voice = PiperVoice.load(piper_voice)
+    # _require_piper() already raises if PiperVoice is None; the cast tells
+    # ty we are in the available branch (the import guard hides the None case).
+    voice = cast(type[PiperVoice], PiperVoice).load(piper_voice)
     out_path = corpus_dir / f"{fix.stem}.wav"
-    voice.synthesize(fix.transcript, wav_file=str(out_path))
-    resample_piper_output(out_path, out_path)
+    tmp_path = out_path.with_suffix(".wav.tmp")
+    try:
+        voice.synthesize(fix.transcript, wav_file=str(tmp_path))
+        resample_piper_output(tmp_path, out_path)
+    except BaseException:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
 
 
 def generate_corpus(
@@ -223,7 +269,7 @@ def generate_corpus(
     if corpus_dir.exists():
         for entry in corpus_dir.iterdir():
             entry.unlink()
-    corpus_dir.mkdir(parents=True)
+    corpus_dir.mkdir(parents=True, exist_ok=True)
 
     written: list[Path] = []
     for fix in FIXTURES:
@@ -258,10 +304,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    written = generate_corpus(args.out, use_piper=args.piper, piper_voice=args.voice)
+    corpus_dir = resolve_corpus_dir(args.out)
+    written = generate_corpus(corpus_dir, use_piper=args.piper, piper_voice=args.voice)
     for path in written:
         print(f"wrote {path}")
-    print(f"corpus: {len(written)} fixtures under {args.out}")
+    print(f"corpus: {len(written)} fixtures under {corpus_dir}")
     return 0
 
 
