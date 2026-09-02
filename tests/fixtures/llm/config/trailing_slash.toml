@@ -1,0 +1,7 @@
+# [llm] section with a trailing slash on base_url. load_config() must
+# normalize it (rstrip "/") so the request URL is not doubled.
+[llm]
+base_url = "https://api.example.com/v1/"
+model = "gpt-4o-mini"
+api_key_env = "VEMOIZER_LLM_API_KEY"
+timeout_seconds = 10

@@ -1,0 +1,10 @@
+{
+  "span_text": " ",
+  "candidates": [
+    {"source": "parakeet", "text": "   "},
+    {"source": "canary", "text": ""},
+    {"source": "whisper", "text": "  "}
+  ],
+  "context": "Trailing silence after the last word",
+  "expected": " "
+}

@@ -1,0 +1,10 @@
+{
+  "span_text": "MLX poijainen sovellus",
+  "candidates": [
+    {"source": "parakeet", "text": "MLX-pohjainen sovellus"},
+    {"source": "canary", "text": "MLX poijainen sovellus"},
+    {"source": "whisper", "text": "MLX pohjainen sovellus"}
+  ],
+  "context": "Uusi älysovellus, joka käyttää Metal Graphicsia",
+  "expected": "MLX-pohjainen sovellus"
+}

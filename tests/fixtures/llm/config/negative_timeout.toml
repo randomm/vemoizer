@@ -1,0 +1,6 @@
+# [llm] section present but timeout_seconds < 0 → invalid. Returns None.
+[llm]
+base_url = "https://api.example.com/v1"
+model = "gpt-4o-mini"
+api_key_env = "VEMOIZER_LLM_API_KEY"
+timeout_seconds = -5
