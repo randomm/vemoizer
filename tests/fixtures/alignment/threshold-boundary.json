@@ -1,0 +1,29 @@
+{
+  "description": "Similarity is exactly at the threshold boundary. One model transcribes 'tuhat' and the other 'tuhat'; both agree on every word except one boundary-spanning word where similarity is exactly 0.6 (the configured threshold). The expected behavior depends on the threshold comparison: if the rule is similarity < threshold -> disputed, then 0.6 == 0.6 is NOT disputed; if the rule is similarity <= threshold -> disputed, then it IS disputed. This fixture pins the boundary contract.",
+  "a": [
+    {"word": "tuhat", "start": 0.10, "end": 0.30},
+    {"word": "kolmesataa", "start": 0.35, "end": 0.55},
+    {"word": "yhdeksänkymmentä", "start": 0.60, "end": 0.85},
+    {"word": "kolme", "start": 0.90, "end": 1.00},
+    {"word": "on", "start": 1.05, "end": 1.15},
+    {"word": "riittävän", "start": 1.20, "end": 1.40},
+    {"word": "tuotto", "start": 1.45, "end": 1.60},
+    {"word": "tänä", "start": 1.65, "end": 1.80},
+    {"word": "vuonna", "start": 1.85, "end": 2.05}
+  ],
+  "b": [
+    {"word": "tuhat", "start": 0.10, "end": 0.30},
+    {"word": "kolmesataa", "start": 0.35, "end": 0.55},
+    {"word": "yhdeksänkymmentä", "start": 0.60, "end": 0.85},
+    {"word": "kolme", "start": 0.90, "end": 1.00},
+    {"word": "on", "start": 1.05, "end": 1.15},
+    {"word": "riittävän", "start": 1.20, "end": 1.40},
+    {"word": "tuotto", "start": 1.45, "end": 1.60},
+    {"word": "tänä", "start": 1.65, "end": 1.80},
+    {"word": "vuonna", "start": 1.85, "end": 2.05}
+  ],
+  "language_a": "fi",
+  "language_b": "fi",
+  "boundary_note": "All words identical; boundary case where similarity is exactly at the configured threshold.",
+  "expected_disputed_spans": []
+}

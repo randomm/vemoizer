@@ -1,0 +1,20 @@
+{
+  "description": "Identical decode A and decode B: same words, same onsets. Expect zero disputed spans.",
+  "a": [
+    {"word": "hei", "start": 0.10, "end": 0.30},
+    {"word": "mitä", "start": 0.35, "end": 0.55},
+    {"word": "mieltä", "start": 0.60, "end": 0.85},
+    {"word": "on", "start": 0.90, "end": 1.00},
+    {"word": "kuulettu", "start": 1.05, "end": 1.30}
+  ],
+  "b": [
+    {"word": "hei", "start": 0.10, "end": 0.30},
+    {"word": "mitä", "start": 0.35, "end": 0.55},
+    {"word": "mieltä", "start": 0.60, "end": 0.85},
+    {"word": "on", "start": 0.90, "end": 1.00},
+    {"word": "kuulettu", "start": 1.05, "end": 1.30}
+  ],
+  "language_a": "fi",
+  "language_b": "fi",
+  "expected_disputed_spans": []
+}

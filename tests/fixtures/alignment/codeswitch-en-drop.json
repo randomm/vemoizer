@@ -1,0 +1,29 @@
+{
+  "description": "Code-switched Finnish/English span where one model drops the English acronym entirely. Words A: 'KPI' present at [2.20, 2.45]; words B: KPI dropped, surrounding Finnish words re-timed to fill the gap. This is the invariant #3 case: a span's language can differ from the file-level language.",
+  "a": [
+    {"word": "tiimimme", "start": 0.10, "end": 0.35},
+    {"word": "seurannan", "start": 0.40, "end": 0.65},
+    {"word": "KPI", "start": 0.70, "end": 0.90},
+    {"word": "arvot", "start": 0.95, "end": 1.15},
+    {"word": "joka", "start": 1.20, "end": 1.35},
+    {"word": "viikko", "start": 1.40, "end": 1.60},
+    {"word": "tarkemmin", "start": 1.65, "end": 1.95},
+    {"word": "kuin", "start": 2.00, "end": 2.10},
+    {"word": "aiemmin", "start": 2.15, "end": 2.35}
+  ],
+  "b": [
+    {"word": "tiimimme", "start": 0.10, "end": 0.35},
+    {"word": "seurannan", "start": 0.40, "end": 0.65},
+    {"word": "arvot", "start": 0.70, "end": 0.95},
+    {"word": "joka", "start": 1.00, "end": 1.15},
+    {"word": "viikko", "start": 1.20, "end": 1.40},
+    {"word": "tarkemmin", "start": 1.45, "end": 1.75},
+    {"word": "kuin", "start": 1.80, "end": 1.90},
+    {"word": "aiemmin", "start": 1.95, "end": 2.15}
+  ],
+  "language_a": "fi",
+  "language_b": "fi",
+  "expected_disputed_spans": [
+    {"start": 0.70, "end": 0.95, "a_words": ["KPI", "arvot"], "b_words": ["arvot"]}
+  ]
+}
