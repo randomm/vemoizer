@@ -212,8 +212,8 @@ def vad_segments(
     boundary is merged with the previous slice's last segment (continuous
     speech across the boundary stays one segment), unless the merge would
     exceed the ``max_speech_s`` cap — in that case the previous segment is
-    extended to the boundary so the two remain contiguous rather than
-    leaving an unattributed gap.
+    cut at the boundary and the continuation after the boundary is kept as
+    a new segment (nothing is dropped).
 
     Raises:
         ValueError: if *audio* is not 1-D float32, or *sample_rate* is not
@@ -254,17 +254,21 @@ def vad_segments(
             speech_pad_ms=speech_pad_ms,
         )
         # If speech reached the start of this slice, merge with the
-        # previous slice's last segment — unless the merge would exceed
-        # the max_speech_s cap, in which case extend the previous segment
-        # to the boundary so the segments stay contiguous.
+        # previous slice's last segment (continuous speech across the
+        # boundary stays one segment), unless the merge would exceed the
+        # max_speech_s cap — in that case the previous segment is cut
+        # at the boundary and the tail is kept as a new segment, so the
+        # speech after the boundary is not dropped.
         if found and found[0][0] <= 0 and segments:
             merged_end = found[0][1] + base
             max_speech_samples = int(sample_rate * max_speech_s)
             if merged_end - segments[-1][0] <= max_speech_samples:
                 segments[-1][1] = merged_end
+                found = found[1:]
             else:
                 segments[-1][1] = base
-            found = found[1:]
+                segments.append([base, merged_end])
+                found = found[1:]
         for start, end in found:
             segments.append([start + base, end + base])
         base += chunk_samples

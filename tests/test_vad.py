@@ -334,6 +334,45 @@ def test_long_audio_slices_are_processed():
     assert len(segs) == 2
 
 
+def test_continuous_speech_across_boundary_with_default_cap():
+    """120 s continuous speech with the default 60 s cap: nothing is dropped.
+
+    Regression: the merge at the 60 s slice boundary used to clamp the
+    previous segment to the boundary and discard the unterminated tail,
+    losing all speech after 60 s. The tail must survive as a new segment.
+    """
+    sr = 16000
+    total = 120 * sr
+    n_windows = total // 512
+    probs = _speech(n_windows)
+    audio = np.zeros(total, dtype=np.float32)
+    model = ProbModel(probs)
+    segs = vad_segments(audio, model)  # default max_speech_s=60
+    assert len(segs) >= 2
+    # The speech after the 60 s boundary must be attributed to a segment
+    # (segment granularity is one 32 ms window, so allow one window of slack).
+    assert segs[-1].end >= total - 2 * 512
+    # The last segment starts at or before the boundary, no unattributed gap.
+    assert segs[-1].start <= 60 * sr
+
+
+def test_blip_ending_at_slice_boundary_keeps_tail():
+    """Speech 2 s-60 s (ending exactly at the boundary) keeps the tail."""
+    sr = 16000
+    total = 120 * sr
+    n_windows = total // 512
+    s_start = int(2 * sr) // 512
+    s_end = int(60 * sr) // 512
+    probs = _silence(s_start) + _speech(s_end - s_start) + _silence(n_windows - s_end)
+    audio = np.zeros(total, dtype=np.float32)
+    model = ProbModel(probs)
+    segs = vad_segments(audio, model)  # default max_speech_s=60
+    assert len(segs) == 1
+    assert segs[0].start < 2 * sr
+    # The tail up to the boundary must not be dropped by the clamp path.
+    assert segs[0].end >= 60 * sr - 100
+
+
 def test_speech_across_slice_boundary_stays_one_segment():
     """Speech that crosses the 60 s slice boundary stays a single segment."""
     sr = 16000
