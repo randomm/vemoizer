@@ -12,6 +12,7 @@ dependencies = [
     "soundfile==0.14.0",
     "huggingface-hub",
     "parakeet-mlx",
+    "mlx-whisper",
     "mlx",
     "safetensors",
 ]
