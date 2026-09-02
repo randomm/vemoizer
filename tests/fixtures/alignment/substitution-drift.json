@@ -1,0 +1,29 @@
+{
+  "description": "Single-word substitution where one model splits the word across two onsets (drift). Words A: 'sähköinen' at 0.80; words B: 'sähkö' at 0.78 + 'inen' at 0.95. The mismatching region must be flagged as a disputed span covering roughly [0.78, 0.95].",
+  "a": [
+    {"word": "tänään", "start": 0.10, "end": 0.35},
+    {"word": "kävimme", "start": 0.40, "end": 0.65},
+    {"word": "kaupassa", "start": 0.70, "end": 0.90},
+    {"word": "ja", "start": 0.95, "end": 1.05},
+    {"word": "ostimme", "start": 1.10, "end": 1.30},
+    {"word": "sähköinen", "start": 1.35, "end": 1.65},
+    {"word": "näytön", "start": 1.70, "end": 1.90},
+    {"word": "koneen", "start": 1.95, "end": 2.10}
+  ],
+  "b": [
+    {"word": "tänään", "start": 0.10, "end": 0.35},
+    {"word": "kävimme", "start": 0.40, "end": 0.65},
+    {"word": "kaupassa", "start": 0.70, "end": 0.90},
+    {"word": "ja", "start": 0.95, "end": 1.05},
+    {"word": "ostimme", "start": 1.10, "end": 1.30},
+    {"word": "sähkö", "start": 1.33, "end": 1.50},
+    {"word": "inen", "start": 1.52, "end": 1.65},
+    {"word": "näytön", "start": 1.70, "end": 1.90},
+    {"word": "koneen", "start": 1.95, "end": 2.10}
+  ],
+  "language_a": "fi",
+  "language_b": "fi",
+  "expected_disputed_spans": [
+    {"start": 1.33, "end": 1.65, "a_words": ["sähköinen"], "b_words": ["sähkö", "inen"]}
+  ]
+}
