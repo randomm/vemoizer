@@ -1,0 +1,7 @@
+# [llm] section with timeout_seconds as an int (TOML int). Must parse
+# successfully — the client accepts both int and float timeouts.
+[llm]
+base_url = "https://api.example.com/v1"
+model = "gpt-4o-mini"
+api_key_env = "VEMOIZER_LLM_API_KEY"
+timeout_seconds = 5

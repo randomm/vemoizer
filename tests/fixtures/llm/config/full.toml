@@ -1,0 +1,6 @@
+# Full [llm] section: all four keys present and valid.
+[llm]
+base_url = "https://api.example.com/v1"
+model = "gpt-4o-mini"
+api_key_env = "VEMOIZER_LLM_API_KEY"
+timeout_seconds = 10

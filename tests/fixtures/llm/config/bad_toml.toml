@@ -1,0 +1,2 @@
+# Not valid TOML — the parser must fail open (return None).
+this is not [toml] = = =

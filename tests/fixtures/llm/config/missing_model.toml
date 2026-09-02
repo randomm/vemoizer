@@ -1,0 +1,5 @@
+# [llm] section present but model missing → invalid, returns None.
+[llm]
+base_url = "https://api.example.com/v1"
+api_key_env = "VEMOIZER_LLM_API_KEY"
+timeout_seconds = 10

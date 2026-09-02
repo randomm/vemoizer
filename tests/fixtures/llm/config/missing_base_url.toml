@@ -1,0 +1,5 @@
+# [llm] section present but base_url missing → invalid, returns None.
+[llm]
+model = "gpt-4o-mini"
+api_key_env = "VEMOIZER_LLM_API_KEY"
+timeout_seconds = 10

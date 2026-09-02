@@ -1,0 +1,5 @@
+# [llm] section present but api_key_env missing → invalid, returns None.
+[llm]
+base_url = "https://api.example.com/v1"
+model = "gpt-4o-mini"
+timeout_seconds = 10

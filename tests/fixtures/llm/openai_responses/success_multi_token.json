@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-test-0007",
+  "object": "chat.completion",
+  "created": 1730000006,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "MLX-pohjainen sovellus käynnistyy"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 42,
+    "completion_tokens": 9,
+    "total_tokens": 51
+  }
+}

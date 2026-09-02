@@ -5,6 +5,7 @@ description = "Local-first CLI: Finnish/English code-switched voice memos to tex
 requires-python = ">=3.11"
 dependencies = [
     "typer",
+    "httpx",
     "silero-vad==6.2.1",
     "onnxruntime==1.29.0",
     "numpy",

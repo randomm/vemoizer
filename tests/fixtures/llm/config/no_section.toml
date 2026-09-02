@@ -1,0 +1,3 @@
+# No [llm] section at all. load_config() must return None.
+[other]
+key = "value"

@@ -1,0 +1,10 @@
+{
+  "span_text": "The pythons are running",
+  "candidates": [
+    {"source": "parakeet", "text": "The pythons are running"},
+    {"source": "canary", "text": "The Pythons are running"},
+    {"source": "whisper", "text": "The pythons are running"}
+  ],
+  "context": "Test run on the CI pipeline",
+  "expected": "The Pythons are running"
+}
