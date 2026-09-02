@@ -359,7 +359,8 @@ def test_render_pull_report_failure_line() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_transcribe_placeholder_still_works() -> None:
+def test_transcribe_missing_file_fails_closed() -> None:
     result = runner.invoke(app, ["transcribe", "memo.m4a"])
     assert result.exit_code == 1
-    assert "not implemented" in result.stderr
+    assert result.stdout == ""
+    assert "not found" in result.stderr
