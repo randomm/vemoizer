@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Local-first CLI: Finnish/English code-switched voice memos to text and Markdown via a consensus ASR pipeline."
 requires-python = ">=3.11"
 dependencies = [
+    "typer",
     "silero-vad==6.2.1",
     "onnxruntime==1.29.0",
     "numpy",
