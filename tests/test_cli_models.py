@@ -72,7 +72,7 @@ def _make_http_error(status_code: int, message: str):
 
 
 def _empty_sizes() -> dict[str, int]:
-    return {"decode-a": 0, "decode-b": 0, "redecode": 0}
+    return {"parakeet": 0, "canary": 0, "whisper-finnish": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -322,13 +322,13 @@ def test_reject_short_sha_revision() -> None:
 
 
 def test_parakeet_constants_match_registry() -> None:
-    registry = {s.name: s for s in models_mod.MODELS}["decode-a"]
+    registry = {s.name: s for s in models_mod.MODELS}["parakeet"]
     assert registry.repo_id == PARAKEET_MODEL_ID
     assert registry.revision == PARAKEET_MODEL_REVISION
 
 
 def test_canary_constants_match_registry() -> None:
-    registry = {s.name: s for s in models_mod.MODELS}["decode-b"]
+    registry = {s.name: s for s in models_mod.MODELS}["canary"]
     assert registry.repo_id == CANARY_MODEL_ID
     assert registry.revision == CANARY_MODEL_REVISION
 
@@ -349,7 +349,7 @@ def test_render_pull_report_no_sizes() -> None:
 def test_render_pull_report_failure_line() -> None:
     spec = models_mod.MODELS[0]
     result = models_mod.PulledModel(spec, None, "some error", 0.1)
-    report = models_mod.render_pull_report([result], {"decode-a": 0})
+    report = models_mod.render_pull_report([result], {"parakeet": 0})
     assert "FAILED" in report
     assert "some error" in report
 

@@ -13,6 +13,13 @@ loads from. The transcriber modules keep their own ``MODEL_ID`` /
 two against each other so they cannot drift. The re-decode model
 (whisper-large-finnish-v3, issue #8) lives only here until its
 transcriber lands.
+
+``MODELS`` is the canonical tuple of :class:`ModelSpec` (friendly name,
+HF repo, pinned SHA) in pipeline order. ``MODEL_REGISTRY`` and
+:func:`get_model` expose the same models as :class:`ModelEntry` for
+name-keyed lookup. ``pull_model`` / ``pull_all`` download a single model or
+all three and return local snapshot paths; ``pull_models`` is the
+CLI-facing variant that captures per-model failures instead of aborting.
 """
 
 from __future__ import annotations
@@ -23,13 +30,21 @@ from dataclasses import dataclass
 from pathlib import Path
 
 __all__ = [
+    "ModelSpec",
+    "ModelEntry",
     "PulledModel",
     "MODELS",
+    "MODEL_REGISTRY",
+    "get_model",
     "pull_models",
+    "pull_model",
+    "pull_all",
     "assert_all_revisions_pinned",
     "cache_dir",
     "cache_size",
+    "cache_size_bytes",
     "format_size",
+    "format_pull_error",
     "render_pull_report",
 ]
 
@@ -42,7 +57,7 @@ _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 class ModelSpec:
     """One revision-pinned model in the consensus set."""
 
-    name: str  # pipeline role: "decode-a", "decode-b", "redecode"
+    name: str  # friendly name: "parakeet", "canary", "whisper-finnish"
     repo_id: str
     revision: str  # full-SHA commit, never a branch name
 
@@ -59,21 +74,52 @@ class PulledModel:
 
 MODELS: tuple[ModelSpec, ...] = (
     ModelSpec(
-        name="decode-a",
+        name="parakeet",
         repo_id="mlx-community/parakeet-tdt-0.6b-v3",
         revision="ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15",
     ),
     ModelSpec(
-        name="decode-b",
+        name="canary",
         repo_id="Mediform/canary-1b-v2-mlx-q8",
         revision="0b6b32ee10f30c89e3ead7249bb636445e3019ee",
     ),
     ModelSpec(
-        name="redecode",
+        name="whisper-finnish",
         repo_id="Finnish-NLP/whisper-large-finnish-v3",
         revision="b23deb0b3855c829ffe04cb1c6709757ff16d49c",
     ),
 )
+
+
+@dataclass(frozen=True)
+class ModelEntry:
+    """One consensus-pipeline model: registry name, HF repo, pinned SHA."""
+
+    name: str
+    repo_id: str
+    revision: str
+
+    @property
+    def display(self) -> str:
+        return f"{self.name} ({self.repo_id}@{self.revision[:8]}…)"
+
+
+_MODELS_ENTRIES: tuple[ModelEntry, ...] = tuple(
+    ModelEntry(name=s.name, repo_id=s.repo_id, revision=s.revision) for s in MODELS
+)
+
+#: Lookup by name: ``{name: entry}``, stable for dict consumers.
+MODEL_REGISTRY: dict[str, ModelEntry] = {e.name: e for e in _MODELS_ENTRIES}
+
+
+def get_model(name: str) -> ModelEntry:
+    """Look up a registry entry by name.
+
+    Raises ``KeyError`` with the set of known names when *name* is unknown.
+    """
+    if name in MODEL_REGISTRY:
+        return MODEL_REGISTRY[name]
+    raise KeyError(f"unknown model {name!r}; known: {sorted(MODEL_REGISTRY)}")
 
 
 def assert_all_revisions_pinned(models: tuple[ModelSpec, ...] = MODELS) -> None:
@@ -132,6 +178,22 @@ def cache_size(models: tuple[ModelSpec, ...] = MODELS) -> dict[str, int]:
     return sizes
 
 
+def cache_size_bytes(name: str, cache_dir: str | None = None) -> int | None:
+    """Byte size of the pinned snapshot for *name*, or ``None`` if absent.
+
+    Uses ``huggingface_hub.scan_cache_dir`` so the walk respects the HF
+    cache layout (``models--<org>--<name>``); no raw filesystem globbing.
+    """
+    from huggingface_hub import scan_cache_dir
+
+    entry = get_model(name)
+    info = scan_cache_dir(cache_dir)
+    for repo in info.repos:
+        if repo.repo_id == entry.repo_id:
+            return repo.size_on_disk
+    return None
+
+
 def _dir_size(path: Path) -> int:
     total = 0
     for file in path.rglob("*"):
@@ -150,6 +212,36 @@ def format_size(nbytes: int) -> str:
             return f"{value:.1f} {unit}"
         value /= 1024.0
     raise AssertionError("unreachable")  # pragma: no cover
+
+
+def pull_model(name: str, cache_dir: str | None = None) -> str:
+    """Download (revision-pinned) the *name* model and return the local path.
+
+    ``snapshot_download`` is idempotent: a warm cache makes no network call
+    and returns the cached snapshot. If ``HF_HUB_OFFLINE=1`` is set and the
+    snapshot is not cached, ``huggingface_hub.errors.OfflineModeIsEnabled``
+    is raised; use :func:`format_pull_error` to turn it into a user-facing
+    message.
+    """
+    from huggingface_hub import snapshot_download
+
+    entry = get_model(name)
+    if cache_dir is None:
+        return str(snapshot_download(entry.repo_id, revision=entry.revision))
+    return str(
+        snapshot_download(entry.repo_id, revision=entry.revision, cache_dir=cache_dir)
+    )
+
+
+def pull_all(cache_dir: str | None = None) -> dict[str, str]:
+    """Pre-warm every registry model; returns ``{name: local_path}``.
+
+    Iterates in pipeline order (parakeet, canary, whisper-finnish).
+    """
+    return {
+        entry.name: pull_model(entry.name, cache_dir=cache_dir)
+        for entry in _MODELS_ENTRIES
+    }
 
 
 def pull_models(
@@ -232,6 +324,49 @@ def _describe_hf_error(exc: Exception) -> str:
         detail = getattr(exc, "message", str(exc))
         return f"model download failed (HTTP {status}): {detail}".strip()
     return f"failed to download model: {type(exc).__name__}"
+
+
+def format_pull_error(exc: Exception) -> str:
+    """Format a :func:`pull_model` failure for user-facing display.
+
+    ``OfflineModeIsEnabled`` gets a distinct message that names
+    ``HF_HUB_OFFLINE`` — the generic bucket would not explain that the fix
+    is either to clear the flag or to run ``models pull`` online first.
+    """
+    from huggingface_hub.errors import (
+        GatedRepoError,
+        HfHubHTTPError,
+        OfflineModeIsEnabled,
+    )
+
+    if isinstance(exc, OfflineModeIsEnabled):
+        return (
+            "HuggingFace is in offline mode (HF_HUB_OFFLINE=1) and the "
+            "pinned snapshot is not in the local cache. Run 'vemoizer "
+            "models pull' once with network access, or unset "
+            "HF_HUB_OFFLINE to let the download proceed."
+        )
+    if isinstance(exc, GatedRepoError):
+        return (
+            f"{exc} — accept the license at "
+            f"https://huggingface.co and provide an access token."
+        )
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None) if response is not None else None
+    if isinstance(exc, HfHubHTTPError) and status in {401, 403}:
+        return (
+            f"Authentication failed for this model ({status}). "
+            "Check your HF access token."
+        )
+    if isinstance(exc, HfHubHTTPError) and status == 404:
+        return (
+            "Repository not found (404). The pinned revision may have been "
+            "deleted upstream."
+        )
+    return (
+        f"Model download failed ({type(exc).__name__}). "
+        "Check network access and the HuggingFace repository."
+    )
 
 
 def render_pull_report(results: list[PulledModel], sizes: dict[str, int] | None) -> str:
