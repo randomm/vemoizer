@@ -25,6 +25,7 @@ from pathlib import Path
 import typer
 
 from vemoizer.battery import on_battery
+from vemoizer.eval_cli import register_eval
 from vemoizer.low_memory import apply_low_memory_mode, default_low_memory
 
 app = typer.Typer(
@@ -38,6 +39,7 @@ models_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(models_app, name="models")
+register_eval(app)
 
 
 def _warn_on_battery() -> None:
