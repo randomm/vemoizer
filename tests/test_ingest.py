@@ -47,10 +47,7 @@ def _fake_proc(
     n_samples: int = 16_000, returncode: int = 0, stderr: bytes = b""
 ) -> subprocess.CompletedProcess:
     """Create a fake subprocess result with n_samples of float32 data."""
-    if n_samples > 0:
-        fake_out = np.zeros(n_samples, dtype=np.float32).tobytes()
-    else:
-        fake_out = b""
+    fake_out = np.zeros(n_samples, dtype=np.float32).tobytes() if n_samples > 0 else b""
     return subprocess.CompletedProcess(
         args=[], returncode=returncode, stdout=fake_out, stderr=stderr
     )
