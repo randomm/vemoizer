@@ -1,0 +1,1 @@
+Meidän deployment pipeline käyttää GitHub Actions ja Kamal kun deployaamme productioniin.

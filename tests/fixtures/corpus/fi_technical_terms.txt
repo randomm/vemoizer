@@ -1,0 +1,1 @@
+Backendissa on useita API rate limit ja se pitää huomioida load testingissä.
