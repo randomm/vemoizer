@@ -18,9 +18,12 @@ runner = CliRunner()
 def test_help_exits_zero_and_shows_usage() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    # single-command Typer app: --help renders the transcribe command help
-    assert "Usage: transcribe" in result.stdout
+    # multi-command Typer app: --help shows the command list
+    assert "Usage: vemoizer" in result.stdout
     assert "--help" in result.stdout
+    # both subcommands are listed
+    assert "transcribe" in result.stdout
+    assert "models" in result.stdout
 
 
 def test_transcribe_help_lists_flags() -> None:

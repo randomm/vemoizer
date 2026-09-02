@@ -10,6 +10,10 @@ macOS UX polish (issue #14):
 - Caffeinate — hold a wake assertion during transcription
 - ``--low-memory`` / ``--no-low-memory`` — low-memory model-loading mode
 
+Model management (issue #3):
+- ``models pull`` — pre-download the three revision-pinned consensus models
+  and report per-model + total cache sizes
+
 Progress bars render to stderr via rich; transcripts render to stdout
 (rich auto-detects TTY and disables progress on non-TTY stderr).
 """
@@ -28,6 +32,12 @@ app = typer.Typer(
     help="Local-first voice memo transcription (Finnish/English consensus).",
     no_args_is_help=True,
 )
+models_app = typer.Typer(
+    name="models",
+    help="Manage the revision-pinned consensus models.",
+    no_args_is_help=True,
+)
+app.add_typer(models_app, name="models")
 
 
 def _warn_on_battery() -> None:
@@ -37,6 +47,18 @@ def _warn_on_battery() -> None:
             "warning: running on battery power — transcription may take a while",
             err=True,
         )
+
+
+@models_app.command("pull")
+def models_pull() -> None:
+    """Pre-download and revision-pin all models, then report cache sizes."""
+    from vemoizer.models import MODELS, cache_size, pull_models, render_pull_report
+
+    results = pull_models(MODELS)
+    sizes = cache_size(MODELS)
+    typer.echo(render_pull_report(results, sizes))
+    if any(r.error is not None for r in results):
+        raise typer.Exit(code=1)
 
 
 def _resolve_low_memory(
