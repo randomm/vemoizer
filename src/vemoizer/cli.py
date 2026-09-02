@@ -20,11 +20,15 @@ Progress bars render to stderr via rich; transcripts render to stdout
 
 from __future__ import annotations
 
+import logging
+import sys
 from pathlib import Path
 
 import typer
 
 from vemoizer.battery import on_battery
+from vemoizer.caffeinate import caffeinate_context
+from vemoizer.copy import copy_to_clipboard
 from vemoizer.eval_cli import register_eval
 from vemoizer.low_memory import apply_low_memory_mode, default_low_memory
 
@@ -98,6 +102,11 @@ def transcribe(
         "--verbose",
         help="Emit per-stage progress logging to stderr.",
     ),
+    out: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--out",
+        help="Single output file path; the first requested format is written there.",
+    ),
     copy: bool = typer.Option(  # noqa: B008
         False,
         "--copy",
@@ -121,13 +130,53 @@ def transcribe(
     # Battery warning (fail-open: pmset errors are silent)
     _warn_on_battery()
 
-    # Placeholder: the full consensus pipeline is not wired yet.
-    # When it lands, the transcribe work will run inside
-    # caffeinate_context() and the transcript will be copied
-    # to the clipboard when --copy is set.
-    del files, format, quiet, verbose, copy
-    typer.echo("transcribe: not implemented yet", err=True)
-    raise typer.Exit(code=1)
+    if verbose:
+        logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+
+    from vemoizer.output.formatters import FORMAT_EXTENSIONS
+    from vemoizer.output.naming import nfc_stem_and_suffix
+    from vemoizer.pipeline import transcribe_file
+
+    formats = [f.strip() for f in format.split(",") if f.strip()]
+    exit_code = 0
+    with caffeinate_context():
+        for file in files:
+            result = transcribe_file(file)
+            if "error" in result:
+                typer.echo(f"error: {result['error']}", err=True)
+                exit_code = 1
+                continue
+            stem, _suffix = nfc_stem_and_suffix(file)
+            if out is not None:
+                _write_output(out, result, formats[0] if formats else "txt")
+            else:
+                for fmt in formats:
+                    _write_output(Path(f"{stem}{FORMAT_EXTENSIONS[fmt]}"), result, fmt)
+            if copy:
+                copy_to_clipboard(result["text"])
+            if not quiet:
+                typer.echo(f"wrote transcript for {file.name}")
+    if exit_code:
+        raise typer.Exit(code=exit_code)
+
+
+def _write_output(target: Path, result: dict, fmt: str) -> None:
+    """Render *result* in *fmt* and write it to *target* (``-`` = stdout)."""
+    from vemoizer.output.formatters import format_transcript
+
+    try:
+        rendered = format_transcript(result, fmt)
+    except (ValueError, KeyError) as e:
+        typer.echo(f"error: {e}", err=True)
+        return
+    if str(target) == "-":
+        typer.echo(rendered)
+        return
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(rendered, encoding="utf-8")
+    except OSError as e:
+        typer.echo(f"error: could not write {target}: {e}", err=True)
 
 
 def main() -> None:

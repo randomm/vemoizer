@@ -38,22 +38,40 @@ def test_transcribe_help_lists_flags() -> None:
     assert "One or more audio files" in result.stdout
 
 
-def test_transcribe_placeholder_fails_closed() -> None:
-    result = runner.invoke(app, ["transcribe", "memo.m4a"])
+def test_transcribe_missing_file_fails_closed(tmp_path) -> None:
+    missing = tmp_path / "no-such-memo.m4a"
+    result = runner.invoke(app, ["transcribe", str(missing)])
     assert result.exit_code == 1
     # error/status goes to stderr, stdout stays clean for transcripts
     assert result.stdout == ""
-    assert "not implemented" in result.stderr
+    assert "not found" in result.stderr
 
 
-def test_transcribe_placeholder_with_all_flags() -> None:
+def test_transcribe_with_all_flags(tmp_path, monkeypatch) -> None:
+    import vemoizer.pipeline as pipeline_module
+
+    def fake_transcribe_file(path, **kwargs):
+        return {"text": "moikka maailma", "segments": []}
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.chdir(tmp_path)
     result = runner.invoke(
         app,
-        ["transcribe", "a.m4a", "b.m4a", "--format", "txt,srt", "--quiet", "--verbose"],
+        [
+            "transcribe",
+            "a.m4a",
+            "b.m4a",
+            "--format",
+            "txt,srt",
+            "--quiet",
+            "--verbose",
+            "--out",
+            "-",
+        ],
     )
-    # flags are accepted (parsed before the placeholder body runs)
-    assert result.exit_code == 1
-    assert result.stdout == ""
+    # flags are accepted and the pipeline result is emitted on stdout
+    assert result.exit_code == 0
+    assert result.stdout.count("moikka maailma") == 2
 
 
 def test_main_is_callable_entry_point() -> None:
