@@ -10,6 +10,7 @@ dependencies = [
     "numpy",
     "soundfile==0.14.0",
     "huggingface-hub",
+    "mlx-whisper>=0.4.3",
     "parakeet-mlx",
     "mlx",
     "safetensors",

@@ -32,6 +32,7 @@ from vemoizer.redecode import (
     MODEL_REVISION,
     ReDecodeResult,
     WhisperReDecodeTranscriber,
+    _to_result,
     extract_slice,
 )
 from vemoizer.spans import Span
@@ -119,12 +120,22 @@ def loaded_transcriber() -> Generator[
     transcriber and the mocked ``transcribe`` for call assertions.
     """
     mock_whisper = MagicMock()
-    mock_whisper.load_model.return_value = object()  # a fake "model"
+    mock_whisper.load_models.load_model.return_value = object()  # a fake "model"
+    # Real mlx_whisper.transcribe returns {text, segments, language}; word
+    # timestamps live inside each segment, not at the top level.
     mock_whisper.transcribe.return_value = {
         "text": "tässä on teksti",
-        "words": [
-            {"word": "tässä", "start": 0.0, "end": 0.2},
-            {"word": "on", "start": 0.2, "end": 0.35},
+        "language": "fi",
+        "segments": [
+            {
+                "start": 0.0,
+                "end": 0.35,
+                "text": " tässä on",
+                "words": [
+                    {"word": "tässä", "start": 0.0, "end": 0.2},
+                    {"word": "on", "start": 0.2, "end": 0.35},
+                ],
+            }
         ],
     }
 
@@ -142,6 +153,7 @@ def loaded_transcriber() -> Generator[
         transcriber = WhisperReDecodeTranscriber()
         transcriber.model = object()  # bypass the real load
         transcriber._model_path = "/tmp/pinned/whisper-large-finnish-v3"
+        transcriber._mlx_whisper = mock_whisper  # use the mocked module
         transcriber._loaded = True
         mock_ensure.return_value = None  # no-op (already loaded)
         yield transcriber, mock_whisper.transcribe
@@ -269,6 +281,43 @@ def test_load_failure_fails_open() -> None:
     assert result.text == ""
 
 
+def test_load_failure_does_not_permanently_disable_redecode() -> None:
+    """A transient download failure must not set ``_loaded``.
+
+    ``_ensure_loaded`` only marks the model as loaded *after* a
+    successful load. A failure on the first call must allow a retry on
+    the next call, so a transient network blip does not silently disable
+    re-decode for the rest of the run.
+    """
+    mock_whisper = MagicMock()
+    mock_whisper.load_models.load_model.return_value = object()
+    mock_whisper.transcribe.return_value = {"text": "x", "words": []}
+
+    with (
+        patch(
+            "huggingface_hub.snapshot_download",
+            side_effect=[
+                RuntimeError("DNS blip"),
+                "/tmp/pinned/path",
+            ],
+        ),
+        patch.dict("sys.modules", {"mlx_whisper": mock_whisper}),
+    ):
+        transcriber = WhisperReDecodeTranscriber()
+        audio = _audio(1.0)
+        # First call: load fails; _loaded must stay False so a retry is
+        # possible.
+        result = transcriber.transcribe_span(audio, Span(0.0, 1.0))
+        assert result.ok is False
+        assert transcriber._loaded is False
+
+        # Second call: a fresh snapshot_download succeeds; the model
+        # loads and the span re-decodes.
+        result = transcriber.transcribe_span(audio, Span(0.0, 1.0))
+        assert result.ok is True
+        assert transcriber._loaded is True
+
+
 # ---------------------------------------------------------------------------
 # Lazy loading: nothing at construction, revision-pinned at first use
 # ---------------------------------------------------------------------------
@@ -281,9 +330,31 @@ def test_construction_does_not_download() -> None:
         assert transcriber.model is None
 
 
+def test_load_model_attribute_path_exists_in_installed_mlx_whisper() -> None:
+    """Pin the ``load_models.load_model`` attribute path against the real API.
+
+    The re-decode loads via ``mlx_whisper.load_models.load_model`` because
+    the top-level ``__init__`` does not re-export it. If a future
+    mlx-whisper release re-exports it (the documented public API), this
+    test fails and the load path must be revisited.
+    """
+    import mlx_whisper
+
+    assert hasattr(mlx_whisper, "load_models")
+    assert hasattr(mlx_whisper.load_models, "load_model")
+    assert not hasattr(mlx_whisper, "load_model")
+
+
 def test_first_use_triggers_revision_pinned_download() -> None:
-    mock_whisper = MagicMock()
-    mock_whisper.load_model.return_value = object()
+    # spec against the REAL module: MagicMock(spec=...) rejects attributes
+    # that do not exist on it, so a drift in the ``load_models.load_model``
+    # path (e.g. a re-export at top level, or a rename in the submodule)
+    # surfaces as an AttributeError here rather than a silent fail-open in
+    # production.
+    import mlx_whisper
+
+    mock_whisper = MagicMock(spec=mlx_whisper)
+    mock_whisper.load_models.load_model.return_value = object()
     mock_snapshot = MagicMock(return_value="/tmp/pinned/path")
     with (
         patch("huggingface_hub.snapshot_download", mock_snapshot),
@@ -292,13 +363,13 @@ def test_first_use_triggers_revision_pinned_download() -> None:
         transcriber = WhisperReDecodeTranscriber()
         audio = _audio(1.0)
         # transcribe_span will try to call mlx_whisper.transcribe on the mock;
-        # the model is a bare object (load_model.return_value), so pass a
-        # mock transcribe too.
+        # the model is a bare object (load_models.load_model.return_value),
+        # so pass a mock transcribe too.
         mock_whisper.transcribe.return_value = {"text": "x", "words": []}
         transcriber.transcribe_span(audio, Span(0.0, 1.0))
         mock_snapshot.assert_called_once_with(MODEL_ID, revision=MODEL_REVISION)
         # The model was loaded from the local path, not the repo ID.
-        mock_whisper.load_model.assert_called_once_with("/tmp/pinned/path")
+        mock_whisper.load_models.load_model.assert_called_once_with("/tmp/pinned/path")
 
 
 def test_transcribe_protocol_surface_concatenates_ok_results(
@@ -308,9 +379,16 @@ def test_transcribe_protocol_surface_concatenates_ok_results(
     mock_whisper_transcribe.side_effect = [
         {
             "text": "ensimmäinen",
-            "words": [{"word": "ensimmäinen", "start": 0.0, "end": 0.5}],
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 0.5,
+                    "text": " ensimmäinen",
+                    "words": [{"word": "ensimmäinen", "start": 0.0, "end": 0.5}],
+                }
+            ],
         },
-        {"text": "toinen", "words": []},
+        {"text": "toinen", "segments": []},
     ]
     audio = _audio(10.0)
     result = transcriber.transcribe(audio, spans=[Span(0.0, 1.0), Span(5.0, 6.0)])
@@ -320,13 +398,35 @@ def test_transcribe_protocol_surface_concatenates_ok_results(
     assert result["words"][0]["word"] == "ensimmäinen"
 
 
+def test_transcribe_protocol_surface_rtf_is_ratio_of_reported_fields(
+    loaded_transcriber: tuple[WhisperReDecodeTranscriber, MagicMock],
+) -> None:
+    """rtf must be the ratio of the two reported fields.
+
+    The adapter measures wall-clock across the per-span decode calls only;
+    the model load (which can take seconds on the first call) is timed and
+    logged separately in _ensure_loaded and must not leak into the rtf
+    ratio, or the first call's figure is meaningless.
+    """
+    transcriber, mock_whisper_transcribe = loaded_transcriber
+    mock_whisper_transcribe.return_value = {"text": "ok", "segments": []}
+    audio = _audio(5.0)
+    result = transcriber.transcribe(audio, spans=[Span(0.5, 1.0)])
+    # rtf = transcribe_time / audio_duration, both as reported by the
+    # adapter (the load, if any, is outside the timed window).
+    assert result["audio_duration"] == pytest.approx(5.0)
+    assert result["rtf"] == pytest.approx(
+        result["transcribe_time"] / result["audio_duration"]
+    )
+
+
 def test_transcribe_protocol_surface_skips_failed_span(
     loaded_transcriber: tuple[WhisperReDecodeTranscriber, MagicMock],
 ) -> None:
     transcriber, mock_whisper_transcribe = loaded_transcriber
     # First span succeeds, second fails (fail-open for that span only).
     mock_whisper_transcribe.side_effect = [
-        {"text": "ok", "words": []},
+        {"text": "ok", "segments": []},
         RuntimeError("timeout"),
     ]
     audio = _audio(10.0)
@@ -339,6 +439,50 @@ def test_transcribe_protocol_surface_skips_failed_span(
 # ---------------------------------------------------------------------------
 # ReDecodeResult invariants
 # ---------------------------------------------------------------------------
+
+
+def test_to_result_flattens_segment_word_timestamps() -> None:
+    """``transcribe`` returns ``{text, segments, language}`` — word
+    timestamps live inside each segment, not at the top level. The
+    flattening must match the real API shape (no top-level ``words`` key).
+    """
+    raw = {
+        "text": "moi kaikki",
+        "language": "fi",
+        "segments": [
+            {
+                "start": 0.0,
+                "end": 0.3,
+                "text": " moi",
+                "words": [{"word": "moi", "start": 0.0, "end": 0.3}],
+            },
+            {
+                "start": 0.3,
+                "end": 0.9,
+                "text": " kaikki",
+                "words": [{"word": "kaikki", "start": 0.3, "end": 0.9}],
+            },
+        ],
+    }
+    result = _to_result(Span(2.0, 3.0), raw)
+    assert [w["word"] for w in result.words] == ["moi", "kaikki"]
+    # Shifted back onto the recording timeline (slice starts at 2.0s).
+    assert result.words[0]["start"] == pytest.approx(2.0)
+    assert result.words[1]["end"] == pytest.approx(2.9)
+    assert result.text == "moi kaikki"
+    assert result.ok is True
+
+
+def test_to_result_handles_missing_words_and_segments() -> None:
+    # ``words`` is absent from every segment, or ``segments`` is missing
+    # entirely: word-level output degrades to empty without crashing.
+    result = _to_result(Span(0.0, 1.0), {"text": "x", "segments": []})
+    assert result.words == []
+    result = _to_result(Span(0.0, 1.0), {"text": "x"})
+    assert result.words == []
+    # Segments without a ``words`` key (word_timestamps off for a slice).
+    result = _to_result(Span(0.0, 1.0), {"text": "x", "segments": [{"start": 0}]})
+    assert result.words == []
 
 
 def test_redecode_result_is_immutable() -> None:
