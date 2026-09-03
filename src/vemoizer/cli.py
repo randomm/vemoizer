@@ -95,11 +95,13 @@ def transcribe(
     quiet: bool = typer.Option(  # noqa: B008
         False,
         "--quiet",
+        "-q",
         help="Suppress the summary output.",
     ),
     verbose: bool = typer.Option(  # noqa: B008
         False,
         "--verbose",
+        "-v",
         help="Emit per-stage progress logging to stderr.",
     ),
     out: Path | None = typer.Option(  # noqa: B008
@@ -120,6 +122,11 @@ def transcribe(
             "Enable low-memory model-loading mode (auto-detected when "
             "not set; on by default for <=16 GiB RAM)."
         ),
+    ),
+    config: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        help="LLM config file (default: ~/.config/vemoizer/config.toml).",
     ),
     diarize: bool = typer.Option(  # noqa: B008
         False,
@@ -144,10 +151,21 @@ def transcribe(
     from vemoizer.pipeline import transcribe_file
 
     formats = [f.strip() for f in format.split(",") if f.strip()]
+    if out is not None and len(formats) > 1:
+        typer.echo(
+            "warning: --out takes a single file; only the first format "
+            f"({formats[0]}) is written to it",
+            err=True,
+        )
+
     exit_code = 0
     with caffeinate_context():
         for file in files:
-            result = transcribe_file(file, diarize=diarize)
+            result = transcribe_file(
+                file,
+                diarize=diarize,
+                config_path=str(config) if config is not None else None,
+            )
             for warning in result.pop("warnings", []):
                 typer.echo(warning, err=True)
             if "error" in result:

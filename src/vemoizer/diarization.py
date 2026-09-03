@@ -76,8 +76,13 @@ def diarize(audio: np.ndarray, *, device: str = "auto") -> DiarizationResult:
     on any load/inference exception. ``device`` may also be an explicit
     torch device name (e.g. ``"cpu"`` or ``"mps"``).
     """
+    import torch
+
+    # pyannote 4.x contract: {"waveform": Tensor(channel, time),
+    # "sample_rate": int}. The "audio" key means a file path and is
+    # rejected for in-memory arrays — with it, the stage could never run.
     waveforms = {
-        "audio": audio.astype(np.float32),
+        "waveform": torch.from_numpy(audio.astype(np.float32)).unsqueeze(0),
         "sample_rate": _CONTRACT_SAMPLE_RATE,
     }
 

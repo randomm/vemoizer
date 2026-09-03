@@ -124,3 +124,27 @@ def test_attribution_string_is_cc_by():
     )
     assert "CC-BY-4.0" in ATTRIBUTION
     assert DIARIZATION_REPO_ID == "pyannote/speaker-diarization-community-1"
+
+
+def test_pipeline_receives_waveform_tensor_not_ndarray(monkeypatch):
+    """pyannote 4.x expects {"waveform": Tensor(channel, time), "sample_rate"}.
+
+    The old {"audio": ndarray} key means "a file path" to pyannote and is
+    rejected at runtime — the stage could never actually run.
+    """
+    received = {}
+
+    def fake_pipeline(waveforms):
+        received.update(waveforms)
+        return _fake_diarization()
+
+    pipeline = mock.Mock(side_effect=fake_pipeline)
+    monkeypatch.setattr("vemoizer.diarization._load_pipeline", lambda device: pipeline)
+    diarize(_AUDIO, device="cpu")
+
+    assert "waveform" in received
+    assert "audio" not in received
+    assert received["sample_rate"] == 16_000
+    waveform = received["waveform"]
+    # (channel, time) with a leading singleton channel dim
+    assert tuple(waveform.shape) == (1, len(_AUDIO))

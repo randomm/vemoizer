@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Real voice memos and transcripts derived from them — never committed
+# (AGENTS.md "Never Commit"; closes the tracked half of issue #19).
+test_audio/
+tmp/
+
+# macOS
+.DS_Store
+
+# Local agent state
+.claude/
+.pi/
