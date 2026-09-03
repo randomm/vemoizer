@@ -39,6 +39,45 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures" / "output"
 #: segments + word timestamps). The golden files under
 #: ``tests/fixtures/output/`` are this dict rendered through each
 #: formatter.
+DIARIZED_TRANSCRIPT: dict = {
+    "text": (
+        "Käytimme aamupäivän debuggaamassa deploy pipeline issuea. "
+        "Ei mitään outoa, mutta CI oli aivan flaky. "
+        "Testataan uudestaan illalla, ehkä kun infra on ehtinyt "
+        "vääntyä takaisin."
+    ),
+    "language": "fi",
+    "speakers": ["SPEAKER_00", "SPEAKER_01"],
+    "segments": [
+        {
+            "start": 0.0,
+            "end": 2.0,
+            "text": "Käytimme aamupäivän debuggaamassa deploy pipeline issuea.",
+            "speaker": "SPEAKER_00",
+        },
+        {
+            "start": 2.0,
+            "end": 4.5,
+            "text": "Ei mitään outoa, mutta CI oli aivan flaky.",
+            "speaker": "SPEAKER_01",
+        },
+        {
+            "start": 4.5,
+            "end": 6.0,
+            "text": (
+                "Testataan uudestaan illalla, ehkä kun infra on ehtinyt "
+                "vääntyä takaisin."
+            ),
+            "speaker": "SPEAKER_00",
+        },
+    ],
+    "words": [
+        {"word": "Käytimme", "start": 0.0, "end": 0.2},
+        {"word": "Ei", "start": 2.0, "end": 2.1},
+        {"word": "Testataan", "start": 4.5, "end": 4.7},
+    ],
+}
+
 TRANSCRIPT: dict = {
     "text": (
         "Käytimme aamupäivän debuggaamassa deploy pipeline issuea. "
@@ -315,6 +354,122 @@ def test_format_vtt_no_segments_falls_back_to_words() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Speaker labels (optional --diarize output)
+# ---------------------------------------------------------------------------
+
+
+def test_txt_with_speaker_labels_prefixes_segments() -> None:
+    result = format_txt(DIARIZED_TRANSCRIPT)
+    assert result == (
+        "[SPEAKER_00] "
+        "Käytimme aamupäivän debuggaamassa deploy pipeline issuea.\n"
+        "[SPEAKER_01] "
+        "Ei mitään outoa, mutta CI oli aivan flaky.\n"
+        "[SPEAKER_00] "
+        "Testataan uudestaan illalla, ehkä kun infra on ehtinyt vääntyä takaisin.\n"
+    )
+
+
+def test_txt_mixed_segments_only_labels_labelled_ones() -> None:
+    transcript = {
+        "text": "a b c",
+        "segments": [
+            {"start": 0.0, "end": 1.0, "text": "a b", "speaker": "SPEAKER_00"},
+            {"start": 1.0, "end": 2.0, "text": "c"},
+        ],
+    }
+    assert format_txt(transcript) == "[SPEAKER_00] a b\nc\n"
+
+
+def test_txt_without_speaker_key_unchanged() -> None:
+    # No speaker anywhere: byte-identical to the pre-diarization output.
+    assert format_txt(TRANSCRIPT) == _expected("expected.txt")
+
+
+def test_txt_text_field_only_ignores_speaker_list() -> None:
+    # No segments: the text fallback has no per-line speaker to attach.
+    assert format_txt({"text": "solo", "speakers": ["SPEAKER_00"]}) == "solo\n"
+
+
+def test_json_includes_speakers_when_present() -> None:
+    parsed = json.loads(format_json(DIARIZED_TRANSCRIPT))
+    assert parsed["speakers"] == ["SPEAKER_00", "SPEAKER_01"]
+    assert parsed["segments"][0]["speaker"] == "SPEAKER_00"
+
+
+def test_json_omits_speakers_when_absent_or_empty() -> None:
+    parsed = json.loads(format_json({"text": "x", "speakers": []}))
+    assert "speakers" not in parsed
+    parsed = json.loads(format_json(TRANSCRIPT))
+    assert "speakers" not in parsed
+
+
+def test_srt_with_speaker_labels_prefixes_cues() -> None:
+    out = format_srt(DIARIZED_TRANSCRIPT)
+    blocks = out.rstrip("\n").split("\n\n")
+    assert len(blocks) == 3
+    assert blocks[0] == (
+        "1\n00:00:00,000 --> 00:00:02,000\n"
+        "[SPEAKER_00] Käytimme aamupäivän debuggaamassa deploy pipeline issuea."
+    )
+    assert blocks[1].endswith("[SPEAKER_01] Ei mitään outoa, mutta CI oli aivan flaky.")
+    assert blocks[-1].endswith(
+        "[SPEAKER_00] "
+        "Testataan uudestaan illalla, ehkä kun infra on ehtinyt vääntyä takaisin."
+    )
+
+
+def test_srt_without_speaker_key_unchanged() -> None:
+    assert format_srt(TRANSCRIPT) == _expected("expected.srt")
+
+
+def test_vtt_with_speaker_labels_prefixes_cues() -> None:
+    out = format_vtt(DIARIZED_TRANSCRIPT)
+    assert out.startswith("WEBVTT\n\n0\n00:00:00.000 --> 00:00:02.000\n")
+    assert (
+        "[SPEAKER_00] Käytimme aamupäivän debuggaamassa deploy pipeline issuea.\n"
+    ) in out
+    assert "[SPEAKER_01] Ei mitään outoa, mutta CI oli aivan flaky.\n" in out
+    assert "[SPEAKER_00] Testataan uudestaan illalla" in out
+
+
+def test_vtt_without_speaker_key_unchanged() -> None:
+    assert format_vtt(TRANSCRIPT) == _expected("expected.vtt")
+
+
+def test_captions_skip_segments_with_blank_text() -> None:
+    # Segments present but one carries whitespace-only text: no cue for it.
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "a b", "speaker": "SPEAKER_00"},
+        {"start": 1.0, "end": 2.0, "text": "   "},
+    ]
+    out = format_srt({"text": "a b", "segments": segments})
+    blocks = out.rstrip("\n").split("\n\n")
+    assert len(blocks) == 1
+    assert blocks[0].startswith("1\n00:00:00,000 --> 00:00:01,000\n")
+    assert "[SPEAKER_00] a b" in blocks[0]
+    assert "SPEAKER_01" not in out
+
+
+def test_vtt_no_segments_key_falls_back_to_words() -> None:
+    # No ``segments`` key at all: the caption builder uses the word-based
+    # cues, which carry no speaker labels.
+    words = [{"word": "a", "start": 0.0, "end": 1.0}]
+    out = format_vtt({"text": "a", "words": words})
+    assert out == "WEBVTT\n\n0\n00:00:00.000 --> 00:00:01.000\na\n"
+
+
+def test_captions_from_words_without_speakers_have_no_labels() -> None:
+    # The word-fallback path has no speaker data: labels never appear.
+    words = [
+        {"word": "a", "start": 0.0, "end": 1.0},
+        {"word": "b", "start": 1.0, "end": 2.0},
+    ]
+    assert "[" not in format_srt({"text": "a b", "words": words})
+    assert "[" not in format_vtt({"text": "a b", "words": words})
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
 
@@ -326,6 +481,12 @@ def test_format_transcript_dispatches_by_format() -> None:
     assert format_transcript(TRANSCRIPT, "json") == format_json(TRANSCRIPT)
     assert format_transcript(TRANSCRIPT, "srt") == format_srt(TRANSCRIPT)
     assert format_transcript(TRANSCRIPT, "vtt") == format_vtt(TRANSCRIPT)
+    assert format_transcript(DIARIZED_TRANSCRIPT, "txt") == format_txt(
+        DIARIZED_TRANSCRIPT
+    )
+    assert format_transcript(DIARIZED_TRANSCRIPT, "json") == format_json(
+        DIARIZED_TRANSCRIPT
+    )
 
 
 def test_format_transcript_rejects_unknown_format() -> None:

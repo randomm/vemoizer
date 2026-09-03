@@ -11,6 +11,7 @@ dependencies = [
     "numpy",
     "soundfile==0.14.0",
     "huggingface-hub",
+    "pyannote.audio==4.0.7",
     "parakeet-mlx",
     "mlx-whisper",
     "mlx",

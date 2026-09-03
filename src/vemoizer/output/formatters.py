@@ -12,7 +12,10 @@ The four formats differ in exactly the ways their downstream consumers
 expect:
 
 - **txt**: plain text — segments joined by newlines (falls back to the
-  single ``text`` field when there are no segments).
+  single ``text`` field when there are no segments). A segment carrying a
+  ``speaker`` label is prefixed with ``[SPEAKER]``; unlabelled segments
+  are emitted bare, so output without diarization is byte-identical to
+  the pre-diarization rendering.
 - **json**: the transcript dict itself, re-serialised with UTF-8 and a
   trailing newline. Optional fields (``language``) are omitted when absent
   so the output mirrors what the backend actually reported.
@@ -71,6 +74,15 @@ def vtt_timestamp(seconds: float) -> str:
     return _timestamp(seconds, ".")
 
 
+def _speaker_label(segment: dict[str, Any]) -> str:
+    """The speaker label prefix ``[LABEL] `` for a segment, or ``""``."""
+    label = segment.get("speaker")
+    if label is None:
+        return ""
+    label = str(label).strip()
+    return f"[{label}] " if label else ""
+
+
 def _segments(transcript: dict[str, Any]) -> list[dict[str, Any]]:
     """Segments from the transcript, or ``[]`` when absent."""
     segs = transcript.get("segments")
@@ -119,8 +131,12 @@ def format_txt(transcript: dict[str, Any]) -> str:
     """Plain text: segments joined by newlines, or the ``text`` field."""
     segments = _segments(transcript)
     if segments:
-        lines = [str(seg.get("text", "")).strip() for seg in segments]
-        lines = [line for line in lines if line]
+        lines: list[str] = []
+        for seg in segments:
+            line = str(seg.get("text", "")).strip()
+            if not line:
+                continue
+            lines.append(_speaker_label(seg) + line)
         if not lines:
             return ""
         return "\n".join(lines) + "\n"
@@ -138,6 +154,8 @@ def format_json(transcript: dict[str, Any]) -> str:
     out: dict[str, Any] = {"text": transcript.get("text", "")}
     if transcript.get("language") is not None:
         out["language"] = transcript["language"]
+    if "speakers" in transcript and transcript["speakers"]:
+        out["speakers"] = transcript["speakers"]
     if "segments" in transcript and transcript["segments"]:
         out["segments"] = transcript["segments"]
     if "words" in transcript and transcript["words"]:
@@ -146,8 +164,21 @@ def format_json(transcript: dict[str, Any]) -> str:
 
 
 def format_srt(transcript: dict[str, Any]) -> str:
-    """SubRip: 1-based index, ``HH:MM:SS,mmm`` timestamps, blank-line blocks."""
-    entries = _caption_entries(transcript)
+    """SubRip: 1-based index, ``HH:MM:SS,mmm`` timestamps, blank-line blocks.
+
+    Cues from speaker-labelled segments are prefixed with ``[SPEAKER]``;
+    the word-fallback path has no speaker data and is emitted bare.
+    """
+    entries: list[tuple[float, float, str]] = []
+    for seg in _segments(transcript):
+        start = float(seg.get("start", 0.0))
+        end = float(seg.get("end", start))
+        text = str(seg.get("text", "")).strip()
+        if not text:
+            continue
+        entries.append((start, end, _speaker_label(seg) + text))
+    if not entries:
+        entries = _caption_entries(transcript)
     if not entries:
         return ""
     blocks: list[str] = []
@@ -158,8 +189,21 @@ def format_srt(transcript: dict[str, Any]) -> str:
 
 
 def format_vtt(transcript: dict[str, Any]) -> str:
-    """WebVTT: ``WEBVTT`` header, 0-based index, ``HH:MM:SS.mmm`` timestamps."""
-    entries = _caption_entries(transcript)
+    """WebVTT: ``WEBVTT`` header, 0-based index, ``HH:MM:SS.mmm`` timestamps.
+
+    Cues from speaker-labelled segments are prefixed with ``[SPEAKER]``;
+    the word-fallback path has no speaker data and is emitted bare.
+    """
+    entries: list[tuple[float, float, str]] = []
+    for seg in _segments(transcript):
+        start = float(seg.get("start", 0.0))
+        end = float(seg.get("end", start))
+        text = str(seg.get("text", "")).strip()
+        if not text:
+            continue
+        entries.append((start, end, _speaker_label(seg) + text))
+    if not entries:
+        entries = _caption_entries(transcript)
     if not entries:
         return "WEBVTT\n"
     cues: list[str] = ["WEBVTT", ""]
