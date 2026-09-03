@@ -40,6 +40,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -51,11 +52,15 @@ from .transcriber import TranscriptionResult
 
 logger = logging.getLogger(__name__)
 
-#: The Finnish fine-tune of Whisper-large, reached through mlx-whisper.
-MODEL_ID = "Finnish-NLP/whisper-large-finnish-v3"
+#: The Finnish fine-tune of Whisper-large, as a community MLX conversion
+#: (base_model: Finnish-NLP/whisper-large-finnish-v3). mlx-whisper cannot
+#: consume the raw HF transformers checkpoint, and the pip package ships no
+#: converter — the MLX port is the load repo, same pattern as decode B's
+#: Canary port (see docs/pipeline-spec.md).
+MODEL_ID = "FredrikKarlssonSpeech/whisper-large-finnish-v3-mlx"
 #: Pinned commit on the model repo so upstream pushes cannot change the
 #: weights we run (project invariant #4).
-MODEL_REVISION = "b23deb0b3855c829ffe04cb1c6709757ff16d49c"
+MODEL_REVISION = "f51f0310c1b2a3e5acb16905c1a7245bb9476846"
 
 #: Sample rate of the audio contract (project invariant #6).
 SAMPLE_RATE = 16_000
@@ -153,17 +158,24 @@ class WhisperReDecodeTranscriber:
         self.model: Any = None
         self._model_path: str | None = None
         self._loaded: bool = False
+        self._load_failed: bool = False
         self._mlx_whisper: Any = None
         self._load_start: float | None = None
 
     def _ensure_loaded(self) -> None:
-        """Download (revision-pinned) and load the Whisper model once.
+        """Resolve the revision-pinned model path once.
 
-        ``self._loaded`` is set to ``True`` *only after* a successful
-        load, so a transient download failure is retried on the next
-        call rather than permanently disabling re-decode for the run.
+        ``mlx_whisper.transcribe`` loads (and caches, via its
+        ``ModelHolder``) the model from the path we pass it, so this
+        resolves the snapshot path and imports the library — it must NOT
+        also call ``load_models.load_model``: that would hold a second
+        ~3 GB copy of the weights that ``transcribe`` never uses.
+
+        A failed resolve latches ``_load_failed`` so a broken cache is
+        reported once, not retried for every one of hundreds of spans
+        (the same latch decode A and B use).
         """
-        if self._loaded:
+        if self._loaded or self._load_failed:
             return
         logger.info("Loading re-decode model: %s@%s", MODEL_ID, MODEL_REVISION)
         start = time.perf_counter()
@@ -175,27 +187,31 @@ class WhisperReDecodeTranscriber:
                 MODEL_ID,
                 revision=MODEL_REVISION,
             )
-            # mlx-whisper ships ``load_model`` in its ``load_models``
-            # submodule; the public ``__init__`` does not re-export it.
-            self.model = mlx_whisper.load_models.load_model(local_path)
             self._model_path = local_path
             self._mlx_whisper = mlx_whisper
             self._loaded = True
+            # Marker object: the real model lives in mlx_whisper's
+            # ModelHolder cache, keyed by path, once the first span runs.
+            self.model = local_path
         except Exception as e:  # noqa: BLE001 - logged; re-decode fails open
-            logger.error("Failed to load re-decode model: %s", e)
+            logger.error("Failed to load re-decode model (not retrying): %s", e)
             self.model = None
-            self._loaded = False
+            self._load_failed = True
             return
         self._load_start = start
-        logger.info("Re-decode model loaded in %.2fs", time.perf_counter() - start)
+        logger.info("Re-decode model resolved in %.2fs", time.perf_counter() - start)
 
-    def transcribe_span(self, audio: np.ndarray, span: Span) -> ReDecodeResult:
+    def transcribe_span(
+        self, audio: np.ndarray, span: Span, language: str | None = None
+    ) -> ReDecodeResult:
         """Re-decode one disputed slice; fail open on any error.
 
         ``audio`` is the full 16 kHz mono float32 recording; only the
-        ``span`` range is fed to the model. Returns a
-        :class:`ReDecodeResult` with ``ok=False`` and empty ``text``
-        when the model could not run (load or decode failure).
+        ``span`` range is fed to the model. ``language`` is the span's
+        detected language when the caller knows it (invariant #3:
+        language is a span property); Finnish is the profile default.
+        Returns a :class:`ReDecodeResult` with ``ok=False`` and empty
+        ``text`` when the model could not run (load or decode failure).
         """
         self._ensure_loaded()
         if self.model is None:
@@ -227,8 +243,12 @@ class WhisperReDecodeTranscriber:
                 slice_audio,
                 path_or_hf_repo=model_path,
                 word_timestamps=True,
-                language="fi",
+                language=language or "fi",
                 task="transcribe",
+                # Deterministic third opinion: greedy, and never conditioned
+                # on text from outside the disputed slice.
+                temperature=0.0,
+                condition_on_previous_text=False,
             )
         except Exception as e:  # noqa: BLE001 - logged; re-decode fails open
             logger.warning(
@@ -278,7 +298,17 @@ class WhisperReDecodeTranscriber:
         }
 
     def cleanup(self) -> None:
-        """Release the loaded model."""
+        """Release the loaded model, including mlx-whisper's own cache.
+
+        ``mlx_whisper.transcribe`` caches the loaded model in its module-
+        level ``ModelHolder``; without clearing it the ~3 GB of weights
+        outlive this transcriber and crowd out the next model load.
+        """
+        if self._mlx_whisper is not None:
+            with suppress(Exception):  # best-effort cache release
+                holder = self._mlx_whisper.transcribe.ModelHolder
+                holder.model = None
+                holder.model_path = None
         self.model = None
         self._model_path = None
         self._mlx_whisper = None

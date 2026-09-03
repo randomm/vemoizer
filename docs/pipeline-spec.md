@@ -138,10 +138,13 @@ case/punctuation-insensitive similarity cost. One side may be a gap
 
 ### 7. Re-decode — Whisper-large Finnish v3
 
-- Model: **`Finnish-NLP/whisper-large-finnish-v3`**, reached through
-  `mlx-whisper` (`transcribe()` with `word_timestamps=True`; the flag is
-  off by default).
-- Pinned revision: `b23deb0b...` (full SHA recorded at download time).
+- Model: **`Finnish-NLP/whisper-large-finnish-v3`**, loaded as the
+  community MLX conversion `FredrikKarlssonSpeech/whisper-large-finnish-v3-mlx`
+  through `mlx-whisper` (`transcribe()` with `word_timestamps=True`,
+  `temperature=0.0`, `condition_on_previous_text=False`). mlx-whisper cannot
+  consume the raw HF transformers checkpoint and ships no converter, so the
+  MLX port is the load repo — the same pattern as decode B's Canary port.
+- Pinned revision: `f51f0310c1b2a3e5acb16905c1a7245bb9476846`.
 - Native word timestamps + per-token logprobs.
 - Only disputed slices (seconds, not minutes) are re-decoded — this is what
   keeps the third model affordable. Use float16 weights, not the ~6.5 GB
@@ -190,7 +193,7 @@ Filenames are NFC-normalized (macOS APFS stores NFD).
 |---|---|---|---|---|
 | Decode A | `nvidia/parakeet-tdt-0.6b-v3` | `mlx-community/parakeet-tdt-0.6b-v3` | `ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15` | parakeet-mlx; ~1.25 GB; word timestamps built in |
 | Decode B | `nvidia/canary-1b-v2` | community MLX port, e.g. `Mediform/canary-1b-v2-mlx-q8` | `0b6b32ee...` (full SHA at implementation) | loads the MLX port, not the F32 checkpoint |
-| Re-decode | `Finnish-NLP/whisper-large-finnish-v3` | itself (mlx-whisper) | recorded at download | f16; `word_timestamps=True` |
+| Re-decode | `Finnish-NLP/whisper-large-finnish-v3` | `FredrikKarlssonSpeech/whisper-large-finnish-v3-mlx` | `f51f0310c1b2a3e5acb16905c1a7245bb9476846` | community MLX conversion (mlx-whisper cannot read the raw HF checkpoint); `word_timestamps=True` |
 | Diarization | `pyannote/speaker-diarization-community-1` | n/a (pyannote.audio 4.0.7) | `3533c8cf8e369892e6b79ff1bf80f7b0286a54ee` | CC-BY-4.0, HF-gated (form + token) |
 | VAD | silero-vad | bundled in `silero-vad==6.2.1` pip package | package version | ONNX mode, no separate download |
 
