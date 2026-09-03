@@ -10,8 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from vemoizer.eval_harness import AGGREGATE_KEY, run_eval, wer
 
+from vemoizer.eval_harness import AGGREGATE_KEY, run_eval, wer
 
 # --- wer -------------------------------------------------------------------
 

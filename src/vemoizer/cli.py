@@ -142,6 +142,8 @@ def transcribe(
     with caffeinate_context():
         for file in files:
             result = transcribe_file(file)
+            for warning in result.pop("warnings", []):
+                typer.echo(warning, err=True)
             if "error" in result:
                 typer.echo(f"error: {result['error']}", err=True)
                 exit_code = 1

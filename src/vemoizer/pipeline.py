@@ -65,13 +65,23 @@ def _load_llm_config(path: str | None) -> LLMConfig | None:
     return None
 
 
-def _decode(transcriber: Any, audio: np.ndarray, label: str) -> dict[str, Any] | None:
-    """Run one full decode; return its result or ``None`` (fail-open)."""
+def _decode(
+    transcriber: Any, audio: np.ndarray, label: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Run one full decode; return ``(result, warning)`` (fail-open).
+
+    The warning is ``None`` on success; a human-readable degraded-consensus
+    message when the decode raised, so the caller can surface it to the user
+    (issue #36: a silent ``logger.warning`` is not user-visible).
+    """
     try:
-        return transcriber.transcribe(audio)
+        return transcriber.transcribe(audio), None
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
         logger.warning("%s failed, using best available result: %s", label, e)
-        return None
+        return None, (
+            f"warning: {label} failed: {e}; "
+            "consensus degraded to the best available result"
+        )
 
 
 def _speech_slices(audio: np.ndarray) -> list[tuple[int, np.ndarray]]:
@@ -95,19 +105,22 @@ def _speech_slices(audio: np.ndarray) -> list[tuple[int, np.ndarray]]:
 
 def _decode_all(
     transcriber: Any, slices: list[tuple[int, np.ndarray]], label: str
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, list[str]]:
     """Decode every VAD slice through *transcriber* and merge the results.
 
     Word/segment times are shifted onto the full-recording timeline so the
     downstream alignment and re-decode stages work on one time base.
     """
     if not slices:
-        return {"text": "", "words": [], "segments": []}
+        return {"text": "", "words": [], "segments": []}, []
+    warnings: list[str] = []
     merged_words: list[dict[str, Any]] = []
     merged_segments: list[dict[str, Any]] = []
     texts: list[str] = []
     for offset, slice_audio in slices:
-        r = _decode(transcriber, slice_audio, label)
+        r, warning = _decode(transcriber, slice_audio, label)
+        if warning is not None:
+            warnings.append(warning)
         if r is None:
             continue
         texts.append(str(r.get("text", "")).strip())
@@ -128,11 +141,14 @@ def _decode_all(
                     "end": float(s.get("end", 0.0)) + delta,
                 }
             )
-    return {
-        "text": " ".join(t for t in texts if t),
-        "words": merged_words,
-        "segments": merged_segments,
-    }
+    return (
+        {
+            "text": " ".join(t for t in texts if t),
+            "words": merged_words,
+            "segments": merged_segments,
+        },
+        warnings,
+    )
 
 
 def _align_decodes(
@@ -318,9 +334,9 @@ def transcribe_file(path: str | Path, *, config_path: str | None = None) -> dict
         audio = ingest_audio(Path(path))
     except IngestError as e:
         logger.error("ingest failed for %s: %s", path, e)
-        return {"text": "", "segments": [], "error": str(e)}
+        return {"text": "", "segments": [], "warnings": [], "error": str(e)}
     if len(audio) == 0:
-        return {"text": "", "segments": []}
+        return {"text": "", "segments": [], "warnings": []}
 
     llm_config = _load_llm_config(config_path)
     slices = _speech_slices(audio)
@@ -329,20 +345,31 @@ def transcribe_file(path: str | Path, *, config_path: str | None = None) -> dict
     result_b: dict[str, Any] | None = None
     parakeet: Any = None
     canary: Any = None
+    warnings: list[str] = []
     try:
         parakeet = ParakeetTranscriber()
-        result_a = _decode_all(parakeet, slices, "decode A")
+        result_a, a_warnings = _decode_all(parakeet, slices, "decode A")
+        warnings.extend(a_warnings)
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
         logger.warning("decode A failed, using best available result: %s", e)
+        warnings.append(
+            f"warning: decode A (Parakeet) failed: {e}; consensus degraded "
+            "to the best available result"
+        )
     finally:
         if parakeet is not None:
             with suppress(Exception):  # cleanup is best-effort (fail-open)
                 parakeet.cleanup()
     try:
         canary = CanaryTranscriber()
-        result_b = _decode_all(canary, slices, "decode B")
+        result_b, b_warnings = _decode_all(canary, slices, "decode B")
+        warnings.extend(b_warnings)
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
         logger.warning("decode B failed, using best available result: %s", e)
+        warnings.append(
+            f"warning: decode B (Canary) failed: {e}; consensus degraded — "
+            "output is Parakeet-only"
+        )
     finally:
         if canary is not None:
             with suppress(Exception):  # cleanup is best-effort (fail-open)
@@ -355,7 +382,9 @@ def transcribe_file(path: str | Path, *, config_path: str | None = None) -> dict
         if spans:
             redecoded = _redecode_spans(audio, spans)
 
-    return _assemble(result_a, result_b, redecoded, llm_config)
+    result = _assemble(result_a, result_b, redecoded, llm_config)
+    result["warnings"] = warnings
+    return result
 
 
 def _align_pairs_safe(

@@ -17,6 +17,9 @@ dependencies = [
     "safetensors",
 ]
 
+[project.scripts]
+vemoizer = "vemoizer.cli:app"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",

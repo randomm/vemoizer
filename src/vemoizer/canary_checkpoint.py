@@ -13,6 +13,7 @@ dropped.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -21,6 +22,8 @@ import numpy as np
 
 if TYPE_CHECKING:
     from .canary_mlx import CanaryModel
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -33,25 +36,45 @@ def _dequant_grouped(
 ) -> np.ndarray:
     """Dequantize grouped 8-bit ints packed into uint32.
 
-    ``weight`` is ``(out, groups)`` uint32 (each value = 8 packed uint8);
-    ``scales`` / ``biases`` are ``(out, groups)`` float. Each uint32 unpacks
-    to 8 little-endian bytes giving ``(out, groups*8)`` ints; dequant is
-    ``int * scale + bias`` per group, broadcast over the 8 packed values.
+    ``weight`` is ``(out, n_packs)`` uint32; each uint32 packs **4 signed int8**
+    in little-endian byte order (u32 = 4 bytes = 4 x int8), so the unpacked
+    weight is ``(out, n_packs * 4)``. ``scales`` / ``biases`` are
+    ``(out, n_groups)`` float — one pair per group of 64 weights
+    (``mx.dequantize(w, scales, biases, 64, 8)`` semantics).
+
+    The relationship: ``n_packs = 16 * n_groups`` (since 64 weights per group
+    = 16 packs of 4 bytes). Each group's (scale, bias) is broadcast over its
+    64 unpacked int8 weights.
+
+    Returns ``(out, n_packs * 4)`` float32.
     """
     w = weight_u32.astype(np.uint32)
-    out, groups = w.shape
-    b = (w[:, :, None] >> np.array([0, 8, 16, 24], dtype=np.uint32)).astype(np.uint8)
-    b = b.reshape(out, groups, 4, 2)
-    # two 16-bit halves -> 8 bytes; simpler: view as 4 bytes little-endian
-    b = np.stack(
-        [(w[:, :, None] >> np.array([0, 8, 16, 24], dtype=np.uint64)) & 0xFF],
-        axis=-1,
-    )
-    b = b.reshape(out, groups * 4)
-    # pad to 8 values per group if needed (scheme uses 4 bytes -> 4 values)
-    scales_r = np.repeat(scales, 4, axis=1)
-    biases_r = np.repeat(biases, 4, axis=1)
-    return b.astype(np.float32) * scales_r + biases_r
+    out, n_packs = w.shape
+    n_groups = scales.shape[1] if scales.ndim == 2 else scales.shape[0]
+
+    if scales.ndim != 2 or scales.shape != (out, n_groups):
+        raise ValueError(
+            f"scales shape mismatch: scales={scales.shape}, weight={w.shape}"
+        )
+    if biases.ndim != 2 or biases.shape != (out, n_groups):
+        raise ValueError(
+            f"biases shape mismatch: biases={biases.shape}, weight={w.shape}"
+        )
+    if n_packs != 16 * n_groups:
+        raise ValueError(
+            f"weight has {n_packs} packs per row; expected 16 * {n_groups} = "
+            f"{16 * n_groups} (4 bytes per pack, 64 weights per group)"
+        )
+
+    # Unpack: 4 signed int8 per uint32, little-endian byte order (b0 LSB first).
+    ints = np.ascontiguousarray(w).view(np.int8).reshape(out, n_packs * 4)
+    # Reshape to (out, n_groups, 64) so each group's 64 weights are contiguous.
+    ints_g = ints.reshape(out, n_groups, 64)
+    # Broadcast each group's (scale, bias) over its 64 weights.
+    scale_r = scales[:, :, None]  # (out, n_groups, 1)
+    bias_r = biases[:, :, None]  # (out, n_groups, 1)
+    deq_g = ints_g.astype(np.float32) * scale_r + bias_r
+    return deq_g.reshape(out, n_packs * 4)
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +104,8 @@ def load_canary_weights(
     model = CanaryModel(canary_cfg, tokenizer)
 
     weights = mx.load(str(model_dir / "model.safetensors"))
+    if not isinstance(weights, dict):
+        raise TypeError(f"Expected dict from mx.load, got {type(weights)}")
     mapped = _map_checkpoint_weights(weights, dtype)
     model.load_weights(list(mapped.items()), strict=False)
     return model
@@ -109,16 +134,25 @@ def _map_checkpoint_weights(weights: dict, dtype: mx.Dtype) -> dict[str, mx.arra
         base = key[: -len(".weight")]
         scale_key, bias_key = f"{base}.scales", f"{base}.biases"
         if scale_key not in weights or bias_key not in weights:
+            logger.warning(
+                "Grouped-q8 weight %s is missing its .scales/.biases; dropping "
+                "the linear (it will run on random init).",
+                key,
+            )
             continue
+        # Fail loud on a corrupt weight: a silent drop here is exactly the
+        # bug that once ran the whole model on random init (issue #36).
         try:
             w = to_np(value).astype(np.uint32)
             sc = to_np(weights[scale_key]).astype(np.float32)
             bz = to_np(weights[bias_key]).astype(np.float32)
             deq = _dequant_grouped(w, sc, bz)
-            out[key] = mx.array(deq).astype(dtype)
-            consumed.update({key, scale_key, bias_key})
-        except Exception:
-            continue
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to dequantize grouped-q8 linear {key}: {e!r}"
+            ) from e
+        out[key] = mx.array(deq).astype(dtype)
+        consumed.update({key, scale_key, bias_key})
 
     # Map remaining float tensors onto the MLX tree.
     key_map = {
