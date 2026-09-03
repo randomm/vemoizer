@@ -5,20 +5,25 @@ Loads the revision-pinned community q8 checkpoint
 ``Mediform/canary-1b-v2-mlx-q8`` directly from safetensors: grouped 8-bit
 linears (``.weight`` uint32 + ``.scales``/``.biases``) are dequantized via
 ``mx.dequantize`` on load so the forward pass stays plain, and plain float
-tensors are cast to the inference dtype. The exact key layout is validated
-against the pinned checkpoint by the WER gate (ticket 11); a key that maps to
-no parameter is dropped.
+tensors are cast to the inference dtype.
+
+The key layout is enforced at load time: every parameter in the module tree
+must be filled by the checkpoint, or the load raises. A silently dropped key
+leaves that parameter at its random initialization and yields a model that
+loads cleanly and emits noise (issue #36).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import mlx.core as mx
 import numpy as np
+from mlx.utils import tree_flatten
 
 if TYPE_CHECKING:
     from .canary_mlx import CanaryModel
@@ -112,8 +117,103 @@ def load_canary_weights(
     if not isinstance(weights, dict):
         raise TypeError(f"Expected dict from mx.load, got {type(weights)}")
     mapped = _map_checkpoint_weights(weights, dtype)
+    _assert_full_coverage(model, mapped)
     model.load_weights(list(mapped.items()), strict=False)
+    # MLX modules construct with ``training=True``, which makes the encoder's
+    # BatchNorm use per-utterance batch statistics and ignore the checkpoint's
+    # running_mean/running_var. Inference must use the running stats.
+    model.eval()
     return model
+
+
+class _HasParameters(Protocol):
+    """The only thing the coverage guard needs from a model."""
+
+    def parameters(self) -> dict: ...
+
+
+def _assert_full_coverage(model: _HasParameters, mapped: dict[str, mx.array]) -> None:
+    """Fail loud when any model parameter would keep its random init.
+
+    ``load_weights(strict=False)`` leaves an unmatched parameter at its
+    initialization values and reports nothing, so a key-mapping gap produces a
+    model that loads cleanly, runs at full speed and emits noise. That is
+    issue #36, and it regressed once already on the decoder path: the
+    ``transf_decoder.layers.*`` sub-layer names never matched, so 8 blocks x 26
+    tensors stayed random while the encoder loaded fine.
+
+    Checking coverage here — against the module tree, not against the
+    checkpoint — is what makes that class of bug impossible to reintroduce
+    silently: any parameter the mapping fails to fill aborts the load.
+    """
+    expected = {name for name, _ in tree_flatten(model.parameters())}
+    missing = sorted(expected - set(mapped))
+    if missing:
+        shown = ", ".join(missing[:8])
+        more = f" (+{len(missing) - 8} more)" if len(missing) > 8 else ""
+        raise RuntimeError(
+            f"Canary checkpoint covers {len(expected) - len(missing)}/"
+            f"{len(expected)} model parameters; {len(missing)} would run on "
+            f"random init: {shown}{more}"
+        )
+    unused = sorted(set(mapped) - expected)
+    if unused:
+        logger.warning(
+            "Checkpoint supplied %d weights with no matching parameter: %s",
+            len(unused),
+            ", ".join(unused[:8]),
+        )
+
+
+#: NeMo's ``TransformerDecoderBlock`` names its sub-layers and their pre-norms
+#: *positionally* (first = self-attention, second = cross-attention, third =
+#: feed-forward), while the MLX port names them semantically. The decoder half
+#: of the checkpoint therefore needs a real translation, not the prefix swap
+#: the encoder gets: ``transf_decoder.layers.N.first_sub_layer.linear_q`` and
+#: ``decoder.blocks.N.self_attn.q_proj`` share no substring at all.
+_DECODER_SUBLAYER_MAP = {
+    "first_sub_layer.linear_q": "self_attn.q_proj",
+    "first_sub_layer.linear_k": "self_attn.k_proj",
+    "first_sub_layer.linear_v": "self_attn.v_proj",
+    "first_sub_layer.linear_out": "self_attn.out_proj",
+    "second_sub_layer.linear_q": "cross_attn.q_proj",
+    "second_sub_layer.linear_k": "cross_attn.k_proj",
+    "second_sub_layer.linear_v": "cross_attn.v_proj",
+    "second_sub_layer.linear_out": "cross_attn.out_proj",
+    "third_sub_layer.linear1": "ff1",
+    "third_sub_layer.linear2": "ff2",
+    "layer_norm_1": "self_attn_norm",
+    "layer_norm_2": "cross_attn_norm",
+    "layer_norm_3": "ff_norm",
+}
+
+#: Whole-subtree renames. The encoder's entry is an identity map: the MLX
+#: encoder mirrors the checkpoint's Conformer names 1:1.
+_PREFIX_MAP = {
+    "encoder.": "encoder.",
+    "transf_decoder.token_embedding.": "decoder.embedding.",
+    "transf_decoder.embedding_layer_norm.": "decoder.embedding_layer_norm.",
+    "transf_decoder.final_layer_norm.": "decoder.final_norm.",
+    "head.classifier.": "decoder.output_proj.",
+}
+
+_DECODER_LAYER_RE = re.compile(r"^transf_decoder\.layers\.(\d+)\.(.+)$")
+
+
+def _map_key(key: str) -> str | None:
+    """Translate one checkpoint key to its MLX parameter path (``None`` = drop)."""
+    match = _DECODER_LAYER_RE.match(key)
+    if match is not None:
+        index, rest = match.group(1), match.group(2)
+        for nemo_name, mlx_name in _DECODER_SUBLAYER_MAP.items():
+            if rest.startswith(f"{nemo_name}."):
+                leaf = rest[len(nemo_name) + 1 :]
+                return f"decoder.blocks.{index}.{mlx_name}.{leaf}"
+        return None
+    for pref, repl in _PREFIX_MAP.items():
+        if key.startswith(pref):
+            return repl + key[len(pref) :]
+    return None
 
 
 def _map_checkpoint_weights(weights: dict, dtype: mx.Dtype) -> dict[str, mx.array]:
@@ -121,9 +221,14 @@ def _map_checkpoint_weights(weights: dict, dtype: mx.Dtype) -> dict[str, mx.arra
 
     This is the seam the issue's "direct safetensors load" requirement
     exercises: weights come straight out of safetensors, grouped-q8 linears
-    are dequantized, and everything is cast to the inference dtype. The
-    exact key layout is validated against the pinned checkpoint by the WER
-    gate (ticket 11); a key that maps to no parameter is dropped.
+    are dequantized, and everything is cast to the inference dtype.
+
+    Both halves — the dequantized q8 linears and the plain float tensors —
+    go through :func:`_map_key`. Dequantized weights used to be emitted under
+    their raw checkpoint name, which was invisible for the encoder (its
+    rename is the identity) and silently left every quantized decoder linear
+    on random init. :func:`load_canary_weights` asserts full coverage, so a
+    key that maps to nothing is now a loud failure rather than a wrong model.
     """
 
     out: dict[str, mx.array] = {}
@@ -158,26 +263,17 @@ def _map_checkpoint_weights(weights: dict, dtype: mx.Dtype) -> dict[str, mx.arra
             raise RuntimeError(
                 f"Failed to dequantize grouped-q8 linear {key}: {e!r}"
             ) from e
-        out[key] = deq.astype(dtype)
         consumed.update({key, scale_key, bias_key})
+        mapped_key = _map_key(key)
+        if mapped_key is None:
+            continue
+        out[mapped_key] = deq.astype(dtype)
 
-    # Map remaining float tensors onto the MLX tree.
-    key_map = {
-        "encoder.": "encoder.",
-        "transf_decoder.token_embedding.": "decoder.embedding.",
-        "transf_decoder.embedding_layer_norm.": "decoder.embedding_layer_norm.",
-        "transf_decoder.final_layer_norm.": "decoder.final_norm.",
-        "transf_decoder.layers.": "decoder.blocks.",
-        "head.classifier.": "decoder.output_proj.",
-    }
+    # Map the remaining plain float tensors onto the MLX tree.
     for key, value in weights.items():
         if key in consumed:
             continue
-        new_key = None
-        for pref, repl in key_map.items():
-            if key.startswith(pref):
-                new_key = repl + key[len(pref) :]
-                break
+        new_key = _map_key(key)
         if new_key is None:
             continue
         # conv kernel layout: the Mediform checkpoint already stores MLX layout

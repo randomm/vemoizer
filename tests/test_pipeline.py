@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 
 import vemoizer.pipeline as pipeline
+import vemoizer.progress as progress
 from vemoizer.pipeline import transcribe_file
 
 
@@ -360,3 +361,115 @@ def test_diarize_on_multiple_speakers_picks_max_overlap(tmp_path, monkeypatch) -
 
     assert len(result["segments"]) == 1
     assert result["segments"][0]["speaker"] == "SPEAKER_01"
+
+
+# -- progress logging ----------------------------------------------------
+#
+# A 64-minute memo splits into ~1100 VAD slices and the decode stages run one
+# model call per slice. Before these lines the stages logged nothing between
+# their first and last call, so a slow decode was indistinguishable from a
+# deadlock. These tests pin the heartbeat down so it cannot silently regress.
+
+
+def test_format_duration_scales_by_magnitude() -> None:
+    assert progress.format_duration(9.7) == "9.7s"
+    assert progress.format_duration(219.0) == "3m39s"
+    assert progress.format_duration(3720.0) == "1h02m"
+
+
+def test_stage_progress_logs_start_and_summary(caplog) -> None:
+    caplog.set_level("INFO", logger="vemoizer")
+    stage = progress.StageProgress("decode A", 3, audio_seconds=6.0)
+    for _ in range(3):
+        stage.advance()
+    stage.done()
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert "decode A: starting over 3 slices (6.0s of audio)" in messages
+    assert any(
+        m.startswith("decode A: finished 3/3 slices in") and "x realtime" in m
+        for m in messages
+    )
+
+
+def test_stage_progress_throttles_heartbeats(caplog, monkeypatch) -> None:
+    """Only one heartbeat per interval, no matter how many items land."""
+    caplog.set_level("INFO", logger="vemoizer")
+    monkeypatch.setattr(progress, "PROGRESS_INTERVAL_S", 0.0)  # every advance
+    stage = progress.StageProgress("decode B", 4)
+    for _ in range(4):
+        stage.advance()
+    heartbeats = [r.getMessage() for r in caplog.records if "eta" in r.getMessage()]
+    assert len(heartbeats) == 4
+
+    caplog.clear()
+    monkeypatch.setattr(progress, "PROGRESS_INTERVAL_S", 3600.0)  # never due
+    quiet = progress.StageProgress("decode B", 4)
+    for _ in range(4):
+        quiet.advance()
+    assert not [r for r in caplog.records if "eta" in r.getMessage()]
+
+
+def test_stage_progress_reports_failures(caplog) -> None:
+    caplog.set_level("INFO", logger="vemoizer")
+    stage = progress.StageProgress("decode B", 2)
+    stage.advance()
+    stage.advance(failed=True)
+    stage.done()
+    assert any(
+        "decode B: finished 1/2 slices" in r.getMessage()
+        and "(1 failed)" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_pipeline_logs_every_stage(tmp_path, monkeypatch, caplog) -> None:
+    caplog.set_level("INFO", logger="vemoizer")
+    _patch_ingest(monkeypatch)
+    _patch_vad(monkeypatch)
+    _patch_decoders(
+        monkeypatch,
+        {"text": "hei maailma", "words": [{"word": "hei", "start": 0.0, "end": 0.4}]},
+        {"text": "moi maailma", "words": [{"word": "moi", "start": 0.1, "end": 0.5}]},
+    )
+    _patch_redecode(monkeypatch, "moikka")
+    transcribe_file("/nonexistent.m4a", config_path=str(tmp_path / "none.toml"))
+
+    log = "\n".join(r.getMessage() for r in caplog.records)
+    for expected in (
+        "transcribe: /nonexistent.m4a",
+        "ingest: 2.0s of audio in",
+        "LLM adjudication: disabled",
+        "VAD: 1 speech slices",
+        "decode A: starting over 1 slices",
+        "decode A: finished 1/1 slices",
+        "decode B: starting over 1 slices",
+        "alignment: DTW over 1 x 1 words",
+        "disputed spans: 1",
+        "re-decode: starting over 1 spans",
+        "adjudicate: starting over 1 spans",
+        "transcribe: done in",
+    ):
+        assert expected in log, f"missing progress line: {expected!r}\n---\n{log}"
+
+
+def test_alignment_skip_is_logged_not_silent(monkeypatch, caplog) -> None:
+    """Decode B with text but no word timestamps disables the consensus path.
+
+    The run still succeeds, so without this warning the only symptom is a
+    silently missing stage.
+    """
+    caplog.set_level("INFO", logger="vemoizer")
+    _patch_ingest(monkeypatch)
+    _patch_vad(monkeypatch)
+    _patch_decoders(
+        monkeypatch,
+        {"text": "hei", "words": [{"word": "hei", "start": 0.0, "end": 0.4}]},
+        {"text": "moi", "words": []},  # text, but no word timestamps
+    )
+    result = transcribe_file("/nonexistent.m4a")
+
+    log = "\n".join(r.getMessage() for r in caplog.records)
+    assert "alignment skipped: decode A has 1 words, decode B has 0" in log
+    assert "disputed spans: 0 (no alignment, re-decode skipped)" in log
+    assert result["segments"] == []  # consensus path produced nothing
