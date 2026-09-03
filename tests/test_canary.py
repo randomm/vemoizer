@@ -380,6 +380,55 @@ def test_map_checkpoint_weights_casts_to_target_dtype() -> None:
     assert mapped["decoder.embedding.weight"].dtype == mx.float16
 
 
+def test_map_checkpoint_weights_dequantize_path_with_bf16_scales() -> None:
+    """Regression: the real Mediform q8 checkpoint stores scales/biases as
+    bfloat16, which MLX only exposes to numpy as uint32-backed data (PEP 3118
+    has no bfloat16 format). The dequant path must therefore stay in MLX
+    (mx.dequantize) and never route the scales through numpy. This test feeds
+    bf16 scales/biases through _map_checkpoint_weights and checks the dequant
+    output matches a manual int8 * scale + bias reference computed in float32.
+    """
+    import mlx.core as mx
+
+    ints = list(range(1, 65))  # 1..64, all fit signed int8
+    w = _pack_int8_row(ints)
+    scales_np = np.array([[3.5]], dtype=np.float32)
+    biases_np = np.array([[-2.5]], dtype=np.float32)
+    scales_bf16 = mx.array(scales_np).astype(mx.bfloat16)
+    biases_bf16 = mx.array(biases_np).astype(mx.bfloat16)
+
+    weights = {
+        "encoder.blocks.0.ff1.linear1.weight": mx.array(w),
+        "encoder.blocks.0.ff1.linear1.scales": scales_bf16,
+        "encoder.blocks.0.ff1.linear1.biases": biases_bf16,
+    }
+    mapped = cm._map_checkpoint_weights(weights, mx.float32)
+    got = _mx_to_np(mapped["encoder.blocks.0.ff1.linear1.weight"])
+    # Reference computed in float32 arithmetic. mx.dequantize with bf16 scales
+    # runs in bfloat16, which has 8 mantissa bits — the deviation is bounded
+    # by ~2^-8 of the max value (64 * 3.5 = 224), i.e. ~0.9 in float32 units.
+    expected = np.array(ints, dtype=np.float32) * np.float32(3.5) + np.float32(-2.5)
+    assert np.allclose(got, expected, atol=1.0)
+
+
+def test_map_checkpoint_weights_dequantize_path_bf16_scales_output_dtype() -> None:
+    """With bf16 scales, mx.dequantize emits bf16; the mapper must cast to the
+    requested inference dtype (here bfloat16) without a lossy intermediate.
+    """
+    import mlx.core as mx
+
+    w = _pack_int8_row(list(range(64)))
+    scales = mx.array(np.array([[1.0]], dtype=np.float32)).astype(mx.bfloat16)
+    biases = mx.array(np.array([[0.0]], dtype=np.float32)).astype(mx.bfloat16)
+    weights = {
+        "encoder.blocks.0.ff1.linear1.weight": mx.array(w),
+        "encoder.blocks.0.ff1.linear1.scales": scales,
+        "encoder.blocks.0.ff1.linear1.biases": biases,
+    }
+    mapped = cm._map_checkpoint_weights(weights, mx.bfloat16)
+    assert mapped["encoder.blocks.0.ff1.linear1.weight"].dtype == mx.bfloat16
+
+
 def test_load_canary_weights_reads_config_and_safetensors(
     tmp_path, canary_config_dict
 ) -> None:

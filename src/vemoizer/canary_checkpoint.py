@@ -3,11 +3,11 @@
 Sliced out of ``canary_mlx`` to keep both modules under the 500-line limit.
 Loads the revision-pinned community q8 checkpoint
 ``Mediform/canary-1b-v2-mlx-q8`` directly from safetensors: grouped 8-bit
-linears (``.weight`` uint32 + ``.scales``/``.biases``) are dequantized to f32
-on load so the forward pass stays plain, and plain float tensors are cast to
-the inference dtype. The exact key layout is validated against the pinned
-checkpoint by the WER gate (ticket 11); a key that maps to no parameter is
-dropped.
+linears (``.weight`` uint32 + ``.scales``/``.biases``) are dequantized via
+``mx.dequantize`` on load so the forward pass stays plain, and plain float
+tensors are cast to the inference dtype. The exact key layout is validated
+against the pinned checkpoint by the WER gate (ticket 11); a key that maps to
+no parameter is dropped.
 """
 
 from __future__ import annotations
@@ -47,6 +47,11 @@ def _dequant_grouped(
     64 unpacked int8 weights.
 
     Returns ``(out, n_packs * 4)`` float32.
+
+    Note: kept only for testability / diagnostics — the load path uses
+    ``mx.dequantize`` (below), which never touches the numpy buffer interface
+    for the scales/biases and so cannot fail on the checkpoint's uint32-packed
+    bfloat16 scales (PEP 3118 exposes only float32 from MLX).
     """
     w = weight_u32.astype(np.uint32)
     out, n_packs = w.shape
@@ -121,9 +126,6 @@ def _map_checkpoint_weights(weights: dict, dtype: mx.Dtype) -> dict[str, mx.arra
     gate (ticket 11); a key that maps to no parameter is dropped.
     """
 
-    def to_np(t: mx.array) -> np.ndarray:
-        return np.ascontiguousarray(t).reshape(t.shape)
-
     out: dict[str, mx.array] = {}
     consumed: set[str] = set()
 
@@ -140,18 +142,23 @@ def _map_checkpoint_weights(weights: dict, dtype: mx.Dtype) -> dict[str, mx.arra
                 key,
             )
             continue
+        # Dequantize via mx.dequantize: it keeps the weight AND the
+        # uint32-packed bfloat16 scales/biases in MLX land, so it avoids the
+        # numpy PEP 3118 conversion that failed on the packed bf16 scales
+        # ("bfloat16 is not a valid PEP 3118 buffer format string"). It
+        # expects uint32 weights with 64 int8 per (scale, bias) group.
+        # mx.dequantize propagates the scales dtype to the output, so cast
+        # explicitly to the inference dtype afterwards.
         # Fail loud on a corrupt weight: a silent drop here is exactly the
         # bug that once ran the whole model on random init (issue #36).
         try:
-            w = to_np(value).astype(np.uint32)
-            sc = to_np(weights[scale_key]).astype(np.float32)
-            bz = to_np(weights[bias_key]).astype(np.float32)
-            deq = _dequant_grouped(w, sc, bz)
+            w = value.astype(mx.uint32)
+            deq = mx.dequantize(w, weights[scale_key], weights[bias_key], 64, 8)
         except Exception as e:
             raise RuntimeError(
                 f"Failed to dequantize grouped-q8 linear {key}: {e!r}"
             ) from e
-        out[key] = mx.array(deq).astype(dtype)
+        out[key] = deq.astype(dtype)
         consumed.update({key, scale_key, bias_key})
 
     # Map remaining float tensors onto the MLX tree.
