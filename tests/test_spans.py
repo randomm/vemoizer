@@ -18,7 +18,11 @@ import pytest
 
 from vemoizer.spans import (
     DISPUTE_THRESHOLD,
+    MAX_DISPUTED_FRACTION,
+    MAX_SPAN_S,
+    MAX_SPANS,
     Span,
+    apply_span_guardrails,
     find_disputed_spans,
     merge_spans,
     similarity,
@@ -344,3 +348,54 @@ def test_empty_input_produces_no_spans() -> None:
 def test_single_word_pair_both_identical_no_spans() -> None:
     w = make_word("hei", 0.0, 0.3)
     assert find_disputed_spans([(w, copy.deepcopy(w))]) == []
+
+
+# -- guardrails (issue #55) ----------------------------------------------
+#
+# Synthetic B word times can misalign pathologically; the guardrails keep
+# a bad alignment from turning into hours of re-decode or a garbage
+# transcript. Above the disputed-fraction cap the caller aborts consensus
+# entirely and ships decode A (fail-open).
+
+
+def test_guardrails_pass_a_sane_span_set_through() -> None:
+    spans = [Span(0.0, 3.0), Span(10.0, 12.0)]
+    assert apply_span_guardrails(spans, speech_seconds=600.0) == spans
+
+
+def test_overlong_span_is_clipped_to_max() -> None:
+    spans = [Span(0.0, MAX_SPAN_S * 3)]
+    out = apply_span_guardrails(spans, speech_seconds=600.0)
+    assert out is not None
+    assert out[0].end - out[0].start == MAX_SPAN_S
+
+
+def test_span_count_is_capped_keeping_earliest() -> None:
+    spans = [Span(float(i), float(i) + 0.5) for i in range(MAX_SPANS + 50)]
+    out = apply_span_guardrails(spans, speech_seconds=100000.0)
+    assert out is not None
+    assert len(out) == MAX_SPANS
+    assert out[0].start == 0.0
+
+
+def test_excessive_disputed_fraction_aborts_to_none() -> None:
+    """> MAX_DISPUTED_FRACTION of the speech disputed = broken alignment."""
+    speech = 100.0
+    disputed = speech * MAX_DISPUTED_FRACTION + 10.0
+    spans = [Span(0.0, disputed)]
+    assert apply_span_guardrails(spans, speech_seconds=speech) is None
+
+
+def test_zero_speech_never_divides() -> None:
+    assert apply_span_guardrails([Span(0.0, 1.0)], speech_seconds=0.0) is None
+
+
+def test_empty_spans_stay_empty() -> None:
+    assert apply_span_guardrails([], speech_seconds=100.0) == []
+
+
+def test_fraction_guard_skipped_for_short_recordings() -> None:
+    """A 3-second clip disputing wholly is normal; re-decoding all of it
+    is affordable. The fraction abort is a cost bound at scale only."""
+    spans = [Span(0.0, 3.0)]
+    assert apply_span_guardrails(spans, speech_seconds=3.0) == spans

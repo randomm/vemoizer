@@ -24,17 +24,17 @@ via ``cleanup()`` on every exit path.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-import mlx.core as mx
 import numpy as np
 
-from .alignment import WordPairs, align_pairs_safe
 from .audio_contract import SAMPLE_RATE
 from .canary_transcriber import CanaryTranscriber
+from .decode_stage import decode_all
 from .diarization import diarize, speaker_for_span
 from .ingest import IngestError, ingest_audio
 from .llm import LLMClient, LLMConfig, load_config
@@ -42,7 +42,13 @@ from .parakeet_transcriber import ParakeetTranscriber
 from .progress import StageProgress, format_duration
 from .readability import paragraphs, splice_verdicts
 from .redecode import WhisperReDecodeTranscriber
-from .spans import Span, find_disputed_spans, span_context, words_in_span
+from .slice_align import find_disputed_slices
+from .spans import (
+    Span,
+    apply_span_guardrails,
+    span_context,
+    words_in_span,
+)
 from .vad import SpeechSegment, vad_segments
 from .vad import load_model as load_vad_model
 
@@ -64,21 +70,6 @@ def _load_llm_config(path: str | None) -> LLMConfig | None:
         if candidate.is_file():
             return load_config(candidate)
     return None
-
-
-def _decode(transcriber: Any, audio: np.ndarray, label: str) -> dict[str, Any] | None:
-    """Run one full decode; return its result or ``None`` (fail-open).
-
-    Frees the Metal cache after every slice so GPU memory does not accumulate
-    across VAD slices.
-    """
-    try:
-        return transcriber.transcribe(audio)
-    except Exception as e:  # noqa: BLE001 - fail-open stage boundary
-        logger.warning("%s failed, using best available result: %s", label, e)
-        return None
-    finally:
-        mx.clear_cache()
 
 
 def _speech_slices(audio: np.ndarray) -> list[tuple[int, np.ndarray]]:
@@ -109,58 +100,56 @@ def _speech_slices(audio: np.ndarray) -> list[tuple[int, np.ndarray]]:
     return [(seg.start, audio[seg.start : seg.end]) for seg in segments]
 
 
-def _decode_all(
-    transcriber: Any, slices: list[tuple[int, np.ndarray]], label: str
-) -> dict[str, Any] | None:
-    """Decode every VAD slice through *transcriber* and merge the results.
+def _b_text_in_span(result_b: dict[str, Any] | None, span: Span) -> str:
+    """Decode B's slice text overlapping *span* (B has no word timestamps)."""
+    if result_b is None:
+        return ""
+    parts: list[str] = []
+    for s in result_b.get("slices") or []:
+        if float(s["end_s"]) > span.start and float(s["start_s"]) < span.end:
+            text = str(s.get("text", "")).strip()
+            if text:
+                parts.append(text)
+    return " ".join(parts)
 
-    Word/segment times are shifted onto the full-recording timeline so the
-    downstream alignment and re-decode stages work on one time base.
+
+def _find_spans(
+    result_a: dict[str, Any] | None, result_b: dict[str, Any] | None
+) -> list[Span]:
+    """Disputed spans between the decodes, guardrailed; ``[]`` = no consensus.
+
+    The dispute unit is the VAD slice (real bounds, no synthetic
+    timestamps): a slice is disputed when its normalized A/B texts diverge
+    below the slice-similarity threshold. The
+    ``VEMOIZER_DISABLE_CONSENSUS=1`` kill-switch and every failure path
+    land on ``[]`` — the run ships decode A alone (fail-open).
     """
-    if not slices:
-        return {"text": "", "words": [], "segments": []}
-    merged_words: list[dict[str, Any]] = []
-    merged_segments: list[dict[str, Any]] = []
-    texts: list[str] = []
-    audio_seconds = sum(len(s) for _, s in slices) / SAMPLE_RATE
-    progress = StageProgress(label, len(slices), audio_seconds)
-    for offset, slice_audio in slices:
-        r = _decode(transcriber, slice_audio, label)
-        progress.advance(failed=r is None)
-        if r is None:
-            continue
-        texts.append(str(r.get("text", "")).strip())
-        delta = offset / SAMPLE_RATE
-        for w in r.get("words") or []:
-            merged_words.append(
-                {
-                    **w,
-                    "start": float(w.get("start", 0.0)) + delta,
-                    "end": float(w.get("end", 0.0)) + delta,
-                }
-            )
-        for s in r.get("segments") or []:
-            merged_segments.append(
-                {
-                    **s,
-                    "start": float(s.get("start", 0.0)) + delta,
-                    "end": float(s.get("end", 0.0)) + delta,
-                }
-            )
-    progress.done()
-    merged = {
-        "text": " ".join(t for t in texts if t),
-        "words": merged_words,
-        "segments": merged_segments,
-    }
+    if os.environ.get("VEMOIZER_DISABLE_CONSENSUS") == "1":
+        logger.info("consensus disabled by VEMOIZER_DISABLE_CONSENSUS=1")
+        return []
+    if result_a is None or result_b is None:
+        logger.info("disputed spans: 0 (a decode is missing)")
+        return []
+    slices_a = list(result_a.get("slices") or [])
+    slices_b = list(result_b.get("slices") or [])
+    spans = find_disputed_slices(slices_a, slices_b)
+    if spans is None:
+        logger.info("disputed spans: 0 (no comparable slices, re-decode skipped)")
+        return []
+    speech_seconds = sum(float(s["end_s"]) - float(s["start_s"]) for s in slices_a)
+    guarded = apply_span_guardrails(spans, speech_seconds=speech_seconds)
+    if guarded is None:
+        logger.warning("disputed spans rejected by guardrails; shipping decode A")
+        return []
+    disputed_s = sum(s.end - s.start for s in guarded)
+    fraction = 100.0 * disputed_s / speech_seconds if speech_seconds > 0 else 0.0
     logger.info(
-        "%s: %d chars, %d words, %d segments",
-        label,
-        len(merged["text"]),
-        len(merged_words),
-        len(merged_segments),
+        "disputed spans: %d (%s of audio, %.0f%%)",
+        len(guarded),
+        format_duration(disputed_s),
+        fraction,
     )
-    return merged
+    return guarded
 
 
 def _redecode_spans(
@@ -172,7 +161,7 @@ def _redecode_spans(
     try:
         results = []
         for s in spans:
-            results.append(redecoder.transcribe_span(audio, s))
+            results.append(redecoder.transcribe_span(audio, s, language=s.language))
             progress.advance()
         progress.done()
         return [
@@ -218,14 +207,13 @@ def _assemble(
     redecoded: list[dict[str, Any]] | None,
     llm_config: LLMConfig | None,
     speaker_segments: list[tuple[float, float, str]] | None = None,
-    pairs: WordPairs | None = None,
+    spans: list[Span] | None = None,
 ) -> dict[str, Any]:
     """Combine the stage outputs into the final ``{"text", "segments"}``.
 
-    ``pairs`` is the alignment the caller already computed to pick the
-    disputed spans it re-decoded. Passing it in keeps the spans here identical
-    to the ones ``redecoded`` was indexed against, and avoids re-running an
-    O(len(A) x len(B)) DTW that the caller has already paid for.
+    ``spans`` are the guardrailed disputed spans the caller re-decoded —
+    the exact list ``redecoded`` was indexed against, so verdicts and
+    re-decode results can never drift apart.
 
     ``speaker_segments`` (when given) is a list of ``(start, end, speaker)``
     triples from the diarization stage; each adjudicated segment is labelled
@@ -243,8 +231,7 @@ def _assemble(
         return {"text": "", "segments": []}
 
     words = list(base.get("words") or [])
-    words_b = list((result_b or {}).get("words") or [])
-    spans = find_disputed_spans(pairs) if pairs else []
+    spans = spans or []
     redecoded = redecoded or []
 
     client = LLMClient(llm_config) if llm_config is not None else None
@@ -259,13 +246,13 @@ def _assemble(
             candidates: list[Candidate] = [
                 {"source": "decode A", "text": a_text},
             ]
-            if words_b:
-                # Span-scoped: only decode B's words inside the span. The
-                # whole decode-B text as a candidate (the old behaviour) fed
-                # the adjudicator the entire transcript for every span.
-                candidates.append(
-                    {"source": "decode B", "text": words_in_span(words_b, span)}
-                )
+            b_text = _b_text_in_span(result_b, span)
+            if b_text:
+                # Span-scoped: only decode B's slice text overlapping the
+                # span. The whole decode-B text as a candidate (the old
+                # behaviour) fed the adjudicator the entire transcript for
+                # every span.
+                candidates.append({"source": "decode B", "text": b_text})
             if rd is not None and rd.get("ok"):
                 candidates.append({"source": "re-decode", "text": rd["text"]})
             context = span_context(words, span)
@@ -325,7 +312,7 @@ def transcribe_decode_only(path: str | Path, *, backend: str) -> dict[str, Any]:
     result: dict[str, Any] | None = None
     try:
         transcriber = backends[backend]()
-        result = _decode_all(transcriber, slices, f"decode ({backend})")
+        result = decode_all(transcriber, slices, f"decode ({backend})")
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
         logger.warning("decode (%s) failed: %s", backend, e)
     finally:
@@ -396,7 +383,7 @@ def transcribe_file(
     canary: Any = None
     try:
         parakeet = ParakeetTranscriber()
-        result_a = _decode_all(parakeet, slices, "decode A")
+        result_a = decode_all(parakeet, slices, "decode A")
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
         logger.warning("decode A failed, using best available result: %s", e)
     finally:
@@ -405,7 +392,7 @@ def transcribe_file(
                 parakeet.cleanup()
     try:
         canary = CanaryTranscriber()
-        result_b = _decode_all(canary, slices, "decode B")
+        result_b = decode_all(canary, slices, "decode B")
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
         logger.warning("decode B failed, using best available result: %s", e)
     finally:
@@ -413,15 +400,10 @@ def transcribe_file(
             with suppress(Exception):  # cleanup is best-effort (fail-open)
                 canary.cleanup()
 
-    pairs = align_pairs_safe(result_a, result_b)
+    spans = _find_spans(result_a, result_b)
     redecoded: list[dict[str, Any]] | None = None
-    if pairs:
-        spans = find_disputed_spans(pairs)
-        logger.info("disputed spans: %d", len(spans))
-        if spans:
-            redecoded = _redecode_spans(audio, spans)
-    else:
-        logger.info("disputed spans: 0 (no alignment, re-decode skipped)")
+    if spans:
+        redecoded = _redecode_spans(audio, spans)
 
     speaker_segments: list[tuple[float, float, str]] | None = None
     if diarize:
@@ -436,7 +418,7 @@ def transcribe_file(
 
     logger.info("assemble: adjudicating spans")
     result = _assemble(
-        result_a, result_b, redecoded, llm_config, speaker_segments, pairs=pairs
+        result_a, result_b, redecoded, llm_config, speaker_segments, spans=spans
     )
     logger.info(
         "transcribe: done in %s — %d chars, %d segments",
