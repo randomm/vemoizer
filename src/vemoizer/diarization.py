@@ -97,9 +97,12 @@ def diarize(audio: np.ndarray, *, device: str = "auto") -> DiarizationResult:
         pipeline = _load_pipeline(device)
         diarization = pipeline(waveforms)  # ty: ignore[call-non-callable]
 
+    # pyannote 4.x returns a DiarizeOutput wrapper; the Annotation lives on
+    # .speaker_diarization. Older versions return the Annotation directly.
+    annotation = getattr(diarization, "speaker_diarization", diarization)
     segments: list[tuple[float, float, str]] = [
-        (turn.start, turn.end, turn.speaker)
-        for turn in diarization.itertracks(yield_label=True)
+        (turn.start, turn.end, speaker)
+        for turn, _track, speaker in annotation.itertracks(yield_label=True)
     ]
     return DiarizationResult(segments=segments)
 
