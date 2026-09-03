@@ -144,8 +144,8 @@ def _expected(path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_output_formats_covers_all_four() -> None:
-    assert sorted(OUTPUT_FORMATS) == ["json", "srt", "txt", "vtt"]
+def test_output_formats_covers_all_five() -> None:
+    assert sorted(OUTPUT_FORMATS) == ["json", "md", "srt", "txt", "vtt"]
 
 
 def test_format_extensions_map_each_format() -> None:

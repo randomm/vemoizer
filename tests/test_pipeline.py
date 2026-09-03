@@ -692,3 +692,62 @@ def test_assembled_output_is_full_coverage_with_paragraphs(
     assert result["segments"][0]["text"] == "moikka"
     assert result["text"] == "moikka"
     assert result["paragraphs"] == [{"start": 0.0, "end": 1.0, "text": "moikka"}]
+
+
+# -- notes stage wiring (issue #57) --------------------------------------
+
+
+def test_notes_failure_lands_in_warnings_not_errors(tmp_path, monkeypatch) -> None:
+    """A failed notes stage warns and ships the transcript untouched."""
+    _consensus_setup(monkeypatch)
+    _patch_redecode(monkeypatch, "moikka")
+    monkeypatch.setattr(pipeline, "generate_notes", lambda client, text: None)
+
+    class _Client:
+        def adjudicate(self, a_text, candidates, context=""):
+            return "moikka"
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(pipeline, "LLMClient", lambda cfg: _Client())
+    cfg = _llm_config(tmp_path)
+    result = transcribe_file("/nonexistent.m4a", config_path=str(cfg))
+
+    assert result["text"]  # transcript unaffected
+    assert "notes" not in result
+    assert any("notes" in w for w in result.get("warnings", []))
+
+
+def test_notes_attach_when_generated(tmp_path, monkeypatch) -> None:
+    _consensus_setup(monkeypatch)
+    _patch_redecode(monkeypatch, "moikka")
+    fake_notes = {"title": "T", "summary": "S", "key_points": [], "action_items": []}
+    monkeypatch.setattr(pipeline, "generate_notes", lambda client, text: fake_notes)
+
+    class _Client:
+        def adjudicate(self, a_text, candidates, context=""):
+            return "moikka"
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(pipeline, "LLMClient", lambda cfg: _Client())
+    cfg = _llm_config(tmp_path)
+    result = transcribe_file("/nonexistent.m4a", config_path=str(cfg))
+    assert result["notes"] == fake_notes
+
+
+def test_no_llm_config_skips_notes_silently(tmp_path, monkeypatch) -> None:
+    _consensus_setup(monkeypatch)
+    _patch_redecode(monkeypatch, "moikka")
+
+    def _must_not_run(client, text):
+        raise AssertionError("notes stage ran without an LLM config")
+
+    monkeypatch.setattr(pipeline, "generate_notes", _must_not_run)
+    result = transcribe_file(
+        "/nonexistent.m4a", config_path=str(tmp_path / "none.toml")
+    )
+    assert "notes" not in result
+    assert "warnings" not in result

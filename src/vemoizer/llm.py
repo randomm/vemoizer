@@ -216,6 +216,7 @@ class LLMClient:
         self,
         system_prompt: str,
         user_prompt: str,
+        max_tokens: int = _MAX_TOKENS,
     ) -> tuple[str, dict[str, Any], dict[str, str]]:
         """Build the (url, body, headers) tuple for an OpenAI-compatible POST.
 
@@ -231,7 +232,7 @@ class LLMClient:
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0,
-            "max_tokens": _MAX_TOKENS,
+            "max_tokens": max_tokens,
         }
         api_key = self._api_key()
         headers: dict[str, str] = {}
@@ -326,16 +327,26 @@ class LLMClient:
             return span_text
         return result
 
-    def complete(self, system_prompt: str, user_prompt: str) -> str | None:
+    def complete(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int = 2048,
+    ) -> str | None:
         """One generic chat completion; ``None`` on any failure (fail-open).
 
         The seam the notes/summary stage builds on: same config, same
         shared client, same defensive parsing as adjudication, but the
-        caller owns both prompts and interprets ``None`` itself.
+        caller owns both prompts and interprets ``None`` itself. The
+        default answer budget is larger than adjudication's: a summary of
+        an hour-long memo does not fit in a span-verdict's 512 tokens
+        (truncated JSON parses as no notes at all).
         """
         if self._api_key() is None:
             return None
-        url, body, headers = self._build_request(system_prompt, user_prompt)
+        url, body, headers = self._build_request(
+            system_prompt, user_prompt, max_tokens=max_tokens
+        )
         return self._post(url, body, headers)
 
 
