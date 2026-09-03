@@ -41,7 +41,11 @@ def _patch_vad(monkeypatch) -> None:
     )
 
 
-def _transcriber(text: str, words: list[dict] | None = None):
+def _transcriber(
+    text: str,
+    words: list[dict] | None = None,
+    segments: list[dict] | None = None,
+):
     class _T:
         def __init__(self) -> None:
             self.model = "fake"
@@ -51,7 +55,7 @@ def _transcriber(text: str, words: list[dict] | None = None):
             self._loaded = True
 
         def transcribe(self, audio: np.ndarray, **kw) -> dict:
-            return {"text": text, "words": words or [], "segments": []}
+            return {"text": text, "words": words or [], "segments": segments or []}
 
         def cleanup(self) -> None:
             self.model = None
@@ -60,8 +64,14 @@ def _transcriber(text: str, words: list[dict] | None = None):
 
 
 def _patch_decoders(monkeypatch, a: dict | None, b: dict | None) -> None:
-    ta = _transcriber((a or {}).get("text", ""), (a or {}).get("words"))
-    tb = _transcriber(b.get("text", ""), b.get("words")) if b is not None else None
+    ta = _transcriber(
+        (a or {}).get("text", ""), (a or {}).get("words"), (a or {}).get("segments")
+    )
+    tb = (
+        _transcriber(b.get("text", ""), b.get("words"), b.get("segments"))
+        if b is not None
+        else None
+    )
 
     class _A:
         def __init__(self) -> None:
@@ -529,3 +539,128 @@ def test_decode_only_backend_failure_fails_open(monkeypatch) -> None:
     _patch_decoders(monkeypatch, None, None)  # constructors raise
     result = pipeline.transcribe_decode_only("/nonexistent.m4a", backend="parakeet")
     assert result["text"] == ""
+
+
+# -- assembly fixes (issue #53) ------------------------------------------
+
+
+def _consensus_setup(monkeypatch, *, b_words=None):
+    _patch_ingest(monkeypatch)
+    _patch_vad(monkeypatch)
+    words_a = [
+        {"word": "hei", "start": 0.0, "end": 0.4},
+        {"word": "maailma", "start": 0.5, "end": 1.0},
+    ]
+    a = {
+        "text": "hei maailma",
+        "words": words_a,
+        "segments": [{"start": 0.0, "end": 1.0, "text": "hei maailma"}],
+    }
+    b = {
+        "text": "moi maailma",
+        "words": b_words
+        if b_words is not None
+        else [
+            {"word": "moi", "start": 0.0, "end": 0.4},
+            {"word": "maailma", "start": 0.5, "end": 1.0},
+        ],
+    }
+    _patch_decoders(monkeypatch, a, b)
+
+
+def test_decode_b_candidate_is_span_scoped_not_whole_text(
+    tmp_path, monkeypatch
+) -> None:
+    """The old code sent decode B's ENTIRE text as the candidate for every
+    span (52K chars on a real memo)."""
+    _consensus_setup(monkeypatch)
+    _patch_redecode(monkeypatch, "moikka")
+    seen: list[list[dict]] = []
+
+    def spy_adjudicate(span, a_text, candidates, client, context=""):
+        seen.append(candidates)
+        return "moikka"
+
+    monkeypatch.setattr(pipeline, "_adjudicate", spy_adjudicate)
+    cfg = _llm_config(tmp_path)
+    transcribe_file("/nonexistent.m4a", config_path=str(cfg))
+
+    assert seen, "no span reached adjudication"
+    b_cands = [c for cands in seen for c in cands if c["source"] == "decode B"]
+    assert b_cands, "decode B candidate missing"
+    for cand in b_cands:
+        # span-scoped: only the disputed word, never the full transcript
+        assert cand["text"] == "moi"
+
+
+def test_failed_redecode_result_is_not_a_candidate(tmp_path, monkeypatch) -> None:
+    _consensus_setup(monkeypatch)
+
+    class _BadRedecoder:
+        def __init__(self) -> None:
+            self.model = "fake"
+
+        def transcribe_span(self, audio, span):
+            from vemoizer.redecode import ReDecodeResult as SpanResult
+
+            return SpanResult(span=span, text="roskaa", words=[], ok=False)
+
+        def cleanup(self) -> None:
+            pass
+
+    monkeypatch.setattr(pipeline, "WhisperReDecodeTranscriber", _BadRedecoder)
+    seen: list[list[dict]] = []
+
+    def spy_adjudicate(span, a_text, candidates, client, context=""):
+        seen.append(candidates)
+        return "x"
+
+    monkeypatch.setattr(pipeline, "_adjudicate", spy_adjudicate)
+    transcribe_file("/nonexistent.m4a", config_path=str(tmp_path / "none.toml"))
+
+    assert seen
+    sources = [c["source"] for c in seen[0]]
+    assert "re-decode" not in sources  # ok=False result must not be offered
+
+
+def test_adjudicator_receives_surrounding_context(tmp_path, monkeypatch) -> None:
+    _consensus_setup(monkeypatch)
+    _patch_redecode(monkeypatch, "moikka")
+    contexts: list[str] = []
+
+    class _SpyClient:
+        def adjudicate(self, a_text, candidates, context=""):
+            contexts.append(context)
+            return "moikka"
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(pipeline, "LLMClient", lambda cfg: _SpyClient())
+    cfg = _llm_config(tmp_path)
+    transcribe_file("/nonexistent.m4a", config_path=str(cfg))
+
+    assert contexts, "LLM adjudicator was not called"
+    # +-10s of decode-A words around the span: "maailma" is within 10s
+    assert "maailma" in contexts[0]
+
+
+def test_assembled_output_is_full_coverage_with_paragraphs(
+    tmp_path, monkeypatch
+) -> None:
+    _consensus_setup(monkeypatch)
+    _patch_redecode(monkeypatch, "moikka")
+    # Explicit nonexistent config: never pick up the developer's real
+    # ~/.config/vemoizer/config.toml (a live LLM would adjudicate).
+    result = transcribe_file(
+        "/nonexistent.m4a", config_path=str(tmp_path / "none.toml")
+    )
+
+    # The verdict is spliced INTO the sentence, not emitted as the only
+    # segment: full coverage.
+    assert len(result["segments"]) == 1
+    assert result["segments"][0]["text"] == "moikka maailma"
+    assert result["text"] == "moikka maailma"
+    assert result["paragraphs"] == [
+        {"start": 0.0, "end": 1.0, "text": "moikka maailma"}
+    ]
