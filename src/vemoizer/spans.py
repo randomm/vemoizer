@@ -195,3 +195,33 @@ def find_disputed_spans(pairs: Sequence[AlignedPair]) -> list[Span]:
         if span is not None:
             raw.append(span)
     return merge_spans(raw)
+
+
+def words_in_span(words: list[dict[str, Any]], span: Span) -> str:
+    """The *words* falling inside *span*, joined (A-side span text)."""
+    return " ".join(
+        str(w.get("word", ""))
+        for w in words
+        if span.start <= float(w.get("start", 0.0)) < span.end
+    ).strip()
+
+
+#: Seconds of decode-A words offered to the adjudicator around a span.
+CONTEXT_WINDOW_S = 10.0
+
+
+def span_context(words: list[dict[str, Any]], span: Span) -> str:
+    """Decode-A words within ±``CONTEXT_WINDOW_S`` of *span* (span excluded).
+
+    Surrounding context is what lets the LLM disambiguate a garbled span —
+    a Finnish sentence about deployments makes "Kamal" more plausible than
+    "kamala" — without ever seeing the whole transcript.
+    """
+    lo = span.start - CONTEXT_WINDOW_S
+    hi = span.end + CONTEXT_WINDOW_S
+    return " ".join(
+        str(w.get("word", ""))
+        for w in words
+        if lo <= float(w.get("start", 0.0)) < hi
+        and not (span.start <= float(w.get("start", 0.0)) < span.end)
+    ).strip()
