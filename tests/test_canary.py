@@ -59,8 +59,11 @@ def _tiny_canary_config_dict() -> dict[str, Any]:
         },
         "transf_decoder": {
             "vocab_size": len(pieces),
-            "hidden_size": 8,
-            "inner_size": 16,
+            # Must equal the encoder's d_model: cross-attention projects the
+            # encoder output with the decoder's width (both are 1024 in the
+            # real checkpoint).
+            "hidden_size": 16,
+            "inner_size": 32,
             "num_layers": 2,
             "num_attention_heads": 2,
             "max_sequence_length": 32,
@@ -255,14 +258,25 @@ def test_compute_features_short_audio_returns_empty_frame() -> None:
     assert feats.shape[2] == 128
 
 
-def test_compute_features_is_per_frame_normalized(sample_audio: np.ndarray) -> None:
-    # DynamicSignalNormalizer: each time frame is zero-mean / unit-var.
-    feats = _mx_to_np(cm.compute_features(sample_audio))  # (1, T, 128)
-    frames = feats[0]  # (T, 128)
-    means = frames.mean(axis=1)
-    stds = frames.std(axis=1)
-    assert np.allclose(means, 0.0, atol=1e-2)
-    assert np.allclose(stds, 1.0, atol=1e-1)
+def test_compute_features_is_per_feature_normalized() -> None:
+    # The checkpoint's preprocessor sets normalize="per_feature": each mel bin
+    # is zero-mean / unit-var *over time*, matching NeMo's normalize_batch.
+    # Normalizing each time frame across bins instead measurably degrades the
+    # transcript, so the axis is load-bearing rather than cosmetic.
+    rng = np.random.default_rng(0)
+    audio = (rng.standard_normal(16_000) * 0.1).astype(np.float32)
+    frames = _mx_to_np(cm.compute_features(audio))[0]  # (T, 128)
+    means = frames.mean(axis=0)  # one mean per mel bin
+    stds = frames.std(axis=0)
+
+    # 128 mel filters over 257 rfft bins leaves some low-frequency filters
+    # empty; those bins are constant, so (x - mean) / (std + 1e-5) divides
+    # float32 rounding noise by the guard instead of normalizing. Assert on
+    # the bins that actually carry signal.
+    active = stds > 0.5
+    assert active.sum() > 64, f"only {active.sum()} of 128 mel bins carry signal"
+    assert np.allclose(means[active], 0.0, atol=1e-2)
+    assert np.allclose(stds[active], 1.0, atol=1e-1)
 
 
 def test_compute_features_dtype(sample_audio: np.ndarray) -> None:
@@ -470,11 +484,13 @@ def test_load_canary_weights_reads_config_and_safetensors(
     # A single small tensor is enough to exercise the load; the full key layout
     # is validated at the WER gate (ticket 11).
     small = mx.zeros((6, 8), dtype=mx.float32)
-    mx.save(str(model_dir / "model.safetensors"), small)
+    mx.save_safetensors(str(model_dir / "model.safetensors"), {"encoder.stub": small})
 
-    model = cm.load_canary_weights(model_dir, dtype=mx.float32)
-    assert isinstance(model, cm.CanaryModel)
-    assert model.tokenizer.vocab_size == 6
+    # config.json + model.safetensors are both read, and the coverage guard
+    # then rejects this stub: covering almost none of the module tree, it
+    # would otherwise have produced a model running on random init (issue #36).
+    with pytest.raises(RuntimeError, match="random init"):
+        cm.load_canary_weights(model_dir, dtype=mx.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -492,8 +508,10 @@ def test_canary_model_generate_returns_decoded_text(
     audio = np.zeros(1600, dtype=np.float32)
     mel = cm.compute_features(audio)
     prompt = tok.build_prompt("fi", "fi")
-    result = model.generate(mel, prompt, max_tokens=3)
-    assert isinstance(result, str)
+    text, language = model.generate(mel, prompt, max_tokens=3)
+    assert isinstance(text, str)
+    # An explicit prompt pins the language, so nothing was detected.
+    assert language is None
 
 
 def test_rel_pos_multi_head_attention_runs_with_mask_reshape() -> None:
@@ -538,7 +556,7 @@ def test_canary_config_from_dict_reads_all_sections(
     assert cfg.d_model == 16
     assert cfg.n_heads == 4
     assert cfg.vocab_size == 6
-    assert cfg.dec_hidden == 8
+    assert cfg.dec_hidden == 16
     assert cfg.head_num_classes == 6
 
 
@@ -711,17 +729,18 @@ class _FakeModel:
         cfg_dict = _tiny_canary_config_dict()
         self.tokenizer = cm.CanaryTokenizer.from_config(cfg_dict)
 
-    def generate(self, mel, prompt_ids, **kwargs):
-        return "fake transcript"
+    def generate(self, mel, prompt_ids=None, **kwargs) -> tuple[str, str | None]:
+        return "fake transcript", None
 
 
 class _StubModel:
     """A minimal stub whose generate() returns a fixed string."""
 
-    def __init__(self, generate_return: str) -> None:
+    def __init__(self, generate_return: str, language: str | None = None) -> None:
         cfg_dict = _tiny_canary_config_dict()
         self.tokenizer = cm.CanaryTokenizer.from_config(cfg_dict)
         self._ret = generate_return
+        self._language = language
 
-    def generate(self, mel, prompt_ids, **kwargs) -> str:
-        return self._ret
+    def generate(self, mel, prompt_ids=None, **kwargs) -> tuple[str, str | None]:
+        return self._ret, self._language

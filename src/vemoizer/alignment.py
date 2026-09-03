@@ -12,11 +12,21 @@ files. It operates on the word-list contract documented on
 it consumes the output of *any* backend reached through the ``Transcriber``
 Protocol — including Canary decode B, whose word-timestamp shape is
 normalised upstream before reaching this stage.
+
+Two flavours of the same DTW share one cost function: :func:`dtw_align` pairs
+word *strings* for the eval harness, and :func:`align_decodes` pairs the word
+*dicts* the consensus pipeline needs, so a disputed span can be anchored to
+real timestamps.
 """
 
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass
+from typing import Any
+
+from .progress import format_duration
 
 #: Cost of an insertion or deletion (a word on one side that has no
 #: counterpart on the other). Tunable by the disputed-span stage if needed.
@@ -265,3 +275,113 @@ def _backtrace(
             j -= 1
     out.reverse()
     return out
+
+
+logger = logging.getLogger(__name__)
+
+WordPairs = list[tuple[dict[str, Any] | None, dict[str, Any] | None]]
+
+
+def align_decodes(
+    result_a: dict[str, Any], result_b: dict[str, Any]
+) -> WordPairs | None:
+    """DTW-align the two word streams on word onsets.
+
+    Mirrors :func:`vemoizer.alignment.dtw_align` (same cost function and
+    diagonal-first tie-breaking) but emits the original word *dicts* (with
+    word and timestamps) instead of the word strings, so the disputed-span
+    stage can anchor each span to the actual word times. ``None`` when either
+    side produced no words or the alignment itself fails (fail-open).
+    """
+    words_a = result_a.get("words") or []
+    words_b = result_b.get("words") or []
+    if not words_a or not words_b:
+        # Worth a log line rather than a silent ``None``: a decode that
+        # produces text but no word timestamps disables the whole consensus
+        # path (no alignment -> no disputed spans -> no re-decode), and the
+        # run still completes, so the only symptom is a missing stage.
+        logger.warning(
+            "alignment skipped: decode A has %d words, decode B has %d "
+            "(both sides need word timestamps)",
+            len(words_a),
+            len(words_b),
+        )
+        return None
+    start = time.monotonic()
+    logger.info("alignment: DTW over %d x %d words", len(words_a), len(words_b))
+    try:
+        pairs = _dtw_word_dicts(words_a, words_b)
+    except Exception as e:  # noqa: BLE001 - fail-open stage boundary
+        logger.warning("alignment failed: %s", e)
+        return None
+    logger.info(
+        "alignment: %d pairs in %s",
+        len(pairs),
+        format_duration(time.monotonic() - start),
+    )
+    return pairs
+
+
+def _dtw_word_dicts(
+    words_a: list[dict[str, Any]], words_b: list[dict[str, Any]]
+) -> WordPairs:
+    """DTW word-dict alignment (dict-flavoured ``alignment.dtw_align``)."""
+    n, m = len(words_a), len(words_b)
+    inf = float("inf")
+    D: list[list[float]] = [[inf] * (m + 1) for _ in range(n + 1)]
+    D[0][0] = 0.0
+    for j in range(1, m + 1):
+        D[0][j] = D[0][j - 1] + GAP_PENALTY
+    for i in range(1, n + 1):
+        D[i][0] = D[i - 1][0] + GAP_PENALTY
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            diag = D[i - 1][j - 1] + _pair_cost(words_a, words_b, i - 1, j - 1)
+            up = D[i - 1][j] + GAP_PENALTY
+            left = D[i][j - 1] + GAP_PENALTY
+            best = diag
+            if up < best:
+                best = up
+            if left < best:
+                best = left
+            D[i][j] = best
+
+    pairs: WordPairs = []
+    i, j = n, m
+    while i > 0 or j > 0:
+        if i == 0:
+            pairs.append((None, words_b[j - 1]))
+            j -= 1
+            continue
+        if j == 0:
+            pairs.append((words_a[i - 1], None))
+            i -= 1
+            continue
+        diag = D[i - 1][j - 1] + _pair_cost(words_a, words_b, i - 1, j - 1)
+        up = D[i - 1][j] + GAP_PENALTY
+        left = D[i][j - 1] + GAP_PENALTY
+        if diag <= up and diag <= left:
+            pairs.append((words_a[i - 1], words_b[j - 1]))
+            i -= 1
+            j -= 1
+        elif up < left:
+            pairs.append((words_a[i - 1], None))
+            i -= 1
+        else:
+            pairs.append((None, words_b[j - 1]))
+            j -= 1
+    pairs.reverse()
+    return pairs
+
+
+def align_pairs_safe(
+    result_a: dict[str, Any] | None, result_b: dict[str, Any] | None
+) -> WordPairs | None:
+    """Alignment wrapper that fails open to ``None``."""
+    if result_a is None or result_b is None:
+        return None
+    try:
+        return align_decodes(result_a, result_b)
+    except Exception as e:  # noqa: BLE001 - fail-open stage boundary
+        logger.warning("alignment failed: %s", e)
+        return None

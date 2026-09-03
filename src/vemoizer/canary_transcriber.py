@@ -14,11 +14,12 @@ failure is logged and leaves ``self.model`` as ``None``; the next
 :meth:`transcribe` then raises ``RuntimeError`` rather than crashing the
 pipeline at import or construction time.
 
-Language: Canary-1b-v2 transcribes in a fixed target language and does not
-expose per-utterance language, so ``language`` is only populated when the
-backend reports one (project invariant #3: language is a property of a span,
-never a hardcoded file value). Word timestamps are not available from this
-port, so the result is text-only (``words``/``segments`` are optional in
+Language: the model names the source language in a prompt slot, so
+:meth:`CanaryModel.detect_language` reads that prediction and the decode runs
+in the detected language. ``language`` on the result is therefore a real
+per-slice detection, never a value pinned for the whole recording (project
+invariant #3). Word timestamps are not available from this port, so the
+result is text-only (``words``/``segments`` are optional in
 ``TranscriptionResult``).
 """
 
@@ -91,9 +92,10 @@ class CanaryTranscriber:
     def transcribe(self, audio: np.ndarray, **kwargs: Any) -> TranscriptionResult:
         """Transcribe audio (float32, mono, 16 kHz) to text (decode B).
 
-        ``language`` is only reported when the backend provides it; Canary
-        does not, so it is omitted. Word timestamps are not available from
-        this port, so ``words``/``segments`` are empty.
+        ``language`` carries the model's own detection for this slice. Word
+        timestamps are not available from this port, so ``words``/``segments``
+        are empty — which means the consensus alignment stage, needing word
+        times on both sides, currently skips decode B.
         """
         self._ensure_loaded()
         if self.model is None:
@@ -116,8 +118,9 @@ class CanaryTranscriber:
         start = time.time()
 
         mel = compute_features(audio, dtype=mx.bfloat16)
-        prompt_ids = self.model.tokenizer.build_prompt("unklang", "unklang")
-        text = self.model.generate(mel, prompt_ids)
+        # No prompt_ids and no language: generate() detects the language from
+        # the audio and transcribes in it (project invariant #3).
+        text, language = self.model.generate(mel)
 
         transcribe_time = time.time() - start
         audio_duration = len(audio) / SAMPLE_RATE
@@ -130,8 +133,8 @@ class CanaryTranscriber:
             "audio_duration": audio_duration,
             "rtf": transcribe_time / audio_duration if audio_duration > 0 else 0.0,
         }
-        # Populate language only if the backend happens to report one.
-        language = getattr(self.model, "language", None)
+        # Canary identifies the language per utterance, so this is a real
+        # detection for the decoded slice, not a file-level assumption.
         if language is not None:
             result["language"] = language
         return result
