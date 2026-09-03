@@ -19,6 +19,7 @@ import threading
 import time
 from typing import Any
 
+import mlx.core as mx
 import numpy as np
 
 from .transcriber import TranscriptionResult
@@ -99,7 +100,6 @@ class ParakeetTranscriber:
 
         start = time.time()
 
-        import mlx.core as mx
         from parakeet_mlx.audio import get_logmel
 
         with self._model_lock:
@@ -146,6 +146,7 @@ class ParakeetTranscriber:
         with self._load_once, self._model_lock:
             if self.model is not None:
                 self.model = None
+        mx.clear_cache()
 
 
 def _extract_words_segments(

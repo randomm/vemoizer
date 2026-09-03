@@ -29,6 +29,7 @@ import threading
 import time
 from typing import Any
 
+import mlx.core as mx
 import numpy as np
 
 from .canary_mlx import SAMPLE_RATE, compute_features, load_canary_weights
@@ -110,8 +111,6 @@ class CanaryTranscriber:
 
         start = time.time()
 
-        import mlx.core as mx
-
         mel = compute_features(audio, dtype=mx.bfloat16)
         prompt_ids = self.model.tokenizer.build_prompt("en", "en")
         text = self.model.generate(mel, prompt_ids)
@@ -138,3 +137,4 @@ class CanaryTranscriber:
         with self._load_once:
             if self.model is not None:
                 self.model = None
+        mx.clear_cache()

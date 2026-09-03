@@ -43,6 +43,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import mlx.core as mx
 import numpy as np
 
 from .spans import Span
@@ -283,3 +284,4 @@ class WhisperReDecodeTranscriber:
         self._mlx_whisper = None
         self._loaded = False
         self._load_start = None
+        mx.clear_cache()
