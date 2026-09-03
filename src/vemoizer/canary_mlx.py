@@ -235,7 +235,11 @@ class RelPosMultiHeadAttention(nn.Module):
         # relative bias: q_v · p^T, shifted so that position (i, j) sees (i - j)
         matrix_bd = self._rel_shift(q_v @ p.swapaxes(-2, -1))[:, :, :, :q_seq]
         matrix_bd = matrix_bd * self.scale
-        matrix_bd = mx.expand_dims(matrix_bd, 1)
+        # mx.fast.scaled_dot_product_attention expects a mask of at most rank 4,
+        # so fold (batch, head) into a single axis: (b,1,h,q,p)->(b*h,q,p).
+        matrix_bd = mx.expand_dims(matrix_bd, 1).reshape(
+            -1, matrix_bd.shape[2], matrix_bd.shape[3]
+        )
 
         o = mx.fast.scaled_dot_product_attention(
             q_u, k, v, scale=self.scale, mask=matrix_bd

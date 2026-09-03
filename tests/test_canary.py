@@ -471,6 +471,40 @@ def test_canary_model_generate_returns_decoded_text(
     assert isinstance(result, str)
 
 
+def test_rel_pos_multi_head_attention_runs_with_mask_reshape() -> None:
+    """Regression: the attention block's T5-style relative-position bias must
+    be reshaped to a rank-3 mask ``(b*h, q, p)`` before being handed to
+    ``mx.fast.scaled_dot_product_attention``. The pre-fix code produced a rank-5
+    mask ``(b, 1, h, q, p)`` which the MLX kernel rejects with
+    ``ValueError: mask ... expected to have at most rank 4``.
+
+    This builds the block directly with a tiny config, runs it with a
+    production-shaped ``b=1`` mel plus a T5-style ``pos_emb`` of length ``2L-1``
+    (which is what ``CanaryModel.pre_encode`` produces via ``pos_enc(enc.shape[1])``),
+    and pins the mask-broadcast contract end-to-end.
+    """
+    import mlx.core as mx
+
+    n_heads = 4
+    d_model = 8
+    block = cm.RelPosMultiHeadAttention(d_model=d_model, n_heads=n_heads)
+
+    batch = 1
+    L = 16  # query length; pos_emb is 2L-1 = 31 (T5-style).
+    mx.random.seed(1)
+    x = mx.random.normal(shape=(batch, L, d_model))
+    mx.random.seed(2)
+    pos_emb = mx.random.normal(shape=(1, 2 * L - 1, d_model))
+
+    out = block(x, pos_emb)
+    assert out.shape == (batch, L, d_model)
+    # Finite values: a shape/broadcast failure would produce NaN or crash earlier.
+    assert np.all(np.isfinite(_mx_to_np(out)))
+
+    # Force a forward pass so the reshape actually runs (not just Python-level).
+    mx.eval(out)
+
+
 def test_canary_config_from_dict_reads_all_sections(
     canary_config_dict: dict[str, Any],
 ) -> None:
