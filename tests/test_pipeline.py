@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import vemoizer.eval_cli as eval_cli
 import vemoizer.pipeline as pipeline
 import vemoizer.progress as progress
 from vemoizer.pipeline import transcribe_file
@@ -531,7 +532,7 @@ def test_decode_only_parakeet_returns_single_decode(tmp_path, monkeypatch) -> No
         {"text": "vain parakeet", "words": []},
         {"text": "vain canary", "words": []},
     )
-    result = pipeline.transcribe_decode_only("/nonexistent.m4a", backend="parakeet")
+    result = eval_cli.transcribe_decode_only("/nonexistent.m4a", backend="parakeet")
     assert result["text"] == "vain parakeet"
 
 
@@ -543,13 +544,13 @@ def test_decode_only_canary_returns_single_decode(tmp_path, monkeypatch) -> None
         {"text": "vain parakeet", "words": []},
         {"text": "vain canary", "words": []},
     )
-    result = pipeline.transcribe_decode_only("/nonexistent.m4a", backend="canary")
+    result = eval_cli.transcribe_decode_only("/nonexistent.m4a", backend="canary")
     assert result["text"] == "vain canary"
 
 
 def test_decode_only_unknown_backend_raises() -> None:
     with pytest.raises(ValueError, match="unknown backend"):
-        pipeline.transcribe_decode_only("/nonexistent.m4a", backend="whisperx")
+        eval_cli.transcribe_decode_only("/nonexistent.m4a", backend="whisperx")
 
 
 def test_decode_only_ingest_error_fails_open(monkeypatch) -> None:
@@ -559,7 +560,7 @@ def test_decode_only_ingest_error_fails_open(monkeypatch) -> None:
         raise IngestError("corrupt")
 
     monkeypatch.setattr(pipeline, "ingest_audio", _boom)
-    result = pipeline.transcribe_decode_only("/nonexistent.m4a", backend="parakeet")
+    result = eval_cli.transcribe_decode_only("/nonexistent.m4a", backend="parakeet")
     assert result["text"] == ""
     assert "error" in result
 
@@ -568,7 +569,7 @@ def test_decode_only_backend_failure_fails_open(monkeypatch) -> None:
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     _patch_decoders(monkeypatch, None, None)  # constructors raise
-    result = pipeline.transcribe_decode_only("/nonexistent.m4a", backend="parakeet")
+    result = eval_cli.transcribe_decode_only("/nonexistent.m4a", backend="parakeet")
     assert result["text"] == ""
 
 
@@ -869,3 +870,40 @@ def test_dictation_profile_never_touches_whisper(tmp_path, monkeypatch) -> None:
         "/nonexistent.m4a", config_path=str(tmp_path / "none.toml")
     )
     assert result["text"] == "vain parakeet"
+
+
+def test_repair_pass_updates_paragraphs_only(tmp_path, monkeypatch) -> None:
+    _consensus_setup(monkeypatch)
+    _patch_redecode(monkeypatch, "moikka")
+
+    class _Client:
+        def adjudicate(self, a_text, candidates, context=""):
+            return "moikka"
+
+        def complete(self, system, user, max_tokens=2048):
+            return user.replace("moikka", "moikka!")  # a visible "repair"
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(pipeline, "LLMClient", lambda cfg: _Client())
+    monkeypatch.setattr(pipeline, "generate_notes", lambda client, text: None)
+    cfg = _llm_config(tmp_path)
+    result = transcribe_file("/nonexistent.m4a", config_path=str(cfg), repair=True)
+    assert result["paragraphs"][0]["text"] == "moikka!"
+    # segments stay the verbatim record
+    assert result["segments"][0]["text"] == "moikka"
+
+
+def test_repair_off_by_default(tmp_path, monkeypatch) -> None:
+    _consensus_setup(monkeypatch)
+    _patch_redecode(monkeypatch, "moikka")
+    monkeypatch.setattr(
+        pipeline,
+        "repair_paragraphs",
+        lambda client, paras: (_ for _ in ()).throw(AssertionError("repair ran")),
+    )
+    result = transcribe_file(
+        "/nonexistent.m4a", config_path=str(tmp_path / "none.toml")
+    )
+    assert result["text"]

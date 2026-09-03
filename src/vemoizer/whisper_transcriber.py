@@ -208,7 +208,9 @@ def decode_meeting(
     transcriber: WhisperTranscriber | None = None
     try:
         transcriber = WhisperTranscriber()
-        result = transcriber.transcribe(audio)
+        # Widen from the TranscriptionResult TypedDict: the slice records are
+        # a pipeline-internal extension, not part of the transcriber contract.
+        result: dict[str, Any] = dict(transcriber.transcribe(audio))
         result["slices"] = slice_records_from_words(
             list(result.get("words") or []), slices, language=result.get("language")
         )
@@ -219,7 +221,7 @@ def decode_meeting(
             len(result.get("words") or []),
             1.0 / rtf if rtf else 0.0,
         )
-        return dict(result)
+        return result
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
         logger.warning("decode A (whisper) failed, using best available: %s", e)
         return None
