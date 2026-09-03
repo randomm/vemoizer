@@ -119,6 +119,61 @@ def test_main_is_callable_entry_point() -> None:
     assert callable(main)
 
 
+# -- format handling (issue #49) -----------------------------------------
+#
+# The default invocation used to crash: --format defaults to "all", the
+# format list was used verbatim, and FORMAT_EXTENSIONS["all"] raised
+# KeyError -- after the full multi-minute transcription had completed.
+
+
+def test_default_format_all_writes_every_extension(tmp_path, monkeypatch) -> None:
+    import vemoizer.pipeline as pipeline_module
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "transcribe_file",
+        lambda path, **kw: {"text": "moikka", "segments": []},
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["transcribe", "memo.m4a"])
+    assert result.exit_code == 0
+    for ext in (".txt", ".json", ".srt", ".vtt", ".md"):
+        assert (tmp_path / f"memo{ext}").is_file(), f"missing memo{ext}"
+
+
+def test_unknown_format_rejected_before_transcription(tmp_path, monkeypatch) -> None:
+    """An invalid --format must fail fast, not after minutes of decoding."""
+    import vemoizer.pipeline as pipeline_module
+
+    def _must_not_run(path, **kw):
+        raise AssertionError("transcribe_file ran despite an invalid --format")
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", _must_not_run)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["transcribe", "memo.m4a", "--format", "txt,docx"])
+    assert result.exit_code == 2
+    assert "docx" in result.stderr
+
+
+def test_write_failure_exits_nonzero_without_success_line(
+    tmp_path, monkeypatch
+) -> None:
+    import vemoizer.pipeline as pipeline_module
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "transcribe_file",
+        lambda path, **kw: {"text": "moikka", "segments": []},
+    )
+    monkeypatch.chdir(tmp_path)
+    # An unwritable target: the stem collides with an existing directory.
+    blocker = tmp_path / "memo.txt"
+    blocker.mkdir()
+    result = runner.invoke(app, ["transcribe", "memo.m4a", "--format", "txt"])
+    assert result.exit_code != 0
+    assert "wrote transcript" not in result.stdout
+
+
 # -- polish (issue #59) --------------------------------------------------
 
 
