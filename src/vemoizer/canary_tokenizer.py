@@ -12,7 +12,6 @@ from typing import Any
 
 # Canary special-token strings (stable across the Canary model family).
 CANARY_BOS = "<|startoftranscript|>"
-CANARY_EOS = chr(0x03)  # the SentencePiece end-of-transcript control token
 CANARY_PAD = "<pad>"
 CANARY_NOSPEECH = "<|nospeech|>"
 CANARY_PNC = "<|pnc|>"
@@ -41,6 +40,12 @@ def _parse_uvarint(buf: bytes, pos: int) -> tuple[int, int]:
 def parse_sentencepiece_model(data: bytes) -> tuple[list[str], dict[str, int]]:
     """Parse a serialized SentencePieceModel protobuf.
 
+    Wire format (SentencePiece proto): top-level field 1 = repeated Piece
+    (the vocabulary); top-level field 2 = trainer_spec; field 3 = params.
+    Each Piece sub-message: field 1 = piece text (string, wire 2),
+    field 2 = score (fixed32, wire 5), field 3 = type (varint, wire 0).
+    The token id is the 0-based index in the repeated ``pieces`` list.
+
     Returns ``(pieces, special_ids)`` where *pieces* is the id-ordered list
     of vocab pieces and *special_ids* maps special-token strings (those
     starting with ``<|``) to their ids. This is the minimal reader needed to
@@ -55,10 +60,9 @@ def parse_sentencepiece_model(data: bytes) -> tuple[list[str], dict[str, int]]:
         tag, pos = _parse_uvarint(data, pos)
         field_no = tag >> 3
         wire = tag & 7
-        if field_no == 2 and wire == 2:  # repeated Piece pieces
+        if field_no == 1 and wire == 2:  # repeated Piece pieces
             length, pos = _parse_uvarint(data, pos)
             end = pos + length
-            piece_id = -1
             piece = ""
             q = pos
             while q < end:
@@ -66,14 +70,13 @@ def parse_sentencepiece_model(data: bytes) -> tuple[list[str], dict[str, int]]:
                 pfield = ptag >> 3
                 pwire = ptag & 7
                 if pwire == 0:
-                    val, q = _parse_uvarint(data, q)
-                    if pfield == 1:
-                        piece_id = val
+                    # VARINT field — skip (type enum is field 3)
+                    _, q = _parse_uvarint(data, q)
                 elif pwire == 2:
                     plen, q = _parse_uvarint(data, q)
                     payload = data[q : q + plen]
                     q += plen
-                    if pfield == 2:
+                    if pfield == 1:
                         piece = payload.decode("utf-8", errors="replace")
                 elif pwire == 5:
                     q += 4
@@ -81,12 +84,9 @@ def parse_sentencepiece_model(data: bytes) -> tuple[list[str], dict[str, int]]:
                     q += 8
                 else:
                     break
-            if piece_id >= 0:
-                while len(pieces) <= piece_id:
-                    pieces.append("")
-                pieces[piece_id] = piece
-                if piece.startswith("<|"):
-                    special_ids[piece] = piece_id
+            pieces.append(piece)
+            if piece.startswith("<|"):
+                special_ids[piece] = len(pieces) - 1
             pos = end
         else:
             # Skip other fields (we only need pieces).
@@ -150,7 +150,16 @@ class CanaryTokenizer:
 
     @property
     def eos_id(self) -> int:
-        return self.special_tokens[CANARY_EOS]
+        """Id of the transcript end token, or -1 if the vocab has none.
+
+        The real Canary-1b-v2 SentencePiece vocab (16k pieces) has no explicit
+        end-of-transcript token — its special tokens are only ``<|...|>``
+        prompts, so decoding terminates on the ``max_tokens`` budget.
+        """
+        for token, token_id in self.special_tokens.items():
+            if "endoftranscript" in token:
+                return token_id
+        return -1
 
     @property
     def bos_id(self) -> int:
