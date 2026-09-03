@@ -227,7 +227,7 @@ class RelPosMultiHeadAttention(nn.Module):
         k = k.reshape(batch, q_seq, -1, self.head_dim).swapaxes(1, 2)
         v = v.reshape(batch, q_seq, -1, self.head_dim).swapaxes(1, 2)
         p = p.reshape(p.shape[0], pos_len, -1, self.head_dim).swapaxes(1, 2)
-        p = mx.broadcast_to(p, (batch, -1, -1, self.head_dim))
+        p = mx.broadcast_to(p, (batch, p.shape[1], p.shape[2], self.head_dim))
 
         q_u = (q + self.pos_bias_u[None, None]).swapaxes(1, 2)
         q_v = (q + self.pos_bias_v[None, None]).swapaxes(1, 2)
