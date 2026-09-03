@@ -29,9 +29,11 @@ _TURNS = [
 
 
 def _fake_diarization() -> mock.Mock:
+    """Annotation fake matching the REAL pyannote contract:
+    itertracks(yield_label=True) yields (segment, track, label) tuples."""
     diarization = mock.Mock()
     diarization.itertracks.return_value = [
-        SimpleNamespace(start=s, end=e, speaker=sp) for s, e, sp in _TURNS
+        (SimpleNamespace(start=s, end=e), "track", sp) for s, e, sp in _TURNS
     ]
     return diarization
 
@@ -44,7 +46,9 @@ def _fake_pipeline_for(device: str) -> mock.Mock:
     """
     pipeline = mock.Mock()
     pipeline.to.side_effect = None
-    pipeline.return_value = _fake_diarization()
+    wrapper = mock.Mock(spec=["speaker_diarization", "speaker_embeddings"])
+    wrapper.speaker_diarization = _fake_diarization()
+    pipeline.return_value = wrapper
     if device == "mps" and getattr(_fake_pipeline_for, "mps_fails", False):
         pipeline.__call__ = mock.Mock(side_effect=RuntimeError("MPS kernel crash"))
     return pipeline
@@ -124,3 +128,29 @@ def test_attribution_string_is_cc_by():
     )
     assert "CC-BY-4.0" in ATTRIBUTION
     assert DIARIZATION_REPO_ID == "pyannote/speaker-diarization-community-1"
+
+
+def test_pipeline_receives_waveform_tensor_not_ndarray(monkeypatch):
+    """pyannote 4.x expects {"waveform": Tensor(channel, time), "sample_rate"}.
+
+    The old {"audio": ndarray} key means "a file path" to pyannote and is
+    rejected at runtime — the stage could never actually run.
+    """
+    received = {}
+
+    def fake_pipeline(waveforms):
+        received.update(waveforms)
+        wrapper = mock.Mock(spec=["speaker_diarization"])
+        wrapper.speaker_diarization = _fake_diarization()
+        return wrapper
+
+    pipeline = mock.Mock(side_effect=fake_pipeline)
+    monkeypatch.setattr("vemoizer.diarization._load_pipeline", lambda device: pipeline)
+    diarize(_AUDIO, device="cpu")
+
+    assert "waveform" in received
+    assert "audio" not in received
+    assert received["sample_rate"] == 16_000
+    waveform = received["waveform"]
+    # (channel, time) with a leading singleton channel dim
+    assert tuple(waveform.shape) == (1, len(_AUDIO))
