@@ -41,6 +41,7 @@ class ParakeetTranscriber:
 
     def __init__(self) -> None:
         self.model: Any = None
+        self._load_failed = False
         self._model_lock = threading.Lock()
         self._load_once = threading.Lock()
 
@@ -56,6 +57,8 @@ class ParakeetTranscriber:
         with self._load_once:
             if self.model is not None:
                 return
+            if self._load_failed:
+                raise RuntimeError("Parakeet model failed to load (not retrying)")
             logger.info("Loading Parakeet model: %s@%s", MODEL_ID, MODEL_REVISION)
             start = time.time()
             try:
@@ -71,6 +74,7 @@ class ParakeetTranscriber:
             except Exception as e:  # noqa: BLE001 - logged; model-load guard
                 logger.error("Failed to load Parakeet model: %s", e)
                 self.model = None
+                self._load_failed = True
                 return
             logger.info("Parakeet model loaded in %.2fs", time.time() - start)
 

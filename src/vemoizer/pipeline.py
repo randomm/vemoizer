@@ -28,6 +28,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+import mlx.core as mx
 import numpy as np
 
 # The consensus alignment reuses the stage's cost function and gap penalty so
@@ -67,12 +68,18 @@ def _load_llm_config(path: str | None) -> LLMConfig | None:
 
 
 def _decode(transcriber: Any, audio: np.ndarray, label: str) -> dict[str, Any] | None:
-    """Run one full decode; return its result or ``None`` (fail-open)."""
+    """Run one full decode; return its result or ``None`` (fail-open).
+
+    Frees the Metal cache after every slice so GPU memory does not accumulate
+    across VAD slices.
+    """
     try:
         return transcriber.transcribe(audio)
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
         logger.warning("%s failed, using best available result: %s", label, e)
         return None
+    finally:
+        mx.clear_cache()
 
 
 def _speech_slices(audio: np.ndarray) -> list[tuple[int, np.ndarray]]:

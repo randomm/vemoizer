@@ -49,6 +49,7 @@ class CanaryTranscriber:
 
     def __init__(self) -> None:
         self.model: Any = None
+        self._load_failed = False
         self._load_once = threading.Lock()
 
     def _load_model(self) -> None:
@@ -63,6 +64,8 @@ class CanaryTranscriber:
         with self._load_once:
             if self.model is not None:
                 return
+            if self._load_failed:
+                raise RuntimeError("Canary model failed to load (not retrying)")
             logger.info("Loading Canary model: %s@%s", MODEL_ID, MODEL_REVISION)
             start = time.time()
             try:
@@ -77,6 +80,7 @@ class CanaryTranscriber:
             except Exception as e:  # noqa: BLE001 - logged; model-load guard
                 logger.error("Failed to load Canary model: %s", e)
                 self.model = None
+                self._load_failed = True
                 return
             logger.info("Canary model loaded in %.2fs", time.time() - start)
 
