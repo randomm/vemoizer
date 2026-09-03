@@ -38,6 +38,9 @@ packages = ["src/vemoizer"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The models marker is documented as opt-in; this makes that true. A plain
+# `pytest` run must never load or download model weights (AGENTS.md).
+addopts = "-m 'not models'"
 markers = [
     "models: model-backed tests that download real weights; opt-in via `uv run pytest -m models` (AGENTS.md: unit tests must not touch the network)",
 ]

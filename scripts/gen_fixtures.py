@@ -1,33 +1,27 @@
 """Generate the Finnish fixture corpus under ``tests/fixtures/corpus/``.
 
-The checked-in corpus is the default mode: deterministic 16 kHz mono WAV
-files synthesized locally (``wave`` + ``numpy``), paired by stem with a
-``.txt`` reference transcript. This keeps the fixtures reproducible without
-touching the network and keeps CI free of model downloads.
+The checked-in corpus is **real synthesized Finnish speech** from the Piper
+voice ``fi_FI-harri-low`` (dataset licensed CC0; the voice's Ryan lineage is
+unencumbered, unlike ``harri-medium``'s Blizzard lineage — and unlike macOS
+``say`` output, which Apple's SLA forbids redistributing). Piper is a
+dev-time tool only, never a runtime dependency::
 
-Piper mode
-----------
+    uv pip install piper-tts
+    uv run python scripts/gen_fixtures.py
 
-The Piper Finnish voice (``fi_FY``) can optionally be used to produce
-real TTS audio for the same stems. Piper is **not** a runtime dependency
-of vemoizer — install it manually if you want real Finnish speech in the
-fixtures::
-
-    pip install piper-tts
-
-Then run::
-
-    uv run python scripts/gen_fixtures.py --piper
-
-Piper emits 22050 Hz 16-bit mono WAV; the script resamples to the 16 kHz
-mono contract using ffmpeg and writes the paired ``.txt`` next to each
-WAV. The corpus directory is recreated on every run.
-
-Stem-paired contract (consumed by ``vemoizer eval`` in issue #11)::
+The voice model is downloaded revision-pinned from ``rhasspy/piper-voices``
+(project invariant #4 applied to dev assets) and cached in the HF cache.
+Output is resampled to the 16 kHz mono 16-bit contract via ffmpeg and
+paired by stem with a ``.txt`` reference transcript::
 
     tests/fixtures/corpus/<stem>.wav  <->  tests/fixtures/corpus/<stem>.txt
 
-Every WAV MUST have a same-stem ``.txt`` with the reference transcript.
+``--tones`` instead writes the deterministic sine-tone corpus (no speech,
+no downloads) — useful only for exercising the audio contract and the
+corpus-walking machinery, never for WER numbers.
+
+After regenerating, listen-check the WAVs and re-measure the WER baseline
+(``vemoizer eval --backend all --update-baseline``) in a dedicated commit.
 """
 
 from __future__ import annotations
@@ -39,57 +33,34 @@ import subprocess
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
 
 import numpy as np
 
 from vemoizer.audio_contract import SAMPLE_RATE  # single home for the 16 kHz contract
 
-# piper-tts is an optional dependency (see the --piper flag below). We keep
-# it out of pyproject.toml's runtime deps on purpose — the checked-in
-# fixture corpus does NOT need Piper, and the CI path should not download
-# TTS weights. The import is guarded so the script's default mode works
-# without Piper installed.
-try:  # pragma: no cover - depends on install-time state
-    from piper import PiperVoice
-
-    _PIPER_AVAILABLE: bool = True
-except ImportError:  # pragma: no cover - depends on install-time state
-    PiperVoice = None  # type: ignore[assignment, misc]
-    _PIPER_AVAILABLE = False
-
 SAMPLE_WIDTH = 2  # 16-bit PCM
+
+#: Piper voice, revision-pinned inside rhasspy/piper-voices.
+PIPER_REPO = "rhasspy/piper-voices"
+PIPER_REVISION = "142ef8f267e1904d9da7cde9df3d7237ac809b1e"
+PIPER_VOICE_PATH = "fi/fi_FI/harri/low/fi_FI-harri-low.onnx"
 
 
 @dataclass(frozen=True)
 class Fixture:
     stem: str
     transcript: str
-    plan: tuple[tuple[float, float, float, float], ...]
 
 
-#: Each entry: (stem, reference transcript, synthesis plan).
-#: The plan is a list of (start_s, end_s, freq_hz, amplitude) segments used
-#: by the deterministic synthesizer to approximate speech-like cadence.
-#
-#: Transcripts intentionally mix Finnish with English technical terms —
-#: the exact code-switching profile this project is built for. See
-#: AGENTS.md invariant #3.
+#: Transcripts intentionally cover the project's real profile (AGENTS.md
+#: invariant #3): mostly Finnish with English technical terms seeping in,
+#: plus pure-Finnish and pure-English controls.
 FIXTURES: tuple[Fixture, ...] = (
     Fixture(
         stem="fi_code_switch_short",
         transcript=(
-            "Hei, tänään testataan uude API endpoint ja se toimii "
+            "Hei, tänään testataan uusi API endpoint ja se toimii "
             "toivomusten mukaisesti."
-        ),
-        plan=(
-            (0.0, 0.3, 300.0, 0.4),
-            (0.35, 0.55, 280.0, 0.35),
-            (0.6, 0.9, 320.0, 0.4),
-            (0.95, 1.3, 310.0, 0.38),
-            (1.35, 1.7, 290.0, 0.35),
-            (1.75, 2.1, 305.0, 0.4),
-            (2.15, 2.5, 315.0, 0.4),
         ),
     ),
     Fixture(
@@ -98,16 +69,6 @@ FIXTURES: tuple[Fixture, ...] = (
             "Meidän deployment pipeline käyttää GitHub Actions ja "
             "Kamal kun deployaamme productioniin."
         ),
-        plan=(
-            (0.0, 0.35, 295.0, 0.4),
-            (0.4, 0.7, 310.0, 0.38),
-            (0.75, 1.1, 300.0, 0.4),
-            (1.15, 1.55, 285.0, 0.35),
-            (1.6, 2.0, 320.0, 0.4),
-            (2.05, 2.4, 305.0, 0.38),
-            (2.45, 2.85, 290.0, 0.35),
-            (2.9, 3.3, 315.0, 0.4),
-        ),
     ),
     Fixture(
         stem="fi_technical_terms",
@@ -115,15 +76,34 @@ FIXTURES: tuple[Fixture, ...] = (
             "Backendissa on useita API rate limit ja se pitää "
             "huomioida load testingissä."
         ),
-        plan=(
-            (0.0, 0.4, 300.0, 0.4),
-            (0.45, 0.8, 285.0, 0.35),
-            (0.85, 1.25, 315.0, 0.4),
-            (1.3, 1.7, 295.0, 0.38),
-            (1.75, 2.15, 310.0, 0.4),
-            (2.2, 2.6, 290.0, 0.35),
-            (2.65, 3.1, 320.0, 0.4),
-            (3.15, 3.5, 305.0, 0.38),
+    ),
+    Fixture(
+        stem="fi_pure_short",
+        transcript="Muista ostaa maitoa ja leipää kaupasta kotimatkalla.",
+    ),
+    Fixture(
+        stem="en_pure_short",
+        transcript="The quarterly review meeting is scheduled for next Thursday.",
+    ),
+    Fixture(
+        stem="fi_code_switch_dense",
+        transcript=(
+            "Meidän backlog on täynnä, mutta sprint planning siirtyy "
+            "koska product owner on lomalla."
+        ),
+    ),
+    Fixture(
+        stem="fi_numbers",
+        transcript=(
+            "Julkaisu siirtyy maanantaille kello neljätoista ja "
+            "kokous alkaa viisitoista yli."
+        ),
+    ),
+    Fixture(
+        stem="fi_product_names",
+        transcript=(
+            "Käytämme Kubernetesta ja PostgreSQL-tietokantaa, mutta "
+            "Redis-cache pitää vielä konfiguroida."
         ),
     ),
 )
@@ -140,8 +120,6 @@ def resolve_corpus_dir(out: Path) -> Path:
     """
     resolved = out.resolve()
     project_root = Path(__file__).resolve().parent.parent
-    # Allow the directory itself or any descendant of the project root — this
-    # blocks a symlinked corpus dir (or its parent) from pointing outside.
     if not (resolved == project_root or project_root in resolved.parents):
         raise RuntimeError(
             f"refusing to write corpus outside the project root: {resolved} "
@@ -150,52 +128,44 @@ def resolve_corpus_dir(out: Path) -> Path:
     return resolved
 
 
-def synthesize_wav(fix: Fixture, out_path: Path) -> None:
-    """Write a 16 kHz mono 16-bit WAV approximating the fixture's transcript.
+def synthesize_tones(fix: Fixture, out_path: Path) -> None:
+    """Write a deterministic sine-tone WAV standing in for the transcript.
 
-    The synthesis is deterministic: a sum of per-segment sine waves shaped
-    by the fixture's plan. This is *not* speech — it is a stable,
-    reproducible placeholder that satisfies the 16 kHz mono contract and
-    lets the WER harness and alignment stages exercise their code paths
-    without downloading Piper or any other model.
+    Not speech: one short tone burst per transcript word, frequencies varied
+    deterministically per word index. Satisfies the 16 kHz mono contract so
+    the harness and contract tests can run without any download; useless for
+    WER (every model rightly transcribes silence-with-beeps as nothing).
     """
-    total_frames = int(math.ceil(fix.plan[-1][1] * SAMPLE_RATE))
-    frames = np.zeros(total_frames, dtype=np.int16)
-
-    for start_s, end_s, freq_hz, amplitude in fix.plan:
-        start = int(start_s * SAMPLE_RATE)
-        end = min(int(end_s * SAMPLE_RATE), total_frames)
-        if end <= start:
-            continue
+    words = fix.transcript.split()
+    seg = 0.28
+    gap = 0.06
+    total_frames = int(math.ceil(len(words) * (seg + gap) * SAMPLE_RATE))
+    frames = np.zeros(total_frames, dtype=np.float64)
+    for i, _word in enumerate(words):
+        start = int(i * (seg + gap) * SAMPLE_RATE)
+        end = min(start + int(seg * SAMPLE_RATE), total_frames)
         t = np.arange(end - start) / SAMPLE_RATE
-        tone = np.sin(2.0 * math.pi * freq_hz * t)
-        # Short attack/release envelope (always symmetric) to avoid clicks
-        # at segment edges.
+        freq = 280.0 + (i % 5) * 12.0
+        tone = 0.35 * np.sin(2.0 * math.pi * freq * t)
         env = np.ones_like(t)
         env_len = min(8, len(t) // 4)
         if env_len > 0:
             env[:env_len] *= np.linspace(0.0, 1.0, env_len)
             env[-env_len:] *= np.linspace(1.0, 0.0, env_len)
-        peak = int(amplitude * 32767)
-        frames[start:end] += (tone * env * peak).astype(np.int16)
-
-    frames = np.clip(frames, -32768, 32767).astype(np.int16)
-
+        frames[start:end] += tone * env
+    pcm = np.clip(frames * 32767, -32768, 32767).astype(np.int16)
     with wave.open(str(out_path), "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(SAMPLE_WIDTH)
         w.setframerate(SAMPLE_RATE)
-        w.writeframes(frames.tobytes())
+        w.writeframes(pcm.tobytes())
 
 
-def resample_piper_output(src: Path, dst: Path) -> None:
-    """Resample a Piper 22050 Hz WAV to the 16 kHz mono contract via ffmpeg."""
+def resample_to_contract(src: Path, dst: Path) -> None:
+    """Resample any WAV to the 16 kHz mono 16-bit contract via ffmpeg."""
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
-        raise RuntimeError(
-            "ffmpeg not found on PATH; required for Piper resampling. "
-            "Install ffmpeg or use the default (non-Piper) fixture mode."
-        )
+        raise RuntimeError("ffmpeg not found on PATH; required for resampling.")
     try:
         subprocess.run(
             [
@@ -220,9 +190,7 @@ def resample_piper_output(src: Path, dst: Path) -> None:
             timeout=300,
         )
     except subprocess.TimeoutExpired as e:
-        raise RuntimeError(
-            f"ffmpeg timed out after 300s resampling {src} -> {dst}"
-        ) from e
+        raise RuntimeError(f"ffmpeg timed out resampling {src} -> {dst}") from e
     except subprocess.CalledProcessError as e:
         stderr_tail = (e.stderr or "").strip()[-2000:]
         raise RuntimeError(
@@ -231,55 +199,60 @@ def resample_piper_output(src: Path, dst: Path) -> None:
         ) from e
 
 
-def _require_piper() -> None:
-    if not _PIPER_AVAILABLE:
+def _load_piper_voice():
+    """Download (revision-pinned) and load the fi_FI-harri-low Piper voice."""
+    try:
+        from piper import PiperVoice
+    except ImportError as e:
         raise RuntimeError(
-            "piper-tts is not installed. Install it with `pip install piper-tts` "
-            "and re-run this script, or drop --piper to use the deterministic "
-            "built-in synthesis (the default checked-in mode)."
-        )
+            "piper-tts is not installed. Install it with `uv pip install "
+            "piper-tts` and re-run, or pass --tones for the no-download "
+            "sine-tone corpus."
+        ) from e
+    from huggingface_hub import hf_hub_download
+
+    model = hf_hub_download(PIPER_REPO, PIPER_VOICE_PATH, revision=PIPER_REVISION)
+    config = hf_hub_download(
+        PIPER_REPO, f"{PIPER_VOICE_PATH}.json", revision=PIPER_REVISION
+    )
+    return PiperVoice.load(model, config_path=config)
 
 
-def generate_piper(fix: Fixture, corpus_dir: Path, piper_voice: str) -> None:
-    """Synthesize a fixture with Piper TTS and resample to 16 kHz mono.
+def generate_piper(voice, fix: Fixture, out_path: Path) -> None:
+    """Synthesize one fixture with Piper and resample to the contract.
 
-    Piper output lands in a ``.tmp`` file and is atomically moved into
-    place only after resampling succeeds, so a mid-write Piper failure
-    cannot leave a corrupt ``<stem>.wav`` behind.
+    Piper output lands in a ``.tmp`` file and is moved into place only
+    after resampling succeeds, so a mid-write failure cannot leave a
+    corrupt ``<stem>.wav`` behind.
     """
-    _require_piper()
-    # _require_piper() already raises if PiperVoice is None; the cast tells
-    # ty we are in the available branch (the import guard hides the None case).
-    voice = cast(type[PiperVoice], PiperVoice).load(piper_voice)
-    out_path = corpus_dir / f"{fix.stem}.wav"
     tmp_path = out_path.with_suffix(".wav.tmp")
     try:
-        voice.synthesize(fix.transcript, wav_file=str(tmp_path))
-        resample_piper_output(tmp_path, out_path)
-    except BaseException:
+        with wave.open(str(tmp_path), "wb") as w:
+            voice.synthesize_wav(fix.transcript, w)
+        resample_to_contract(tmp_path, out_path)
+    finally:
         if tmp_path.exists():
             tmp_path.unlink()
-        raise
 
 
-def generate_corpus(
-    corpus_dir: Path, *, use_piper: bool, piper_voice: str
-) -> list[Path]:
+def generate_corpus(corpus_dir: Path, *, tones: bool) -> list[Path]:
     """(Re)generate the full corpus; returns the written WAV paths."""
     if corpus_dir.exists():
         for entry in corpus_dir.iterdir():
             entry.unlink()
     corpus_dir.mkdir(parents=True, exist_ok=True)
 
+    voice = None if tones else _load_piper_voice()
     written: list[Path] = []
     for fix in FIXTURES:
         wav_path = corpus_dir / f"{fix.stem}.wav"
-        txt_path = corpus_dir / f"{fix.stem}.txt"
-        if use_piper:
-            generate_piper(fix, corpus_dir, piper_voice)
+        if tones:
+            synthesize_tones(fix, wav_path)
         else:
-            synthesize_wav(fix, wav_path)
-        txt_path.write_text(fix.transcript + "\n", encoding="utf-8")
+            generate_piper(voice, fix, wav_path)
+        (corpus_dir / f"{fix.stem}.txt").write_text(
+            fix.transcript + "\n", encoding="utf-8"
+        )
         written.append(wav_path)
     return written
 
@@ -287,14 +260,10 @@ def generate_corpus(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--piper",
+        "--tones",
         action="store_true",
-        help="use Piper TTS (fi_FY) instead of the built-in deterministic synthesis",
-    )
-    parser.add_argument(
-        "--voice",
-        default="fi_FY",
-        help="Piper voice name (default: fi_FY); only used with --piper",
+        help="write the deterministic sine-tone corpus instead of Piper speech "
+        "(contract tests only; never a WER corpus)",
     )
     parser.add_argument(
         "--out",
@@ -305,10 +274,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     corpus_dir = resolve_corpus_dir(args.out)
-    written = generate_corpus(corpus_dir, use_piper=args.piper, piper_voice=args.voice)
+    written = generate_corpus(corpus_dir, tones=args.tones)
     for path in written:
         print(f"wrote {path}")
-    print(f"corpus: {len(written)} fixtures under {corpus_dir}")
+    mode = "sine tones" if args.tones else "Piper fi_FI-harri-low"
+    print(f"corpus: {len(written)} fixtures ({mode}) under {corpus_dir}")
     return 0
 
 

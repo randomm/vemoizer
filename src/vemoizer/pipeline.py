@@ -300,6 +300,46 @@ def _assemble(
     return {"text": str(base.get("text", "")).strip(), "segments": segments}
 
 
+def transcribe_decode_only(path: str | Path, *, backend: str) -> dict[str, Any]:
+    """Run ingest -> VAD -> one single decode; no consensus, no LLM.
+
+    The eval harness scores each decode backend on its own so the consensus
+    gain is a measured number rather than an assertion (invariant #7). The
+    stage chain and fail-open behaviour mirror :func:`transcribe_file`'s
+    decode stage exactly — same VAD slicing, same merge — so a backend's
+    eval WER reflects what that backend contributes inside the pipeline.
+    """
+    backends = {"parakeet": ParakeetTranscriber, "canary": CanaryTranscriber}
+    if backend not in backends:
+        known = ", ".join(sorted(backends))
+        raise ValueError(f"unknown backend {backend!r} (known: {known})")
+    try:
+        audio = ingest_audio(Path(path))
+    except IngestError as e:
+        logger.error("ingest failed for %s: %s", path, e)
+        return {"text": "", "segments": [], "error": str(e)}
+    if len(audio) == 0:
+        return {"text": "", "segments": []}
+    slices = _speech_slices(audio)
+    transcriber: Any = None
+    result: dict[str, Any] | None = None
+    try:
+        transcriber = backends[backend]()
+        result = _decode_all(transcriber, slices, f"decode ({backend})")
+    except Exception as e:  # noqa: BLE001 - fail-open stage boundary
+        logger.warning("decode (%s) failed: %s", backend, e)
+    finally:
+        if transcriber is not None:
+            with suppress(Exception):  # cleanup is best-effort (fail-open)
+                transcriber.cleanup()
+    if result is None:
+        return {"text": "", "segments": []}
+    return {
+        "text": str(result.get("text", "")).strip(),
+        "segments": list(result.get("segments") or []),
+    }
+
+
 def transcribe_file(
     path: str | Path,
     *,
