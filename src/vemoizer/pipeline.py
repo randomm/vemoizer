@@ -53,6 +53,7 @@ from .spans import (
 )
 from .vad import SpeechSegment, vad_segments
 from .vad import load_model as load_vad_model
+from .whisper_transcriber import decode_meeting
 
 logger = logging.getLogger(__name__)
 
@@ -329,11 +330,19 @@ def transcribe_decode_only(path: str | Path, *, backend: str) -> dict[str, Any]:
     }
 
 
+#: Recording profiles: which decode A the pipeline runs. ``dictation`` is
+#: the fast per-slice Parakeet path; ``meeting`` decodes the whole file with
+#: whisper-large-v3-turbo, which decisively wins on far-field multi-speaker
+#: audio (issue #71) and provides word timestamps.
+PROFILES = ("dictation", "meeting")
+
+
 def transcribe_file(
     path: str | Path,
     *,
     config_path: str | None = None,
     diarize: bool = False,
+    profile: str = "dictation",
 ) -> dict:
     """Run the full consensus pipeline over one audio file.
 
@@ -356,8 +365,11 @@ def transcribe_file(
         key when the diarization stage was enabled and produced a matching
         speaker for that span.
     """
+    if profile not in PROFILES:
+        known = ", ".join(PROFILES)
+        raise ValueError(f"unknown profile {profile!r} (known: {known})")
     run_start = time.monotonic()
-    logger.info("transcribe: %s", path)
+    logger.info("transcribe: %s (profile: %s)", path, profile)
     ingest_start = time.monotonic()
     try:
         audio = ingest_audio(Path(path))
@@ -383,15 +395,18 @@ def transcribe_file(
     result_b: dict[str, Any] | None = None
     parakeet: Any = None
     canary: Any = None
-    try:
-        parakeet = ParakeetTranscriber()
-        result_a = decode_all(parakeet, slices, "decode A")
-    except Exception as e:  # noqa: BLE001 - fail-open stage boundary
-        logger.warning("decode A failed, using best available result: %s", e)
-    finally:
-        if parakeet is not None:
-            with suppress(Exception):  # cleanup is best-effort (fail-open)
-                parakeet.cleanup()
+    if profile == "meeting":
+        result_a = decode_meeting(audio, slices)
+    else:
+        try:
+            parakeet = ParakeetTranscriber()
+            result_a = decode_all(parakeet, slices, "decode A")
+        except Exception as e:  # noqa: BLE001 - fail-open stage boundary
+            logger.warning("decode A failed, using best available result: %s", e)
+        finally:
+            if parakeet is not None:
+                with suppress(Exception):  # cleanup is best-effort (fail-open)
+                    parakeet.cleanup()
     try:
         canary = CanaryTranscriber()
         result_b = decode_all(canary, slices, "decode B")

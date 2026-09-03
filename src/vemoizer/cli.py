@@ -128,6 +128,12 @@ def transcribe(
         "--config",
         help="LLM config file (default: ~/.config/vemoizer/config.toml).",
     ),
+    profile: str = typer.Option(  # noqa: B008
+        "dictation",
+        "--profile",
+        help="Recording profile: dictation (solo memo, fast) or meeting "
+        "(far-field multi-speaker; Whisper decode A).",
+    ),
     diarize: bool = typer.Option(  # noqa: B008
         False,
         "--diarize",
@@ -179,6 +185,7 @@ def transcribe(
                 file,
                 diarize=diarize,
                 config_path=str(config) if config is not None else None,
+                profile=profile,
             )
             for warning in result.pop("warnings", []):
                 typer.echo(warning, err=True)

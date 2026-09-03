@@ -775,3 +775,97 @@ def test_no_attribution_without_diarization(tmp_path, monkeypatch) -> None:
     from vemoizer.diarization import ATTRIBUTION
 
     assert ATTRIBUTION not in result.get("warnings", [])
+
+
+# -- meeting profile (issue #71) -----------------------------------------
+
+
+def _patch_whisper_a(monkeypatch, text="hei maailma"):
+    from vemoizer.whisper_transcriber import slice_records_from_words
+
+    words = [
+        {"word": "hei", "start": 0.0, "end": 0.4},
+        {"word": "maailma", "start": 0.5, "end": 1.0},
+    ]
+
+    def fake_decode_meeting(audio, slices):
+        return {
+            "text": text,
+            "words": words,
+            "segments": [{"start": 0.0, "end": 1.0, "text": text}],
+            "language": "fi",
+            "slices": slice_records_from_words(words, slices, language="fi"),
+        }
+
+    monkeypatch.setattr(pipeline, "decode_meeting", fake_decode_meeting)
+
+
+def test_meeting_profile_uses_whisper_decode_a(tmp_path, monkeypatch) -> None:
+    _patch_ingest(monkeypatch)
+    _patch_vad(monkeypatch)
+    _patch_whisper_a(monkeypatch)
+
+    def _parakeet_must_not_run():
+        raise AssertionError("Parakeet ran under the meeting profile")
+
+    monkeypatch.setattr(pipeline, "ParakeetTranscriber", _parakeet_must_not_run)
+    _patch_decoders(
+        monkeypatch,
+        {"text": "unused", "words": []},
+        {"text": "nyt puhutaan aivan muusta", "words": []},
+    )
+    monkeypatch.setattr(pipeline, "ParakeetTranscriber", _parakeet_must_not_run)
+    _patch_redecode(monkeypatch, "moikka")
+    result = transcribe_file(
+        "/nonexistent.m4a",
+        config_path=str(tmp_path / "none.toml"),
+        profile="meeting",
+    )
+    # whisper A text is the base; B disputes the slice; verdict splices in
+    assert result["segments"][0]["text"] == "moikka"
+
+
+def test_meeting_profile_whisper_failure_fails_open_to_empty(
+    tmp_path, monkeypatch
+) -> None:
+    _patch_ingest(monkeypatch)
+    _patch_vad(monkeypatch)
+
+    # decode_meeting fails open to None internally; simulate that outcome.
+    monkeypatch.setattr(pipeline, "decode_meeting", lambda audio, slices: None)
+    _patch_decoders(
+        monkeypatch,
+        {"text": "unused", "words": []},
+        {"text": "vain canary", "words": []},
+    )
+    result = transcribe_file(
+        "/nonexistent.m4a",
+        config_path=str(tmp_path / "none.toml"),
+        profile="meeting",
+    )
+    # decode A failed open; decode B's text is the best available base
+    assert result["text"] == "vain canary"
+
+
+def test_unknown_profile_raises() -> None:
+    with pytest.raises(ValueError, match="unknown profile"):
+        transcribe_file("/nonexistent.m4a", profile="podcast")
+
+
+def test_dictation_profile_never_touches_whisper(tmp_path, monkeypatch) -> None:
+    _patch_ingest(monkeypatch)
+    _patch_vad(monkeypatch)
+
+    def _must_not_run(audio, slices):
+        raise AssertionError("decode_meeting ran under dictation profile")
+
+    monkeypatch.setattr(pipeline, "decode_meeting", _must_not_run)
+    _patch_decoders(
+        monkeypatch,
+        {"text": "vain parakeet", "words": []},
+        {"text": "vain parakeet", "words": []},
+    )
+    result = transcribe_file(
+        "/nonexistent.m4a", config_path=str(tmp_path / "none.toml")
+    )
+    assert result["text"] == "vain parakeet"
