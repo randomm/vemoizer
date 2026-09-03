@@ -112,7 +112,7 @@ class CanaryTranscriber:
         start = time.time()
 
         mel = compute_features(audio, dtype=mx.bfloat16)
-        prompt_ids = self.model.tokenizer.build_prompt("en", "en")
+        prompt_ids = self.model.tokenizer.build_prompt("unklang", "unklang")
         text = self.model.generate(mel, prompt_ids)
 
         transcribe_time = time.time() - start

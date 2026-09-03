@@ -387,8 +387,8 @@ class CanaryModel(nn.Module):
         self,
         mel: mx.array,
         prompt_ids: list[int],
-        source_lang: str = "en",
-        target_lang: str = "en",
+        source_lang: str = "unklang",
+        target_lang: str = "unklang",
         *,
         max_tokens: int = 256,
     ) -> str:

@@ -78,20 +78,27 @@ def _tiny_canary_config_dict() -> dict[str, Any]:
 def _build_minimal_sentencepiece_model(pieces: list[str]) -> bytes:
     """Serialize a minimal SentencePieceModel protobuf the tokenizer can parse.
 
-    SentencePieceModel (field 2 = repeated Piece); Piece (field 1 = int32 id,
-    field 2 = string piece). Only the pieces field is needed for
-    ``parse_sentencepiece_model``; explicit ids equal the position.
+    Real SentencePieceModel wire format:
+      field 1 (repeated Piece) = pieces, field 2 = trainer_spec, field 3 = ...;
+      each Piece has field 1 (string piece), field 2 (fixed32 score),
+      field 3 (varint type). The token id is the index in the repeated list.
     """
     out = bytearray()
-    for i, piece in enumerate(pieces):
+    for piece in pieces:
         piece_bytes = piece.encode("utf-8")
         sub = bytearray()
-        sub.append((1 << 3) | 0)  # Piece.field 1 (id), varint wire 0
-        sub.append(i)  # id == i (fits one byte for a tiny vocab)
-        sub.append((2 << 3) | 2)  # Piece.field 2 (piece string), wire 2
+        # Piece.field 1 = piece text (string, wire 2/LEN)
+        sub.append((1 << 3) | 2)
         sub.append(len(piece_bytes))
         sub.extend(piece_bytes)
-        out.append((2 << 3) | 2)  # SentencePieceModel.field 2 (piece), wire 2
+        # Piece.field 2 = score (fixed32, wire 5) — 0.0f
+        sub.append((2 << 3) | 5)
+        sub.extend(b"\x00\x00\x00\x00")
+        # Piece.field 3 = type (varint, wire 0) — 0 (NORMAL)
+        sub.append((3 << 3) | 0)
+        sub.append(0)
+        # Top-level: field 1 = repeated Piece (wire 2/LEN)
+        out.append((1 << 3) | 2)
         out.append(len(sub))
         out.extend(sub)
     return bytes(out)
@@ -198,14 +205,32 @@ def test_canary_tokenizer_encode_rejects_non_special_lang(
         tok.encode("hello", lang_id="fi")
 
 
-def test_canary_tokenizer_eos_id_is_resolvable(
-    canary_config_dict: dict[str, Any],
-) -> None:
-    tok = cm.CanaryTokenizer.from_config(canary_config_dict)
-    # The EOS control token (U+0003) is a special token in the real Canary vocab.
-    # Our tiny fixture omits it, so build_prompt/decode paths that need eos_id
-    # should still not crash on construction; this just pins the API surface.
-    assert isinstance(tok.vocab_size, int)
+def test_canary_tokenizer_eos_id_missing_vocab_returns_sentinel() -> None:
+    """The real Canary-1b-v2 vocab has no end-of-transcript token; eos_id
+    must degrade to the -1 sentinel (generation stops on max_tokens) instead
+    of raising KeyError — the old chr(0x03) constant crashed on first use."""
+    pieces = [
+        "<pad>",
+        "<|startofcontext|>",
+        "<|startoftranscript|>",
+        "h",
+        "i",
+    ]
+    tok = cm.CanaryTokenizer(pieces, {})
+    assert tok.eos_id == -1
+
+
+def test_canary_tokenizer_eos_id_resolves_endoftranscript_when_present() -> None:
+    """If a vocab does contain an end-of-transcript token, eos_id resolves it."""
+    pieces = [
+        "<pad>",
+        "<|startoftranscript|>",
+        "h",
+        "<|endoftranscript|>",
+    ]
+    special = {p: i for i, p in enumerate(pieces) if p.startswith("<|")}
+    tok = cm.CanaryTokenizer(pieces, special)
+    assert tok.eos_id == 3
 
 
 # ---------------------------------------------------------------------------
@@ -464,7 +489,7 @@ def test_canary_model_generate_returns_decoded_text(
     cfg = cm._canary_config_from_dict(canary_config_dict)
     model = cm.CanaryModel(cfg, tok)
 
-    audio = np.zeros(200, dtype=np.float32)
+    audio = np.zeros(1600, dtype=np.float32)
     mel = cm.compute_features(audio)
     prompt = tok.build_prompt("fi", "fi")
     result = model.generate(mel, prompt, max_tokens=3)
