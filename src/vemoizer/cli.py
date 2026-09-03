@@ -139,11 +139,26 @@ def transcribe(
     if verbose:
         logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 
-    from vemoizer.output.formatters import FORMAT_EXTENSIONS
+    from vemoizer.output.formatters import FORMAT_EXTENSIONS, OUTPUT_FORMATS
     from vemoizer.output.naming import nfc_stem_and_suffix
     from vemoizer.pipeline import transcribe_file
 
+    # Resolve and validate formats BEFORE any transcription: an invalid
+    # --format must fail in milliseconds, not after minutes of decoding
+    # (the default "all" used to reach FORMAT_EXTENSIONS["all"] and crash
+    # only once the whole file had been transcribed).
     formats = [f.strip() for f in format.split(",") if f.strip()]
+    if formats == ["all"]:
+        formats = list(OUTPUT_FORMATS)
+    unknown = [f for f in formats if f not in FORMAT_EXTENSIONS]
+    if unknown:
+        known = ", ".join(OUTPUT_FORMATS)
+        typer.echo(
+            f"error: unknown format(s): {', '.join(unknown)} (known: {known})",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
     exit_code = 0
     with caffeinate_context():
         for file in files:
@@ -156,10 +171,21 @@ def transcribe(
                 continue
             stem, _suffix = nfc_stem_and_suffix(file)
             if out is not None:
-                _write_output(out, result, formats[0] if formats else "txt")
+                ok = _write_output(out, result, formats[0] if formats else "txt")
             else:
-                for fmt in formats:
-                    _write_output(Path(f"{stem}{FORMAT_EXTENSIONS[fmt]}"), result, fmt)
+                ok = all(
+                    # all() over a list, not a generator: every format must be
+                    # attempted even after one fails.
+                    [
+                        _write_output(
+                            Path(f"{stem}{FORMAT_EXTENSIONS[fmt]}"), result, fmt
+                        )
+                        for fmt in formats
+                    ]
+                )
+            if not ok:
+                exit_code = 1
+                continue
             if copy:
                 copy_to_clipboard(result["text"])
             if not quiet:
@@ -168,23 +194,30 @@ def transcribe(
         raise typer.Exit(code=exit_code)
 
 
-def _write_output(target: Path, result: dict, fmt: str) -> None:
-    """Render *result* in *fmt* and write it to *target* (``-`` = stdout)."""
+def _write_output(target: Path, result: dict, fmt: str) -> bool:
+    """Render *result* in *fmt* and write it to *target* (``-`` = stdout).
+
+    Returns True on success; False after printing the error, so the caller
+    can fail the run instead of reporting a transcript that was never
+    written.
+    """
     from vemoizer.output.formatters import format_transcript
 
     try:
         rendered = format_transcript(result, fmt)
     except (ValueError, KeyError) as e:
         typer.echo(f"error: {e}", err=True)
-        return
+        return False
     if str(target) == "-":
         typer.echo(rendered)
-        return
+        return True
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(rendered, encoding="utf-8")
     except OSError as e:
         typer.echo(f"error: could not write {target}: {e}", err=True)
+        return False
+    return True
 
 
 def main() -> None:
