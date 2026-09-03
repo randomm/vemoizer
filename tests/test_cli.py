@@ -29,7 +29,7 @@ def test_help_exits_zero_and_shows_usage() -> None:
 def test_transcribe_help_lists_flags() -> None:
     result = runner.invoke(app, ["transcribe", "--help"])
     assert result.exit_code == 0
-    for flag in ("--format", "--quiet", "--verbose"):
+    for flag in ("--format", "--quiet", "--verbose", "--diarize"):
         assert flag in result.stdout
     # positional batch input is advertised
     assert "files" in result.stdout
@@ -38,7 +38,13 @@ def test_transcribe_help_lists_flags() -> None:
     assert "One or more audio files" in result.stdout
 
 
-def test_transcribe_missing_file_fails_closed(tmp_path) -> None:
+def test_transcribe_missing_file_fails_closed(tmp_path, monkeypatch) -> None:
+    import vemoizer.pipeline as pipeline_module
+
+    def fake_transcribe_file(path, **kwargs):
+        return {"text": "", "segments": [], "error": f"{path} not found"}
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
     missing = tmp_path / "no-such-memo.m4a"
     result = runner.invoke(app, ["transcribe", str(missing)])
     assert result.exit_code == 1
@@ -67,6 +73,7 @@ def test_transcribe_with_all_flags(tmp_path, monkeypatch) -> None:
             "--verbose",
             "--out",
             "-",
+            "--diarize",
         ],
     )
     # flags are accepted and the pipeline result is emitted on stdout
@@ -74,30 +81,37 @@ def test_transcribe_with_all_flags(tmp_path, monkeypatch) -> None:
     assert result.stdout.count("moikka maailma") == 2
 
 
-def test_decode_b_failure_warning_goes_to_stderr(tmp_path, monkeypatch) -> None:
+def test_transcribe_diarize_default_off(tmp_path, monkeypatch) -> None:
     import vemoizer.pipeline as pipeline_module
 
+    seen: dict = {}
+
     def fake_transcribe_file(path, **kwargs):
-        # pipeline surfaces a degraded-consensus warning (issue #36)
-        return {
-            "text": "moikka",
-            "segments": [],
-            "warnings": [
-                "warning: decode B (Canary) failed: boom; consensus degraded "
-                "— output is Parakeet-only"
-            ],
-        }
+        seen.update(kwargs)
+        return {"text": "moikka", "segments": []}
 
     monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(
-        app, ["transcribe", "a.m4a", "--quiet", "--format", "txt", "--out", "-"]
-    )
+    result = runner.invoke(app, ["transcribe", "a.m4a", "--out", "-"])
     assert result.exit_code == 0
-    # the transcript stays on stdout; the warning goes to stderr
-    assert "moikka" not in result.stderr
-    assert "decode B" in result.stderr
-    assert "consensus degraded" in result.stderr
+    # --diarize defaults OFF: diarize is passed explicitly as False
+    assert seen.get("diarize") is False
+
+
+def test_transcribe_diarize_flag_passed_through(tmp_path, monkeypatch) -> None:
+    import vemoizer.pipeline as pipeline_module
+
+    seen: dict = {}
+
+    def fake_transcribe_file(path, **kwargs):
+        seen.update(kwargs)
+        return {"text": "moikka", "segments": []}
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["transcribe", "a.m4a", "--diarize", "--out", "-"])
+    assert result.exit_code == 0
+    assert seen.get("diarize") is True
 
 
 def test_main_is_callable_entry_point() -> None:

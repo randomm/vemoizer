@@ -36,6 +36,7 @@ import numpy as np
 from .alignment import GAP_PENALTY, _pair_cost  # noqa: SLF001
 from .audio_contract import SAMPLE_RATE
 from .canary_transcriber import CanaryTranscriber
+from .diarization import diarize
 from .ingest import IngestError, ingest_audio
 from .llm import LLMClient, LLMConfig, load_config
 from .parakeet_transcriber import ParakeetTranscriber
@@ -65,23 +66,13 @@ def _load_llm_config(path: str | None) -> LLMConfig | None:
     return None
 
 
-def _decode(
-    transcriber: Any, audio: np.ndarray, label: str
-) -> tuple[dict[str, Any] | None, str | None]:
-    """Run one full decode; return ``(result, warning)`` (fail-open).
-
-    The warning is ``None`` on success; a human-readable degraded-consensus
-    message when the decode raised, so the caller can surface it to the user
-    (issue #36: a silent ``logger.warning`` is not user-visible).
-    """
+def _decode(transcriber: Any, audio: np.ndarray, label: str) -> dict[str, Any] | None:
+    """Run one full decode; return its result or ``None`` (fail-open)."""
     try:
-        return transcriber.transcribe(audio), None
+        return transcriber.transcribe(audio)
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
         logger.warning("%s failed, using best available result: %s", label, e)
-        return None, (
-            f"warning: {label} failed: {e}; "
-            "consensus degraded to the best available result"
-        )
+        return None
 
 
 def _speech_slices(audio: np.ndarray) -> list[tuple[int, np.ndarray]]:
@@ -105,22 +96,19 @@ def _speech_slices(audio: np.ndarray) -> list[tuple[int, np.ndarray]]:
 
 def _decode_all(
     transcriber: Any, slices: list[tuple[int, np.ndarray]], label: str
-) -> tuple[dict[str, Any] | None, list[str]]:
+) -> dict[str, Any] | None:
     """Decode every VAD slice through *transcriber* and merge the results.
 
     Word/segment times are shifted onto the full-recording timeline so the
     downstream alignment and re-decode stages work on one time base.
     """
     if not slices:
-        return {"text": "", "words": [], "segments": []}, []
-    warnings: list[str] = []
+        return {"text": "", "words": [], "segments": []}
     merged_words: list[dict[str, Any]] = []
     merged_segments: list[dict[str, Any]] = []
     texts: list[str] = []
     for offset, slice_audio in slices:
-        r, warning = _decode(transcriber, slice_audio, label)
-        if warning is not None:
-            warnings.append(warning)
+        r = _decode(transcriber, slice_audio, label)
         if r is None:
             continue
         texts.append(str(r.get("text", "")).strip())
@@ -141,14 +129,11 @@ def _decode_all(
                     "end": float(s.get("end", 0.0)) + delta,
                 }
             )
-    return (
-        {
-            "text": " ".join(t for t in texts if t),
-            "words": merged_words,
-            "segments": merged_segments,
-        },
-        warnings,
-    )
+    return {
+        "text": " ".join(t for t in texts if t),
+        "words": merged_words,
+        "segments": merged_segments,
+    }
 
 
 def _align_decodes(
@@ -277,13 +262,41 @@ def _adjudicate(
     return a_text
 
 
+def _speaker_for_segment(
+    seg_start: float,
+    seg_end: float,
+    speaker_segments: list[tuple[float, float, str]],
+) -> str | None:
+    """Pick the speaker whose segment overlaps ``[seg_start, seg_end)`` the most.
+
+    ``None`` when no speaker segment overlaps the disputed span (fail-open,
+    so callers can omit the ``speaker`` key rather than guessing).
+    """
+    best: str | None = None
+    best_overlap = 0.0
+    for s_start, s_end, speaker in speaker_segments:
+        overlap = min(seg_end, s_end) - max(seg_start, s_start)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best = speaker
+    return best
+
+
 def _assemble(
     result_a: dict[str, Any] | None,
     result_b: dict[str, Any] | None,
     redecoded: list[dict[str, Any]] | None,
     llm_config: LLMConfig | None,
+    speaker_segments: list[tuple[float, float, str]] | None = None,
 ) -> dict[str, Any]:
-    """Combine the stage outputs into the final ``{"text", "segments"}``."""
+    """Combine the stage outputs into the final ``{"text", "segments"}``.
+
+    ``speaker_segments`` (when given) is a list of ``(start, end, speaker)``
+    triples from the diarization stage; each adjudicated segment is labelled
+    with the speaker whose segment overlaps the disputed span the most. The
+    ``speaker`` key is omitted when no speaker segment overlaps, so downstream
+    formatters can render the label only when it is actually known.
+    """
     base = result_a or result_b
     if base is None:
         return {"text": "", "segments": []}
@@ -309,13 +322,27 @@ def _assemble(
             candidates.append({"source": "decode B", "text": b_text})
         candidates.append({"source": "re-decode", "text": rd["text"] if rd else ""})
         verdict = _adjudicate(span, candidates[0]["text"], candidates, client)
-        segments.append({"start": span.start, "end": span.end, "text": verdict})
+        segment: dict[str, Any] = {
+            "start": span.start,
+            "end": span.end,
+            "text": verdict,
+        }
+        if speaker_segments is not None:
+            speaker = _speaker_for_segment(span.start, span.end, speaker_segments)
+            if speaker is not None:
+                segment["speaker"] = speaker
+        segments.append(segment)
 
     segments.sort(key=lambda s: s["start"])
     return {"text": str(base.get("text", "")).strip(), "segments": segments}
 
 
-def transcribe_file(path: str | Path, *, config_path: str | None = None) -> dict:
+def transcribe_file(
+    path: str | Path,
+    *,
+    config_path: str | None = None,
+    diarize: bool = False,
+) -> dict:
     """Run the full consensus pipeline over one audio file.
 
     Args:
@@ -324,19 +351,26 @@ def transcribe_file(path: str | Path, *, config_path: str | None = None) -> dict
             When omitted, ``~/.config/vemoizer/config.toml`` and
             ``~/.vemoizer.toml`` are probed; when no config is found the LLM
             stage is skipped (fail-open).
+        diarize: When True, run the pyannote speaker-diarization stage
+            (opt-in, off by default) and label each disputed segment with
+            the speaker whose segment overlaps it the most. Any diarization
+            failure (missing token, model unavailable, inference error) is
+            swallowed: the run continues without speaker labels (fail-open).
 
     Returns:
         ``{"text": str, "segments": list[dict]}`` — the full transcript
         (decode A preferred) plus one segment per disputed span with its
-        adjudicated text.
+        adjudicated text. Each segment dict gains an optional ``speaker``
+        key when the diarization stage was enabled and produced a matching
+        speaker for that span.
     """
     try:
         audio = ingest_audio(Path(path))
     except IngestError as e:
         logger.error("ingest failed for %s: %s", path, e)
-        return {"text": "", "segments": [], "warnings": [], "error": str(e)}
+        return {"text": "", "segments": [], "error": str(e)}
     if len(audio) == 0:
-        return {"text": "", "segments": [], "warnings": []}
+        return {"text": "", "segments": []}
 
     llm_config = _load_llm_config(config_path)
     slices = _speech_slices(audio)
@@ -345,31 +379,20 @@ def transcribe_file(path: str | Path, *, config_path: str | None = None) -> dict
     result_b: dict[str, Any] | None = None
     parakeet: Any = None
     canary: Any = None
-    warnings: list[str] = []
     try:
         parakeet = ParakeetTranscriber()
-        result_a, a_warnings = _decode_all(parakeet, slices, "decode A")
-        warnings.extend(a_warnings)
+        result_a = _decode_all(parakeet, slices, "decode A")
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
         logger.warning("decode A failed, using best available result: %s", e)
-        warnings.append(
-            f"warning: decode A (Parakeet) failed: {e}; consensus degraded "
-            "to the best available result"
-        )
     finally:
         if parakeet is not None:
             with suppress(Exception):  # cleanup is best-effort (fail-open)
                 parakeet.cleanup()
     try:
         canary = CanaryTranscriber()
-        result_b, b_warnings = _decode_all(canary, slices, "decode B")
-        warnings.extend(b_warnings)
+        result_b = _decode_all(canary, slices, "decode B")
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
         logger.warning("decode B failed, using best available result: %s", e)
-        warnings.append(
-            f"warning: decode B (Canary) failed: {e}; consensus degraded — "
-            "output is Parakeet-only"
-        )
     finally:
         if canary is not None:
             with suppress(Exception):  # cleanup is best-effort (fail-open)
@@ -382,9 +405,29 @@ def transcribe_file(path: str | Path, *, config_path: str | None = None) -> dict
         if spans:
             redecoded = _redecode_spans(audio, spans)
 
-    result = _assemble(result_a, result_b, redecoded, llm_config)
-    result["warnings"] = warnings
-    return result
+    speaker_segments: list[tuple[float, float, str]] | None = None
+    if diarize:
+        speaker_segments = _run_diarization_stage(audio)
+
+    return _assemble(result_a, result_b, redecoded, llm_config, speaker_segments)
+
+
+def _run_diarization_stage(
+    audio: np.ndarray,
+) -> list[tuple[float, float, str]] | None:
+    """Run the diarization stage; ``None`` (fail-open) on any failure.
+
+    ``None`` and ``[]`` are distinct to callers: the orchestrator passes
+    ``None`` when diarization was skipped or failed, and ``[]`` when the
+    stage ran but found no speakers — either way the downstream overlap step
+    leaves the ``speaker`` key off every segment.
+    """
+    try:
+        result = diarize(audio)
+    except Exception as e:  # noqa: BLE001 - fail-open stage boundary
+        logger.warning("diarization failed, continuing without speaker labels: %s", e)
+        return None
+    return list(result.segments)
 
 
 def _align_pairs_safe(

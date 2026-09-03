@@ -163,7 +163,7 @@ the final text.
 
 ### 9. Diarization (speaker labels)
 
-Planned as issue #13 (`--diarize`).
+`--diarize` flag (opt-in, off by default); wired into the pipeline since issue #37.
 
 - Library: `pyannote.audio==4.0.7` (code is MIT-licensed).
 - **Weights: `pyannote/speaker-diarization-community-1` are
@@ -175,7 +175,7 @@ Planned as issue #13 (`--diarize`).
   Metal) is fixed upstream in pyannote PR 1546 (linear → nearest); the
   version shipped must be ≥ that fix or the CPU fallback must be exercised.
 - A CPU fallback exists for machines where the fixed MPS path is unavailable.
-- Not yet a dependency of this package until issue #13 lands.
+- Dependency of this package: `pyannote.audio==4.0.7` (CC-BY-4.0 gated weights, see above).
 
 ### 10. Output formatting
 
@@ -191,7 +191,7 @@ Filenames are NFC-normalized (macOS APFS stores NFD).
 | Decode A | `nvidia/parakeet-tdt-0.6b-v3` | `mlx-community/parakeet-tdt-0.6b-v3` | `ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15` | parakeet-mlx; ~1.25 GB; word timestamps built in |
 | Decode B | `nvidia/canary-1b-v2` | community MLX port, e.g. `Mediform/canary-1b-v2-mlx-q8` | `0b6b32ee...` (full SHA at implementation) | loads the MLX port, not the F32 checkpoint |
 | Re-decode | `Finnish-NLP/whisper-large-finnish-v3` | itself (mlx-whisper) | recorded at download | f16; `word_timestamps=True` |
-| Diarization | `pyannote/speaker-diarization-community-1` | n/a (pyannote.audio 4.0.7) | pinned per issue #13 | CC-BY-4.0, HF-gated (form + token) |
+| Diarization | `pyannote/speaker-diarization-community-1` | n/a (pyannote.audio 4.0.7) | `3533c8cf8e369892e6b79ff1bf80f7b0286a54ee` | CC-BY-4.0, HF-gated (form + token) |
 | VAD | silero-vad | bundled in `silero-vad==6.2.1` pip package | package version | ONNX mode, no separate download |
 
 All downloads use `huggingface_hub.snapshot_download(repo_id,

@@ -21,6 +21,10 @@ import numpy as np
 #: HuggingFace repo for the diarization weights (CC-BY-4.0, gated).
 DIARIZATION_REPO_ID = "pyannote/speaker-diarization-community-1"
 
+#: Pinned full-SHA commit of the diarization weights (invariant #4): loading
+#: from a bare repo ID would cache a moving ref.
+DIARIZATION_REVISION = "3533c8cf8e369892e6b79ff1bf80f7b0286a54ee"
+
 #: Mandatory CC-BY-4.0 attribution (weights license, not code license).
 ATTRIBUTION = (
     "Speaker diarization: pyannote/speaker-diarization-community-1 "
@@ -43,16 +47,24 @@ class DiarizationResult:
 
 
 def _load_pipeline(device: str) -> object:
-    """Lazily import pyannote and build the community pipeline on *device*."""
+    """Lazily import pyannote and build the community pipeline on *device*.
+
+    Weights are downloaded with ``snapshot_download`` pinned to
+    :data:`DIARIZATION_REVISION` (invariant #4) and loaded from the local
+    path, following the same pattern as :mod:`vemoizer.models`.
+    """
     import os
 
     import torch
+    from huggingface_hub import snapshot_download
     from pyannote.audio import Pipeline
 
-    pipeline = Pipeline.from_pretrained(
+    local_path = snapshot_download(
         DIARIZATION_REPO_ID,
-        use_auth_token=os.environ.get(_HF_TOKEN_ENV),
+        revision=DIARIZATION_REVISION,
+        token=os.environ.get(_HF_TOKEN_ENV),
     )
+    pipeline = Pipeline.from_pretrained(local_path)
     pipeline.to(torch.device(device))
     return pipeline
 

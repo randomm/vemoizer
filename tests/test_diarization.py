@@ -15,6 +15,7 @@ import numpy as np
 from vemoizer.diarization import (
     ATTRIBUTION,
     DIARIZATION_REPO_ID,
+    DIARIZATION_REVISION,
     DiarizationResult,
     _load_pipeline,
     diarize,
@@ -76,9 +77,17 @@ def test_mps_failure_falls_back_to_cpu(monkeypatch):
 
 
 def test_load_pipeline_lazy_imports_pyannote(monkeypatch):
-    """pyannote is imported only inside _load_pipeline, with the gated repo."""
+    """pyannote is imported only inside _load_pipeline, weights are pinned.
+
+    ``snapshot_download`` is called with the full-SHA revision and the
+    pipeline is loaded from the returned local snapshot path — never the
+    bare repo ID (invariant #4).
+    """
+    import re
     import sys
     import types
+
+    assert re.fullmatch(r"[0-9a-f]{40}", DIARIZATION_REVISION)
 
     fake_pipeline_obj = mock.Mock()
     fake_pipeline_cls = mock.Mock()
@@ -93,11 +102,20 @@ def test_load_pipeline_lazy_imports_pyannote(monkeypatch):
     monkeypatch.setitem(sys.modules, "torch", mock.Mock())
     monkeypatch.setenv("HF_TOKEN", "hf_test_token")
 
+    fake_snapshot = mock.Mock(return_value="/fake/hf-cache/snapshot")
+    hf_mod = types.ModuleType("huggingface_hub")
+    hf_mod.snapshot_download = fake_snapshot  # ty: ignore[unresolved-attribute]
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hf_mod)
+
     pipeline = _load_pipeline("cpu")
     assert pipeline is fake_pipeline_obj
-    fake_pipeline_cls.from_pretrained.assert_called_once_with(
-        DIARIZATION_REPO_ID, use_auth_token="hf_test_token"
+    fake_snapshot.assert_called_once_with(
+        DIARIZATION_REPO_ID,
+        revision=DIARIZATION_REVISION,
+        token="hf_test_token",
     )
+    # Pipeline loads from the local snapshot path, never the bare repo ID.
+    fake_pipeline_cls.from_pretrained.assert_called_once_with("/fake/hf-cache/snapshot")
 
 
 def test_attribution_string_is_cc_by():

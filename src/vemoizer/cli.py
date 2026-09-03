@@ -121,6 +121,12 @@ def transcribe(
             "not set; on by default for <=16 GiB RAM)."
         ),
     ),
+    diarize: bool = typer.Option(  # noqa: B008
+        False,
+        "--diarize",
+        help="Run speaker diarization and attach speaker labels "
+        "(pyannote.audio; off by default).",
+    ),
 ) -> None:
     """Transcribe one or more voice memos and write transcript files."""
     # Resolve low-memory mode (auto-detect or explicit flag)
@@ -141,7 +147,7 @@ def transcribe(
     exit_code = 0
     with caffeinate_context():
         for file in files:
-            result = transcribe_file(file)
+            result = transcribe_file(file, diarize=diarize)
             for warning in result.pop("warnings", []):
                 typer.echo(warning, err=True)
             if "error" in result:
