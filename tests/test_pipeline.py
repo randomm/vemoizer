@@ -160,6 +160,10 @@ def test_fail_open_when_decode_b_missing(tmp_path, monkeypatch) -> None:
     result = transcribe_file("/nonexistent.m4a")
     assert result["text"] == "vain A"
     assert result["segments"] == []
+    # Fail-loud: a degraded consensus (decode B down) must surface to the
+    # user, not just a logger.warning (issue #36).
+    assert "decode B" in result["warnings"][0]
+    assert "consensus" in result["warnings"][0]
 
 
 def test_fail_open_when_both_decodes_fail(tmp_path, monkeypatch) -> None:
@@ -188,3 +192,50 @@ def test_empty_audio_short_circuits(monkeypatch) -> None:
     result = transcribe_file("/nonexistent.m4a")
     assert result["text"] == ""
     assert result["segments"] == []
+
+
+def test_per_slice_warning_propagates(tmp_path, monkeypatch) -> None:
+    # A per-slice decode failure (the _decode fail-open path) must surface
+    # as a user-visible warning, not just a logger.warning.
+    _patch_ingest(monkeypatch)
+    _patch_vad(monkeypatch)
+
+    class _Failing:
+        def __init__(self) -> None:
+            self._t = _transcriber("x")
+
+        def transcribe(self, audio, **kw):
+            raise RuntimeError("slice boom")
+
+        def cleanup(self) -> None:
+            pass
+
+    _good = _transcriber("moikka")
+
+    class _B:
+        def __init__(self) -> None:
+            self._t = _good
+
+        def transcribe(self, audio, **kw):
+            return _good.transcribe(audio)
+
+        def cleanup(self) -> None:
+            pass
+
+    monkeypatch.setattr(pipeline, "ParakeetTranscriber", _Failing)
+    monkeypatch.setattr(pipeline, "CanaryTranscriber", _B)
+    result = transcribe_file("/nonexistent.m4a")
+    assert result["text"] == ""
+    assert any("decode A" in w and "slice boom" in w for w in result["warnings"])
+
+
+def test_no_warnings_when_both_decodes_succeed(tmp_path, monkeypatch) -> None:
+    _patch_ingest(monkeypatch)
+    _patch_vad(monkeypatch)
+    _patch_decoders(
+        monkeypatch,
+        {"text": "hei", "words": [{"word": "hei", "start": 0.0, "end": 0.3}]},
+        {"text": "hei", "words": [{"word": "hei", "start": 0.0, "end": 0.3}]},
+    )
+    result = transcribe_file("/nonexistent.m4a")
+    assert result.get("warnings", []) == []

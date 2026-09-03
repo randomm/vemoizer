@@ -74,6 +74,32 @@ def test_transcribe_with_all_flags(tmp_path, monkeypatch) -> None:
     assert result.stdout.count("moikka maailma") == 2
 
 
+def test_decode_b_failure_warning_goes_to_stderr(tmp_path, monkeypatch) -> None:
+    import vemoizer.pipeline as pipeline_module
+
+    def fake_transcribe_file(path, **kwargs):
+        # pipeline surfaces a degraded-consensus warning (issue #36)
+        return {
+            "text": "moikka",
+            "segments": [],
+            "warnings": [
+                "warning: decode B (Canary) failed: boom; consensus degraded "
+                "— output is Parakeet-only"
+            ],
+        }
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(
+        app, ["transcribe", "a.m4a", "--quiet", "--format", "txt", "--out", "-"]
+    )
+    assert result.exit_code == 0
+    # the transcript stays on stdout; the warning goes to stderr
+    assert "moikka" not in result.stderr
+    assert "decode B" in result.stderr
+    assert "consensus degraded" in result.stderr
+
+
 def test_main_is_callable_entry_point() -> None:
     # main() must wrap the same Typer app the console script uses
     assert callable(main)

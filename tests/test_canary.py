@@ -260,58 +260,98 @@ def test_compute_features_bfloat16_for_inference(sample_audio: np.ndarray) -> No
 # ---------------------------------------------------------------------------
 
 
-def test_dequant_grouped_dequantizes_packed_uint32() -> None:
-    """grouped-q8: 4 packed uint8 per uint32, dequant = int * scale + bias.
+def _pack_int8_row(ints: list[int]) -> np.ndarray:
+    """Pack a single row of signed int8 values into uint32 (4 per pack, little-endian).
 
-    The checkpoint stores each linear weight as ``(out, groups)`` uint32 where
-    each uint32 packs 4 uint8 values, plus matching ``(out, groups)`` float
-    ``scales`` and ``biases``. Dequantization unpacks the bytes and applies
-    ``int * scale + bias`` per group.
+    ``ints`` must be a multiple of 4 bytes (one group of 64 = 16 packs of 4 bytes).
+    Byte 0 of each uint32 is the first int8 value (least-significant byte), so the
+    packed value is ``i0 | (i1 << 8) | (i2 << 16) | (i3 << 24)`` where each iN is
+    the unsigned 8-bit representation of the signed int8 value (two's complement).
     """
-    # weight (1, 1) = 0x04030201 packs the 4 little-endian bytes 01, 02, 03, 04.
-    w = np.array([[0x04030201]], dtype=np.uint32)
+    if len(ints) % 4 != 0:
+        raise ValueError("int8 row length must be a multiple of 4")
+    packs = []
+    for k in range(len(ints) // 4):
+        chunk = ints[4 * k : 4 * k + 4]
+        packs.append(
+            (chunk[0] & 0xFF)
+            | ((chunk[1] & 0xFF) << 8)
+            | ((chunk[2] & 0xFF) << 16)
+            | ((chunk[3] & 0xFF) << 24)
+        )
+    return np.array([packs], dtype=np.uint32)
+
+
+def test_dequant_grouped_dequantizes_packed_uint32() -> None:
+    """grouped-q8: 4 signed int8 per uint32, one scale/bias per group of 64.
+
+    A single row of 64 weights = 16 packs of 4 bytes. With scale=1, bias=0 the
+    dequantized output equals the unpacked int8 values in little-endian byte
+    order. Values 0..63 all fit in signed int8 (no wraparound), so the dequant
+    is the identity over 64 values.
+    """
+    ints = list(range(64))
+    w = _pack_int8_row(ints)
     s = np.array([[1.0]], dtype=np.float32)
     b = np.array([[0.0]], dtype=np.float32)
     got = cm._dequant_grouped(w, s, b)
-    # The 4 unpacked ints (little-endian byte order) are 1, 2, 3, 4.
-    assert np.allclose(got, [1.0, 2.0, 3.0, 4.0])
+    assert got.shape == (1, 64)
+    assert np.allclose(got, np.array(ints, dtype=np.float32))
 
 
 def test_dequant_grouped_applies_scale_and_bias() -> None:
-    # weight (1,1) = 0x01020304 -> LE bytes 04,03,02,01
-    w = np.array([[0x01020304]], dtype=np.uint32)
+    """Each int8 * scale + bias, with the group's (scale, bias) broadcast."""
+    ints = list(range(1, 65))  # 1..64 (all fit in signed int8)
+    w = _pack_int8_row(ints)
     s = np.array([[2.0]], dtype=np.float32)
     b = np.array([[10.0]], dtype=np.float32)
     got = cm._dequant_grouped(w, s, b)
-    # each int * 2 + 10  (ints 4,3,2,1 -> 18,16,14,12)
-    assert np.allclose(got, [18.0, 16.0, 14.0, 12.0])
+    expected = np.array(ints, dtype=np.float32) * 2.0 + 10.0
+    assert np.allclose(got, expected)
+
+
+def test_dequant_grouped_sign_bits_0x80_and_0xFF() -> None:
+    """Regression: bytes 0x80-0xFF map to -128..-1 (two's complement)."""
+    # One group of 64 where every byte is 0x80 (signed -128) and 0xFF (signed -1),
+    # alternating per weight, so the sign bug is unmissable.
+    ints = [-128, -1] * 32  # 64 values: 32 pairs of (-128, -1)
+    w = _pack_int8_row(ints)
+    s = np.array([[1.0]], dtype=np.float32)
+    b = np.array([[0.0]], dtype=np.float32)
+    got = cm._dequant_grouped(w, s, b)
+    expected = np.array(ints, dtype=np.float32)
+    # The bug (uint8 instead of int8) would give +128 and +255, not -128 and -1.
+    assert np.allclose(got, expected)
+    # Spot-check the two sign-bit values explicitly.
+    assert got[0, 0] == -128.0
+    assert got[0, 1] == -1.0
 
 
 def test_dequant_grouped_multiple_groups() -> None:
-    # weight (1, 2) = two groups of 4 packed bytes.
-    w = np.array([[0x01020304, 0x05060708]], dtype=np.uint32)
-    s = np.array([[1.0, 1.0]], dtype=np.float32)
-    b = np.array([[0.0, 0.0]], dtype=np.float32)
+    """Two output rows (out=2), each with one group of 64 = 16 packs."""
+    # Row 0: values 0..63. Row 1: values 1..64.
+    w = np.vstack([_pack_int8_row(list(range(64))), _pack_int8_row(list(range(1, 65)))])
+    s = np.array([[1.0], [1.0]], dtype=np.float32)
+    b = np.array([[0.0], [0.0]], dtype=np.float32)
     got = cm._dequant_grouped(w, s, b)
-    # group 0: 4,3,2,1 ; group 1: 8,7,6,5 -> 8 values total
-    assert got.shape[0] == 1
-    assert got.size == 8
+    assert got.shape == (2, 64)
+    assert np.allclose(got[0], np.arange(64, dtype=np.float32))
+    assert np.allclose(got[1], np.arange(1, 65, dtype=np.float32))
 
 
 def test_map_checkpoint_weights_dequantizes_and_casts() -> None:
     import mlx.core as mx
 
+    # A grouped-q8 linear: one row, one group of 64 (16 packs).
+    w = _pack_int8_row(list(range(64)))
+    scales = np.array([[1.0]], dtype=np.float32)
+    biases = np.array([[0.0]], dtype=np.float32)
+
     weights = {
         # a grouped-q8 linear: uint32 weight + scales + biases
-        "encoder.blocks.0.ff1.linear1.weight": mx.array(
-            np.array([[0x04030201]], dtype=np.uint32)
-        ),
-        "encoder.blocks.0.ff1.linear1.scales": mx.array(
-            np.array([[1.0]], dtype=np.float32)
-        ),
-        "encoder.blocks.0.ff1.linear1.biases": mx.array(
-            np.array([[0.0]], dtype=np.float32)
-        ),
+        "encoder.blocks.0.ff1.linear1.weight": mx.array(w),
+        "encoder.blocks.0.ff1.linear1.scales": mx.array(scales),
+        "encoder.blocks.0.ff1.linear1.biases": mx.array(biases),
         # a plain float tensor on a mapped key
         "transf_decoder.token_embedding.weight": mx.array(
             np.array([[0.5, 1.5]], dtype=np.float32)
