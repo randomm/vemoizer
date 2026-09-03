@@ -69,7 +69,7 @@ def apply_low_memory_mode(enabled: bool) -> None:
     """Apply (or clear) the low-memory mode flag.
 
     Currently a no-op: the actual model-loading strategy (sequential
-    load/unload via ``del model`` + ``mx.metal.clear_cache()``) is
+    load/unload via ``del model`` + ``mx.clear_cache()``) is
     deferred to the consensus pipeline task. This function exists so
     the CLI flag can be parsed and validated now, and so the call site
     is in place for when the pipeline is wired.
