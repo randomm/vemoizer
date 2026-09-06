@@ -15,7 +15,9 @@ allowed. Fail-open: missing or unreadable file = empty glossary.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +26,7 @@ logger = logging.getLogger(__name__)
 _MAX_PROMPT_CHARS = 1000
 
 
-def load_glossary(path: str | Path | None) -> list[str]:
-    """Terms from the glossary file; ``[]`` when absent (fail-open)."""
+def _read_lines(path: str | Path | None) -> list[str]:
     if path is None:
         return []
     try:
@@ -33,14 +34,75 @@ def load_glossary(path: str | Path | None) -> list[str]:
     except OSError:
         logger.warning("glossary not readable: %s (continuing without)", path)
         return []
-    terms = []
-    for line in text.splitlines():
-        term = line.strip()
-        if term and not term.startswith("#"):
-            terms.append(term)
+    return [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
+def load_glossary(path: str | Path | None) -> list[str]:
+    """Prompt terms from the glossary file; ``[]`` when absent (fail-open).
+
+    ``wrong => right`` correction lines contribute their *right* side (the
+    canonical spelling is a good recognition seed); the wrong side must
+    never appear in a prompt.
+    """
+    terms: list[str] = []
+    for line in _read_lines(path):
+        if "=>" in line:
+            _wrong, _, right = line.partition("=>")
+            right = right.strip()
+            if right:
+                terms.append(right)
+        else:
+            terms.append(line)
     if terms:
         logger.info("glossary: %d terms from %s", len(terms), path)
     return terms
+
+
+def load_corrections(path: str | Path | None) -> dict[str, str]:
+    """``wrong => right`` pairs from the glossary file (fail-open).
+
+    Known garble forms ("Blacksit" for Flagship, "Newport" for Nyborg)
+    survived the LLM repair pass; a known-bad -> canonical mapping is
+    deterministic and must not depend on a model's judgment.
+    """
+    corrections: dict[str, str] = {}
+    for line in _read_lines(path):
+        if "=>" not in line:
+            continue
+        wrong, _, right = line.partition("=>")
+        wrong, right = wrong.strip(), right.strip()
+        if wrong and right:
+            corrections[wrong] = right
+    return corrections
+
+
+def apply_corrections(
+    paragraphs: list[dict[str, Any]], corrections: dict[str, str]
+) -> list[dict[str, Any]]:
+    """Replace known garble forms in paragraph texts (pure, metadata kept).
+
+    Whole-word matches only (a correction must never fire inside another
+    word), case-insensitive on the match, canonical spelling as the
+    replacement. Compounds like ``Blacksit-hankkeiksi`` are covered because
+    the hyphen is a word boundary.
+    """
+    if not corrections:
+        return list(paragraphs)
+    patterns = [
+        (re.compile(rf"\b{re.escape(wrong)}\b", re.IGNORECASE), right)
+        for wrong, right in corrections.items()
+    ]
+    out: list[dict[str, Any]] = []
+    for para in paragraphs:
+        text = str(para.get("text", ""))
+        for pattern, right in patterns:
+            text = pattern.sub(right, text)
+        out.append({**para, "text": text})
+    return out
 
 
 def glossary_prompt(terms: list[str]) -> str | None:

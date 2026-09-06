@@ -11,7 +11,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from vemoizer.glossary import glossary_prompt, load_glossary
+from vemoizer.glossary import (
+    apply_corrections,
+    glossary_prompt,
+    load_corrections,
+    load_glossary,
+)
 
 
 def test_loads_one_term_per_line_skipping_comments(tmp_path: Path) -> None:
@@ -50,3 +55,50 @@ def test_prompt_is_bounded() -> None:
     prompt = glossary_prompt(terms)
     assert prompt is not None
     assert len(prompt) < 1200
+
+
+# -- correction pairs (issue #71 round 2) --------------------------------
+#
+# "Blacksit-hankkeiksi" and "Newport case" survived the LLM repair pass.
+# Known garble->canonical pairs are deterministic, not a judgment call:
+# the glossary format gains "wrong => right" lines applied mechanically.
+
+
+def test_corrections_parse_from_arrow_lines(tmp_path: Path) -> None:
+    f = tmp_path / "glossary.txt"
+    f.write_text(
+        "# terms\nFlagship-hanke\nBlacksit => Flagship\nNewport => Nyborg\n",
+        encoding="utf-8",
+    )
+    assert load_corrections(f) == {"Blacksit": "Flagship", "Newport": "Nyborg"}
+    # arrow lines are corrections, not prompt terms; right sides join terms
+    assert "Blacksit" not in load_glossary(f)
+    assert "Flagship" in load_glossary(f)
+
+
+def test_corrections_apply_on_word_boundaries() -> None:
+    paras = [
+        {"start": 0.0, "end": 1.0, "text": "he kutsuvat Blacksit-hankkeiksi"},
+        {"start": 1.0, "end": 2.0, "text": "se Newport case", "speaker": "S1"},
+    ]
+    out = apply_corrections(paras, {"Blacksit": "Flagship", "Newport": "Nyborg"})
+    assert out[0]["text"] == "he kutsuvat Flagship-hankkeiksi"
+    assert out[1]["text"] == "se Nyborg case"
+    assert out[1]["speaker"] == "S1"
+
+
+def test_corrections_do_not_touch_substrings_inside_words() -> None:
+    paras = [{"start": 0.0, "end": 1.0, "text": "ANewportti ei muutu"}]
+    out = apply_corrections(paras, {"Newport": "Nyborg"})
+    assert out[0]["text"] == "ANewportti ei muutu"
+
+
+def test_corrections_are_case_insensitive_on_match() -> None:
+    paras = [{"start": 0.0, "end": 1.0, "text": "blacksit hanke"}]
+    out = apply_corrections(paras, {"Blacksit": "Flagship"})
+    assert out[0]["text"] == "Flagship hanke"
+
+
+def test_no_corrections_is_identity() -> None:
+    paras = [{"start": 0.0, "end": 1.0, "text": "sama teksti"}]
+    assert apply_corrections(paras, {}) == paras

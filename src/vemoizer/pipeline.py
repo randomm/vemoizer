@@ -11,11 +11,9 @@ result (a failed decode B skips alignment and the output falls back to
 decode A's text; an unconfigured or failing LLM keeps the best non-LLM
 candidate) rather than aborting the run.
 
-VAD splits long recordings so the full decodes stay bounded; the per-VAD-slice
-word timestamps are shifted back onto the full-recording timeline before
-alignment, so disputed spans are valid on the full buffer that the re-decode
-stage slices from. VAD is optional: on any failure the whole recording is
-decoded as a single slice.
+VAD splits long recordings so decodes stay bounded; per-slice timestamps are
+shifted onto the full-recording timeline. VAD is optional: on failure the
+whole recording is one slice.
 
 Models are loaded lazily (each transcriber's own lazy loader) and released
 via ``cleanup()`` on every exit path.
@@ -37,9 +35,14 @@ from .canary_transcriber import CanaryTranscriber
 from .decode_stage import decode_all
 from .diarization import ATTRIBUTION as DIARIZATION_ATTRIBUTION
 from .diarization import diarize, speaker_for_span
-from .glossary import glossary_prompt, load_glossary
+from .glossary import (
+    apply_corrections,
+    glossary_prompt,
+    load_corrections,
+    load_glossary,
+)
 from .ingest import IngestError, ingest_audio
-from .llm import LLMClient, LLMConfig, load_config
+from .llm import LLMClient, LLMConfig, load_default_config
 from .notes import generate_notes
 from .parakeet_transcriber import ParakeetTranscriber
 from .progress import StageProgress, format_duration
@@ -54,22 +57,7 @@ from .whisper_transcriber import decode_meeting
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_CONFIG_PATHS = (
-    Path.home() / ".config" / "vemoizer" / "config.toml",
-    Path.home() / ".vemoizer.toml",
-)
-
 Candidate = dict[str, str]  # {"source": str, "text": str}
-
-
-def _load_llm_config(path: str | None) -> LLMConfig | None:
-    """Load the LLM config; ``None`` (fail-open) when unconfigured."""
-    if path is not None:
-        return load_config(path)
-    for candidate in _DEFAULT_CONFIG_PATHS:
-        if candidate.is_file():
-            return load_config(candidate)
-    return None
 
 
 def _speech_slices(audio: np.ndarray) -> list[tuple[int, np.ndarray]]:
@@ -355,7 +343,7 @@ def transcribe_file(
         format_duration(time.monotonic() - ingest_start),
     )
 
-    llm_config = _load_llm_config(config_path)
+    llm_config = load_default_config(config_path)
     logger.info(
         "LLM adjudication: %s", "configured" if llm_config is not None else "disabled"
     )
@@ -367,6 +355,7 @@ def transcribe_file(
     canary: Any = None
     run_consensus = True
     glossary = load_glossary(glossary_path)
+    corrections = load_corrections(glossary_path)
     if profile == "meeting":
         result_a = decode_meeting(
             audio, slices, initial_prompt=glossary_prompt(glossary)
@@ -425,6 +414,10 @@ def transcribe_file(
     result = _assemble(
         result_a, result_b, redecoded, llm_config, speaker_segments, spans=spans
     )
+    if corrections and result.get("paragraphs"):
+        # Deterministic known-garble replacement: "Blacksit" -> "Flagship"
+        # must never depend on a model's judgment.
+        result["paragraphs"] = apply_corrections(result["paragraphs"], corrections)
     if diarization_ran:
         # CC-BY-4.0: the gated pyannote weights require attribution whenever
         # they actually ran; the CLI prints the warnings channel.

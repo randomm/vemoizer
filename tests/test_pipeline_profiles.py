@@ -372,3 +372,29 @@ def test_paragraph_hygiene_runs_in_the_pipeline(tmp_path, monkeypatch) -> None:
         profile="meeting",
     )
     assert result["paragraphs"][0]["text"].count("Janni") == 1
+
+
+def test_glossary_corrections_apply_deterministically(tmp_path, monkeypatch) -> None:
+    _patch_ingest(monkeypatch)
+    _patch_vad(monkeypatch)
+    gl = tmp_path / "glossary.txt"
+    gl.write_text("Blacksit => Flagship\n", encoding="utf-8")
+
+    def fake_decode_meeting(audio, slices, initial_prompt=None):
+        return {
+            "text": "he kutsuvat Blacksit-hankkeiksi",
+            "words": [],
+            "segments": [
+                {"start": 0.0, "end": 2.0, "text": "he kutsuvat Blacksit-hankkeiksi"}
+            ],
+            "slices": [],
+        }
+
+    monkeypatch.setattr(pipeline, "decode_meeting", fake_decode_meeting)
+    result = transcribe_file(
+        "/nonexistent.m4a",
+        config_path=str(tmp_path / "none.toml"),
+        profile="meeting",
+        glossary_path=str(gl),
+    )
+    assert result["paragraphs"][0]["text"] == "he kutsuvat Flagship-hankkeiksi"

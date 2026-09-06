@@ -366,3 +366,24 @@ def adjudicate_span(
     Fails open to ``span_text`` on any failure.
     """
     return LLMClient(config).adjudicate(span_text, candidates, context)
+
+
+#: Probed in order when no explicit config path is given.
+_DEFAULT_CONFIG_PATHS = (
+    Path.home() / ".config" / "vemoizer" / "config.toml",
+    Path.home() / ".vemoizer.toml",
+)
+
+
+def load_default_config(path: str | None = None) -> LLMConfig | None:
+    """Load the LLM config from *path* or the default probe locations.
+
+    ``None`` (fail-open) when unconfigured — the caller skips every LLM
+    stage rather than failing the run (invariant #5).
+    """
+    if path is not None:
+        return load_config(path)
+    for candidate in _DEFAULT_CONFIG_PATHS:
+        if candidate.is_file():
+            return load_config(candidate)
+    return None
