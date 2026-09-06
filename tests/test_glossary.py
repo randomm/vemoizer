@@ -33,6 +33,7 @@ def test_none_path_is_empty_glossary() -> None:
 
 def test_prompt_joins_terms_for_whisper() -> None:
     prompt = glossary_prompt(["Flagship-hanke", "Nordea", "Movescount"])
+    assert prompt is not None
     assert "Flagship-hanke" in prompt
     assert "Nordea" in prompt
     assert "Movescount" in prompt
