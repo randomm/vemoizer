@@ -258,3 +258,24 @@ def test_prompt_carries_grounding_rules() -> None:
 
     assert "evidence" in _NOTES_SYSTEM_PROMPT
     assert "Sovitaan" in _NOTES_SYSTEM_PROMPT
+
+
+def test_owner_prefix_is_skipped_when_item_already_starts_with_owner() -> None:
+    transcript = "[S1] Tuomas laittaa pyynnöt eteenpäin huomenna."
+    payload = json.dumps(
+        {
+            "title": "t",
+            "summary": "s",
+            "key_points": [],
+            "action_items": [
+                {
+                    "item": "Tuomas laittaa pyynnöt eteenpäin",
+                    "owner": "Tuomas",
+                    "evidence": "Tuomas laittaa pyynnöt eteenpäin huomenna",
+                }
+            ],
+        }
+    )
+    notes = generate_notes(_client([payload]), transcript)
+    assert notes is not None
+    assert notes["action_items"] == ["Tuomas laittaa pyynnöt eteenpäin"]

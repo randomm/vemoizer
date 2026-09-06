@@ -160,7 +160,8 @@ def _ground_action_items(items: list[dict[str, str]], source_text: str) -> list[
             and textnorm(evidence)
             and textnorm(evidence) in norm_source
         )
-        rendered.append(f"{owner}: {item}" if grounded else item)
+        redundant = textnorm(item).startswith(textnorm(owner)) if owner else False
+        rendered.append(f"{owner}: {item}" if grounded and not redundant else item)
     return rendered
 
 
