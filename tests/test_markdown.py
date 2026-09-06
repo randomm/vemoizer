@@ -79,3 +79,22 @@ def test_md_is_registered_as_an_output_format() -> None:
     assert FORMAT_EXTENSIONS["md"] == ".md"
     rendered = format_transcript(_transcript(), "md")
     assert rendered.startswith("# Transcript\n")
+
+
+def test_suspect_paragraphs_render_a_warning() -> None:
+    md = format_md(
+        {
+            "text": "x",
+            "paragraphs": [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "epävarma kohta",
+                    "suspect": "garble",
+                },
+                {"start": 2.0, "end": 3.0, "text": "selvä kohta"},
+            ],
+        }
+    )
+    assert "⚠ epävarma kohta" in md
+    assert "⚠ selvä kohta" not in md

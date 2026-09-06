@@ -398,3 +398,39 @@ def test_glossary_corrections_apply_deterministically(tmp_path, monkeypatch) -> 
         glossary_path=str(gl),
     )
     assert result["paragraphs"][0]["text"] == "he kutsuvat Flagship-hankkeiksi"
+
+
+def test_fused_qa_splits_by_word_level_speakers(tmp_path, monkeypatch) -> None:
+    """A question and answer inside ONE whisper segment must not fuse."""
+    _patch_ingest(monkeypatch)
+    _patch_vad(monkeypatch)
+
+    def fake_decode_meeting(audio, slices, initial_prompt=None):
+        return {
+            "text": "mitä mieltä olet minusta hyvä",
+            "words": [
+                {"word": "mitä", "start": 0.1, "end": 0.3},
+                {"word": "mieltä", "start": 0.4, "end": 0.6},
+                {"word": "olet", "start": 0.7, "end": 0.9},
+                {"word": "minusta", "start": 1.3, "end": 1.5},
+                {"word": "hyvä", "start": 1.6, "end": 1.8},
+            ],
+            "segments": [
+                {"start": 0.0, "end": 2.0, "text": "mitä mieltä olet minusta hyvä"}
+            ],
+            "slices": [],
+        }
+
+    monkeypatch.setattr(pipeline, "decode_meeting", fake_decode_meeting)
+    _patch_diarize(
+        monkeypatch, segments=[(0.0, 1.0, "SPEAKER_00"), (1.2, 2.0, "SPEAKER_01")]
+    )
+    result = transcribe_file(
+        "/nonexistent.m4a",
+        config_path=str(tmp_path / "none.toml"),
+        profile="meeting",
+        diarize=True,
+    )
+    texts = [(s.get("speaker"), s["text"]) for s in result["segments"]]
+    assert ("SPEAKER_00", "mitä mieltä olet") in texts
+    assert ("SPEAKER_01", "minusta hyvä") in texts

@@ -130,10 +130,13 @@ def paragraphs(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
             and current_speaker is not None
             and speaker != current_speaker
         )
+        suspect = seg.get("suspect")
         if current is None or gap_break or speaker_break:
             current = {"start": start, "end": end, "text": seg_text}
             if speaker is not None:
                 current["speaker"] = speaker
+            if suspect is not None:
+                current["suspect"] = suspect
             current_speaker = speaker
             paras.append(current)
         else:
@@ -142,6 +145,11 @@ def paragraphs(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if speaker is not None and current_speaker is None:
                 current["speaker"] = speaker
                 current_speaker = speaker
+            # worst suspect wins: garble outranks number
+            if suspect == "garble" or (
+                suspect == "number" and current.get("suspect") is None
+            ):
+                current["suspect"] = suspect
     return paras
 
 

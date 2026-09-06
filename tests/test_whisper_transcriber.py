@@ -77,8 +77,8 @@ def test_transcribe_is_one_call_over_the_whole_recording() -> None:
     kwargs = mock.transcribe.call_args.kwargs
     assert kwargs["path_or_hf_repo"] == "/tmp/turbo"
     assert kwargs["word_timestamps"] is True
-    assert kwargs["temperature"] == 0.0
-    assert kwargs["condition_on_previous_text"] is False
+    assert kwargs["temperature"][0] == 0.0  # deterministic-first ladder
+    assert kwargs["condition_on_previous_text"] is True
     assert result["text"] == "moro vaan"
     assert result["language"] == "fi"
     assert [w["word"] for w in result["words"]] == ["moro", "vaan"]
@@ -135,3 +135,48 @@ def test_slice_with_no_words_yields_empty_text_record() -> None:
     records = slice_records_from_words([], [(0, _audio(2.0))], language=None)
     assert records[0]["text"] == ""
     assert "language" not in records[0]
+
+
+# -- reliability knobs (issue #71 round 2) -------------------------------
+#
+# Research findings: (a) with condition_on_previous_text=False the
+# initial_prompt (glossary) reaches ONLY the first 30s window — verified
+# in mlx-whisper 0.4.3 source (prompt_reset_since advances every window);
+# (b) the temperature fallback ladder + thresholds is whisper's designed
+# anti-loop mechanism, letting conditioning stay on safely; (c) per-
+# segment confidence must be kept, not discarded — it feeds flagging.
+
+
+def test_conditioning_on_with_fallback_ladder() -> None:
+    raw = _raw([_seg("moro", [{"word": " moro", "start": 0.0, "end": 0.5}])])
+    mock = _mock_whisper(raw)
+    with (
+        patch.dict("sys.modules", {"mlx_whisper": mock}),
+        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
+    ):
+        WhisperTranscriber(initial_prompt="Sanasto: Flagship.").transcribe(_audio(60.0))
+    kwargs = mock.transcribe.call_args.kwargs
+    # Rolling context carries the glossary vocabulary past the first window
+    assert kwargs["condition_on_previous_text"] is True
+    # ...safely: the paper-validated anti-loop stack
+    assert kwargs["temperature"] == (0.0, 0.2, 0.4)
+    assert kwargs["compression_ratio_threshold"] == 2.4
+    assert kwargs["logprob_threshold"] == -1.0
+    assert kwargs["no_speech_threshold"] == 0.6
+    assert kwargs["hallucination_silence_threshold"] == 2.0
+
+
+def test_segment_confidence_is_kept() -> None:
+    seg = _seg("moro vaan", [{"word": " moro", "start": 0.0, "end": 0.5}])
+    seg["avg_logprob"] = -0.82
+    seg["no_speech_prob"] = 0.1
+    seg["compression_ratio"] = 1.4
+    mock = _mock_whisper(_raw([seg]))
+    with (
+        patch.dict("sys.modules", {"mlx_whisper": mock}),
+        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
+    ):
+        result = WhisperTranscriber().transcribe(_audio(10.0))
+    out = result["segments"][0]
+    assert out["avg_logprob"] == -0.82
+    assert out["no_speech_prob"] == 0.1

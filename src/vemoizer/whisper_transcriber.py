@@ -108,8 +108,18 @@ class WhisperTranscriber:
             task="transcribe",
             # Deterministic; never condition across windows (the classic
             # Whisper repetition-loop trigger on long recordings).
-            temperature=0.0,
-            condition_on_previous_text=False,
+            # Rolling context ON: with conditioning off, mlx-whisper resets
+            # the prompt after EVERY window (verified in 0.4.3 source), so
+            # the glossary initial_prompt reached only the first 30s. The
+            # fallback ladder + thresholds below are whisper's designed
+            # anti-loop mechanism that makes conditioning safe; the
+            # deterministic loop-collapse in readability stays as backstop.
+            temperature=(0.0, 0.2, 0.4),
+            condition_on_previous_text=True,
+            compression_ratio_threshold=2.4,
+            logprob_threshold=-1.0,
+            no_speech_threshold=0.6,
+            hallucination_silence_threshold=2.0,
             initial_prompt=self._initial_prompt,
         )
         transcribe_time = time.time() - start
@@ -120,13 +130,18 @@ class WhisperTranscriber:
         for seg in raw.get("segments") or []:
             text = str(seg.get("text", "")).strip()
             if text:
-                segments.append(
-                    {
-                        "start": float(seg.get("start", 0.0)),
-                        "end": float(seg.get("end", 0.0)),
-                        "text": text,
-                    }
-                )
+                entry: dict[str, Any] = {
+                    "start": float(seg.get("start", 0.0)),
+                    "end": float(seg.get("end", 0.0)),
+                    "text": text,
+                }
+                # Per-segment confidence feeds the suspect-region flagging;
+                # discarding it (the old behaviour) threw away whisper's own
+                # signal about hallucination and garble.
+                for key in ("avg_logprob", "no_speech_prob", "compression_ratio"):
+                    if seg.get(key) is not None:
+                        entry[key] = float(seg[key])
+                segments.append(entry)
             for w in seg.get("words") or []:
                 word = str(w.get("word", "")).strip()
                 if word:

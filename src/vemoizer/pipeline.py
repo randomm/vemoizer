@@ -32,6 +32,7 @@ import numpy as np
 
 from .audio_contract import SAMPLE_RATE
 from .canary_transcriber import CanaryTranscriber
+from .confidence import flag_suspect_segments
 from .decode_stage import decode_all
 from .diarization import ATTRIBUTION as DIARIZATION_ATTRIBUTION
 from .diarization import diarize, speaker_for_span
@@ -51,6 +52,7 @@ from .redecode import WhisperReDecodeTranscriber
 from .repair import repair_paragraphs
 from .slice_align import find_disputed_slices
 from .spans import Span, apply_span_guardrails, span_context, words_in_span
+from .speaker_align import assign_word_speakers, split_segments_at_speaker_changes
 from .vad import SpeechSegment, vad_segments
 from .vad import load_model as load_vad_model
 from .whisper_transcriber import decode_meeting
@@ -263,7 +265,15 @@ def _assemble(
 
     verdicts.sort(key=lambda s: s["start"])
     base_text = str(base.get("text", "")).strip()
-    sentences = list(base.get("segments") or [])
+    # Whisper segments carry avg_logprob; low-confidence regions get a
+    # suspect flag that survives into paragraphs and the rendered output.
+    sentences = flag_suspect_segments(list(base.get("segments") or []))
+    if speaker_segments and words:
+        # Word-level attribution: split whisper segments at true speaker
+        # boundaries so a Q&A exchange inside one segment cannot fuse
+        # under a single label (issue #71 round 2).
+        labels = assign_word_speakers(words, speaker_segments)
+        sentences = split_segments_at_speaker_changes(sentences, words, labels)
     if verdicts and not sentences:
         # A backend without sentence segments cannot be spliced; keep the
         # verdict list as the segments (the pre-splice contract).

@@ -109,9 +109,13 @@ def diarize(
         pipeline = _load_pipeline(device)
         diarization = pipeline(waveforms, **kwargs)  # ty: ignore[call-non-callable]
 
-    # pyannote 4.x returns a DiarizeOutput wrapper; the Annotation lives on
-    # .speaker_diarization. Older versions return the Annotation directly.
-    annotation = getattr(diarization, "speaker_diarization", diarization)
+    # pyannote 4.x returns a DiarizeOutput wrapper. Prefer the exclusive
+    # partition (non-overlapping, purpose-built for ASR alignment — no
+    # overlap tie-breaking downstream); fall back to the plain annotation,
+    # then to the object itself for older versions.
+    annotation = getattr(diarization, "exclusive_speaker_diarization", None)
+    if annotation is None:
+        annotation = getattr(diarization, "speaker_diarization", diarization)
     segments: list[tuple[float, float, str]] = [
         (turn.start, turn.end, speaker)
         for turn, _track, speaker in annotation.itertracks(yield_label=True)
