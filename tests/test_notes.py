@@ -203,3 +203,58 @@ def test_notes_prompt_carries_commitment_rules() -> None:
     assert "ACTION ITEM RULES" in _NOTES_SYSTEM_PROMPT
     assert "declined" in _NOTES_SYSTEM_PROMPT
     assert "name mentioned once is not an owner" in _NOTES_SYSTEM_PROMPT
+
+
+def test_action_item_objects_ground_owner_via_evidence() -> None:
+    """Owner survives only when the evidence quote exists in the input."""
+    transcript = "[S1] Mä teen matskut valmiiksi torstaina. [S2] Hyvä juttu."
+    payload = json.dumps(
+        {
+            "title": "t",
+            "summary": "s",
+            "key_points": [],
+            "action_items": [
+                {
+                    "item": "Tekee matskut valmiiksi",
+                    "owner": "S1",
+                    "evidence": "Mä teen matskut valmiiksi torstaina",
+                },
+                {
+                    "item": "Ostaa ponin",
+                    "owner": "S2",
+                    "evidence": "tätä ei sanottu missään kohtaa",
+                },
+            ],
+        }
+    )
+    notes = generate_notes(_client([payload]), transcript)
+    assert notes is not None
+    assert notes["action_items"] == [
+        "S1: Tekee matskut valmiiksi",
+        "Ostaa ponin",
+    ]
+
+
+def test_suspect_paragraphs_are_marked_in_the_notes_prompt() -> None:
+    seen: dict[str, str] = {}
+
+    def spy(system: str, user: str) -> str:
+        seen["system"], seen["user"] = system, user
+        return _notes_json()
+
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=spy)
+    paragraphs = [
+        {"text": "selvä kohta", "speaker": "S1"},
+        {"text": "kolme miljoonaa euroa", "speaker": "S2", "suspect": "number"},
+    ]
+    generate_notes(client, "x", paragraphs=paragraphs)
+    assert "⚠" in seen["user"]
+    assert "epävarma" in seen["system"].lower()
+
+
+def test_prompt_carries_grounding_rules() -> None:
+    from vemoizer.notes import _NOTES_SYSTEM_PROMPT
+
+    assert "evidence" in _NOTES_SYSTEM_PROMPT
+    assert "Sovitaan" in _NOTES_SYSTEM_PROMPT

@@ -11,12 +11,10 @@ result (a failed decode B skips alignment and the output falls back to
 decode A's text; an unconfigured or failing LLM keeps the best non-LLM
 candidate) rather than aborting the run.
 
-VAD splits long recordings so decodes stay bounded; per-slice timestamps are
-shifted onto the full-recording timeline. VAD is optional: on failure the
-whole recording is one slice.
-
-Models are loaded lazily (each transcriber's own lazy loader) and released
-via ``cleanup()`` on every exit path.
+VAD splits long recordings so decodes stay bounded (fail-open: the whole
+recording as one slice); per-slice timestamps are shifted onto the full
+timeline. Models load lazily and are released via ``cleanup()`` on every
+exit path.
 """
 
 from __future__ import annotations
@@ -38,6 +36,7 @@ from .diarization import ATTRIBUTION as DIARIZATION_ATTRIBUTION
 from .diarization import diarize, speaker_for_span
 from .glossary import (
     apply_corrections,
+    apply_corrections_to_notes,
     glossary_prompt,
     load_corrections,
     load_glossary,
@@ -458,6 +457,8 @@ def transcribe_file(
         finally:
             client.close()
         if notes is not None:
+            if corrections:
+                notes = apply_corrections_to_notes(notes, corrections)
             result["notes"] = notes
             logger.info(
                 "notes: generated in %s",

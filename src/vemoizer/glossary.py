@@ -80,28 +80,80 @@ def load_corrections(path: str | Path | None) -> dict[str, str]:
     return corrections
 
 
+def _compile_corrections(
+    corrections: dict[str, str],
+) -> list[tuple[re.Pattern[str], Any]]:
+    """Compile correction pairs to (pattern, replacer) tuples.
+
+    A trailing ``*`` on the wrong side matches Finnish inflections and
+    compounds ("epit*" covers epittä and epitävaikutuksia): the matched
+    stem becomes the canonical term, and a surviving suffix of at least
+    three characters (leading vowel joints stripped) is re-attached with
+    a hyphen ("EBITDA-vaikutuksia").
+    """
+    compiled: list[tuple[re.Pattern[str], Any]] = []
+    for wrong, right in corrections.items():
+        if wrong.endswith("*"):
+            stem = re.escape(wrong[:-1])
+            pattern = re.compile(rf"\b{stem}(\w*)", re.IGNORECASE)
+
+            def _repl(match: re.Match[str], right: str = right) -> str:
+                suffix = match.group(1).lstrip("aeiouyäö")
+                if len(suffix) >= 3:
+                    return f"{right}-{suffix}"
+                return right
+
+            compiled.append((pattern, _repl))
+        else:
+            compiled.append(
+                (re.compile(rf"\b{re.escape(wrong)}\b", re.IGNORECASE), right)
+            )
+    return compiled
+
+
+def _correct_text(text: str, compiled: list[tuple[re.Pattern[str], Any]]) -> str:
+    for pattern, repl in compiled:
+        text = pattern.sub(repl, text)
+    return text
+
+
 def apply_corrections(
     paragraphs: list[dict[str, Any]], corrections: dict[str, str]
 ) -> list[dict[str, Any]]:
     """Replace known garble forms in paragraph texts (pure, metadata kept).
 
-    Whole-word matches only (a correction must never fire inside another
-    word), case-insensitive on the match, canonical spelling as the
-    replacement. Compounds like ``Blacksit-hankkeiksi`` are covered because
-    the hyphen is a word boundary.
+    Whole-word matches (or ``wrong*`` prefix matches for inflections),
+    case-insensitive, canonical spelling as the replacement. Compounds
+    like ``Blacksit-hankkeiksi`` are covered because the hyphen is a word
+    boundary.
     """
     if not corrections:
         return list(paragraphs)
-    patterns = [
-        (re.compile(rf"\b{re.escape(wrong)}\b", re.IGNORECASE), right)
-        for wrong, right in corrections.items()
+    compiled = _compile_corrections(corrections)
+    return [
+        {**para, "text": _correct_text(str(para.get("text", "")), compiled)}
+        for para in paragraphs
     ]
-    out: list[dict[str, Any]] = []
-    for para in paragraphs:
-        text = str(para.get("text", ""))
-        for pattern, right in patterns:
-            text = pattern.sub(right, text)
-        out.append({**para, "text": text})
+
+
+def apply_corrections_to_notes(
+    notes: dict[str, Any], corrections: dict[str, str]
+) -> dict[str, Any]:
+    """Apply correction pairs over the notes strings (title, summary, lists).
+
+    Garble the LLM copied from the transcript into deliverables dies here
+    deterministically, whatever the model did.
+    """
+    if not corrections or not notes:
+        return notes
+    compiled = _compile_corrections(corrections)
+    out = dict(notes)
+    for key in ("title", "summary"):
+        if isinstance(out.get(key), str):
+            out[key] = _correct_text(out[key], compiled)
+    for key in ("key_points", "action_items"):
+        if isinstance(out.get(key), list):
+            out[key] = [_correct_text(str(item), compiled) for item in out[key]]
     return out
 
 

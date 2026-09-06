@@ -20,6 +20,7 @@ import re
 from typing import Any
 
 from .llm import LLMClient
+from .textnorm import textnorm
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +35,16 @@ _NOTES_SYSTEM_PROMPT = (
     "English technical terms mixed in — keep every term in the language it "
     "was spoken, never translate. Answer with ONLY a JSON object: "
     '{"title": str, "summary": str, "key_points": [str], '
-    '"action_items": [str]}. Write the notes in the transcript\'s main '
-    "language. ATTRIBUTION RULES: the transcript is imperfect speech "
+    '"action_items": [{"item": str, "owner": str|null, "evidence": str}]}. '
+    "The evidence field is a short verbatim quote from the transcript that "
+    "contains the commitment; owner is the speaker label whose first-person "
+    "sentence the evidence is (or the explicitly assigned person), else "
+    "null. Write the notes in the transcript's main language, with correct "
+    "Finnish orthography. Never open an action item with the filler "
+    "template 'Sovitaan, että' unless the transcript contains that "
+    "agreement. Lines starting with ⚠ are low-confidence recognition: omit "
+    "numbers that appear only in ⚠ lines, or mark them '(epävarma)'. "
+    "ATTRIBUTION RULES: the transcript is imperfect speech "
     "recognition — Älä keksi nimiä: never invent person names. Attribute an "
     "action item to a person ONLY when the transcript clearly and verbatim "
     "supports it; otherwise attribute to the speaker label (e.g. SPEAKER_01) "
@@ -106,12 +115,53 @@ def _parse_notes(raw: str) -> dict[str, Any] | None:
             return []
         return [str(item).strip() for item in value if str(item).strip()]
 
+    def _items(value: Any) -> list[dict[str, str]]:
+        if not isinstance(value, list):
+            return []
+        items: list[dict[str, str]] = []
+        for entry in value:
+            if isinstance(entry, dict):
+                item = _text(entry.get("item"))
+                if item:
+                    items.append(
+                        {
+                            "item": item,
+                            "owner": _text(entry.get("owner")),
+                            "evidence": _text(entry.get("evidence")),
+                        }
+                    )
+            elif str(entry).strip():
+                items.append({"item": str(entry).strip(), "owner": "", "evidence": ""})
+        return items
+
     return {
         "title": _text(data.get("title")),
         "summary": _text(data.get("summary")),
         "key_points": _texts(data.get("key_points")),
-        "action_items": _texts(data.get("action_items")),
+        "action_items": _items(data.get("action_items")),
     }
+
+
+def _ground_action_items(items: list[dict[str, str]], source_text: str) -> list[str]:
+    """Flatten action items to strings, keeping owners only when grounded.
+
+    An owner survives only when the item's evidence quote actually occurs
+    in the text the model saw (normalized comparison) — an unverifiable
+    attribution ships ownerless rather than pointing at the wrong person.
+    The evidence field itself is internal and never rendered.
+    """
+    norm_source = textnorm(source_text)
+    rendered: list[str] = []
+    for entry in items:
+        item, owner, evidence = entry["item"], entry["owner"], entry["evidence"]
+        grounded = bool(
+            owner
+            and evidence
+            and textnorm(evidence)
+            and textnorm(evidence) in norm_source
+        )
+        rendered.append(f"{owner}: {item}" if grounded else item)
+    return rendered
 
 
 def _render_labelled(paragraphs: list[dict[str, Any]]) -> str:
@@ -126,8 +176,19 @@ def _render_labelled(paragraphs: list[dict[str, Any]]) -> str:
         if not text:
             continue
         speaker = para.get("speaker")
-        blocks.append(f"[{speaker}] {text}" if speaker else text)
+        block = f"[{speaker}] {text}" if speaker else text
+        if para.get("suspect"):
+            block = "⚠ " + block
+        blocks.append(block)
     return "\n\n".join(blocks)
+
+
+def _finish(notes: dict[str, Any] | None, source_text: str) -> dict[str, Any] | None:
+    """Ground the parsed notes' action items against *source_text*."""
+    if notes is None:
+        return None
+    notes["action_items"] = _ground_action_items(notes["action_items"], source_text)
+    return notes
 
 
 def generate_notes(
@@ -159,7 +220,7 @@ def generate_notes(
     try:
         if len(text) <= SINGLE_CALL_CHARS:
             raw = client.complete(system, f"Transcript:\n{text}")
-            return _parse_notes(raw) if raw else None
+            return _finish(_parse_notes(raw), text) if raw else None
 
         summaries: list[str] = []
         chunks = _chunk_text(text)
@@ -179,7 +240,8 @@ def generate_notes(
             system,
             "Part summaries of one long recording (in order):\n" + joined,
         )
-        return _parse_notes(raw) if raw else None
+        # ground evidence against what the reduce call actually saw
+        return _finish(_parse_notes(raw), joined) if raw else None
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
         logger.warning("notes generation failed: %s", e)
         return None

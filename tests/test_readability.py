@@ -191,3 +191,57 @@ def test_monologue_walls_split_at_sentences() -> None:
 
 def test_tidy_empty_input() -> None:
     assert tidy_paragraphs([]) == []
+
+
+def test_near_duplicate_short_paragraphs_dedupe_across_labels() -> None:
+    """Diarization boundary echo: same short sentence under two labels."""
+    paras = [
+        _seg("Tilauksen luominen ERP:ään.", 0.0, 2.0, speaker="S1"),
+        _seg("Tilauksen luominen ERP:hen", 2.0, 4.0, speaker="S2"),
+        _seg("eri asia kokonaan", 4.0, 5.0, speaker="S3"),
+    ]
+    out = tidy_paragraphs(paras)
+    assert [p["text"] for p in out] == [
+        "Tilauksen luominen ERP:ään.",
+        "eri asia kokonaan",
+    ]
+    assert out[0]["speaker"] == "S1"
+
+
+def test_long_near_duplicate_paragraphs_are_kept() -> None:
+    """Fuzzy dedupe only fires on short fragments, never real content."""
+    base = (
+        "Tässä on pidempi kappale jossa käydään läpi projektin tilanne "
+        "ja sovitaan seuraavista askelista yhdessä tiimin kanssa nyt."
+    )
+    variant = base.replace("nyt.", "heti.")
+    paras = [
+        _seg(base, 0.0, 5.0, speaker="S1"),
+        _seg(variant, 5.0, 10.0, speaker="S2"),
+    ]
+    out = tidy_paragraphs(paras)
+    assert len(out) == 2
+
+
+def test_boundary_echo_words_are_stripped_from_next_paragraph() -> None:
+    """Words duplicated across a speaker cut render once, not twice."""
+    paras = [
+        _seg("Sovitaan että demo pidetään perjantaina", 0.0, 3.0, speaker="S1"),
+        _seg(
+            "demo pidetään perjantaina ja kutsutaan kaikki mukaan",
+            3.0,
+            6.0,
+            speaker="S2",
+        ),
+    ]
+    out = tidy_paragraphs(paras)
+    assert out[1]["text"] == "ja kutsutaan kaikki mukaan"
+
+
+def test_single_shared_word_is_not_an_echo() -> None:
+    paras = [
+        _seg("Katsotaan tilanne huomenna", 0.0, 2.0, speaker="S1"),
+        _seg("huomenna on parempi päivä", 2.0, 4.0, speaker="S2"),
+    ]
+    out = tidy_paragraphs(paras)
+    assert out[1]["text"] == "huomenna on parempi päivä"

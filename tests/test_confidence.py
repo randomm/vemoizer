@@ -52,3 +52,39 @@ def test_paragraphs_inherit_worst_suspect() -> None:
     ]
     paras = paragraphs(flag_suspect_segments(segs))
     assert paras[0]["suspect"] == "garble"
+
+
+# -- round 3: relative threshold + repetition trigger --------------------
+#
+# Two whole files shipped with ZERO flags while containing unreadable
+# regions: whisper-turbo's Finnish logprob distribution sits above the
+# fixed -0.7, so outliers hide. Flag relative to the file's own
+# distribution (median - 1.5*MAD), and flag repetition-heavy text.
+
+
+def test_relative_outlier_flags_even_above_fixed_threshold() -> None:
+    segs = [_seg(f"selvä lause {i}", logprob=-0.2) for i in range(29)]
+    segs.append(_seg("sotkuinen kohta", logprob=-0.6))
+    out = flag_suspect_segments(segs)
+    assert out[-1]["suspect"] == "garble"
+    assert all("suspect" not in s for s in out[:29])
+
+
+def test_relative_rule_needs_enough_segments() -> None:
+    """Short recordings have no distribution to speak of."""
+    segs = [_seg("a", logprob=-0.2), _seg("b", logprob=-0.6)]
+    out = flag_suspect_segments(segs)
+    assert all("suspect" not in s for s in out)
+
+
+def test_repeated_bigrams_flag_without_any_logprob() -> None:
+    text = "mä elänpäs koneetta mä elänpäs koneetta mä elänpäs koneetta"
+    out = flag_suspect_segments([_seg(text)])
+    assert out[0]["suspect"] == "garble"
+
+
+def test_normal_prose_has_low_bigram_rate() -> None:
+    out = flag_suspect_segments(
+        [_seg("tämä on ihan tavallinen lause jossa ei toistu mikään")]
+    )
+    assert "suspect" not in out[0]

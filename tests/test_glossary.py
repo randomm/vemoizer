@@ -102,3 +102,34 @@ def test_corrections_are_case_insensitive_on_match() -> None:
 def test_no_corrections_is_identity() -> None:
     paras = [{"start": 0.0, "end": 1.0, "text": "sama teksti"}]
     assert apply_corrections(paras, {}) == paras
+
+
+def test_prefix_correction_covers_inflections(tmp_path: Path) -> None:
+    """Finnish inflects: epittä/epitävaikutuksia must all land on EBITDA."""
+    paras = [
+        {"start": 0.0, "end": 1.0, "text": "katsotaan epittä ensin"},
+        {"start": 1.0, "end": 2.0, "text": "ja epitävaikutuksia sitten"},
+    ]
+    out = apply_corrections(paras, {"epit*": "EBITDA"})
+    assert out[0]["text"] == "katsotaan EBITDA ensin"
+    assert out[1]["text"] == "ja EBITDA-vaikutuksia sitten"
+
+
+def test_prefix_correction_never_fires_inside_words() -> None:
+    paras = [{"start": 0.0, "end": 1.0, "text": "resepit ovat hyviä"}]
+    out = apply_corrections(paras, {"epit*": "EBITDA"})
+    assert out[0]["text"] == "resepit ovat hyviä"
+
+
+def test_notes_strings_get_corrections() -> None:
+    from vemoizer.glossary import apply_corrections_to_notes
+
+    notes = {
+        "title": "Click Sense -siirtymä",
+        "summary": "Puhuttiin Click Sensestä.",
+        "key_points": ["Click Sense korvataan"],
+        "action_items": [],
+    }
+    out = apply_corrections_to_notes(notes, {"Click Sense": "Qlik Sense"})
+    assert out["title"] == "Qlik Sense -siirtymä"
+    assert out["key_points"] == ["Qlik Sense korvataan"]

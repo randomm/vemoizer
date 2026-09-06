@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .slice_align import slice_similarity
 from .textnorm import textnorm
 
 #: Silence between consecutive segments that starts a new paragraph.
@@ -236,17 +237,44 @@ def _split_wall(para: dict[str, Any]) -> list[dict[str, Any]]:
     return pieces
 
 
+#: Adjacent paragraphs no longer than this whose normalized similarity is
+#: at least :data:`FUZZY_DEDUPE_SIMILARITY` are the same utterance decoded
+#: twice across a diarization cut, label-blind. Longer paragraphs never
+#: fuzzy-dedupe: a long near-duplicate is real content.
+FUZZY_DEDUPE_MAX_CHARS = 60
+FUZZY_DEDUPE_SIMILARITY = 0.85
+
+#: A boundary echo repeats the previous paragraph's trailing words at the
+#: start of the next one; matches of 2..8 words are stripped.
+_ECHO_MIN_WORDS = 2
+_ECHO_MAX_WORDS = 8
+
+
+def _strip_boundary_echo(prev_text: str, text: str) -> str:
+    """Drop *text*'s leading words that echo *prev_text*'s trailing words."""
+    prev_norm = [textnorm(w) for w in prev_text.split()]
+    words = text.split()
+    norm = [textnorm(w) for w in words]
+    top = min(_ECHO_MAX_WORDS, len(prev_norm), len(words) - 1)
+    for k in range(top, _ECHO_MIN_WORDS - 1, -1):
+        if norm[:k] == prev_norm[-k:] and all(norm[:k]):
+            return " ".join(words[k:])
+    return text
+
+
 def tidy_paragraphs(paragraphs_in: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Deterministic hygiene over assembled paragraphs.
 
     Mechanical defects the LLM repair pass must not (and its no-invention
-    guard correctly will not) handle: recognizer repetition loops, identical
-    adjacent paragraphs (the same sentence emitted under two speaker
-    labels), paragraphs with no alphabetic content, and unreadable
-    monologue walls. Pure function; timing and speaker metadata preserved.
+    guard correctly will not) handle: recognizer repetition loops, adjacent
+    duplicate paragraphs — exact, or near-identical short fragments emitted
+    under two speaker labels across a diarization cut — boundary echoes,
+    paragraphs with no alphabetic content, and unreadable monologue walls.
+    Pure function; timing and speaker metadata preserved.
     """
     out: list[dict[str, Any]] = []
     prev_norm: str | None = None
+    prev_text: str | None = None
     for para in paragraphs_in:
         text = _collapse_loops(str(para.get("text", "")).strip())
         if not any(ch.isalpha() for ch in text):
@@ -254,6 +282,20 @@ def tidy_paragraphs(paragraphs_in: list[dict[str, Any]]) -> list[dict[str, Any]]
         norm = textnorm(text)
         if prev_norm is not None and norm == prev_norm:
             continue
-        prev_norm = norm
+        if (
+            prev_text is not None
+            and len(text) <= FUZZY_DEDUPE_MAX_CHARS
+            and len(prev_text) <= FUZZY_DEDUPE_MAX_CHARS
+            and slice_similarity(prev_text, text) >= FUZZY_DEDUPE_SIMILARITY
+        ):
+            continue
+        if prev_text is not None:
+            stripped = _strip_boundary_echo(prev_text, text)
+            if stripped != text:
+                text = stripped
+                norm = textnorm(text)
+                if not any(ch.isalpha() for ch in text):
+                    continue
+        prev_norm, prev_text = norm, text
         out.extend(_split_wall({**para, "text": text}))
     return out
