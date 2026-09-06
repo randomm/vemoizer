@@ -37,6 +37,7 @@ from .canary_transcriber import CanaryTranscriber
 from .decode_stage import decode_all
 from .diarization import ATTRIBUTION as DIARIZATION_ATTRIBUTION
 from .diarization import diarize, speaker_for_span
+from .glossary import glossary_prompt, load_glossary
 from .ingest import IngestError, ingest_audio
 from .llm import LLMClient, LLMConfig, load_config
 from .notes import generate_notes
@@ -315,6 +316,7 @@ def transcribe_file(
     diarize: bool = False,
     profile: str = "dictation",
     repair: bool = False,
+    glossary_path: str | None = None,
 ) -> dict:
     """Run the full consensus pipeline over one audio file.
 
@@ -368,8 +370,11 @@ def transcribe_file(
     parakeet: Any = None
     canary: Any = None
     run_consensus = True
+    glossary = load_glossary(glossary_path)
     if profile == "meeting":
-        result_a = decode_meeting(audio, slices)
+        result_a = decode_meeting(
+            audio, slices, initial_prompt=glossary_prompt(glossary)
+        )
         if result_a is not None:
             # Measured on the reference meeting (issue #71): consensus
             # rewriting ON TOP of the whole-file Whisper read changes only
@@ -436,7 +441,7 @@ def transcribe_file(
         repair_client = LLMClient(llm_config)
         try:
             result["paragraphs"] = repair_paragraphs(
-                repair_client, result["paragraphs"]
+                repair_client, result["paragraphs"], glossary=glossary or None
             )
         finally:
             repair_client.close()
@@ -445,7 +450,12 @@ def transcribe_file(
         notes_start = time.monotonic()
         client = LLMClient(llm_config)
         try:
-            notes = generate_notes(client, result["text"])
+            notes = generate_notes(
+                client,
+                result["text"],
+                paragraphs=result.get("paragraphs"),
+                glossary=glossary or None,
+            )
         finally:
             client.close()
         if notes is not None:

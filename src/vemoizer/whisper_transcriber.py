@@ -44,13 +44,20 @@ SAMPLE_RATE = 16_000
 class WhisperTranscriber:
     """Whisper-large-v3-turbo speech-to-text via mlx-whisper (decode A)."""
 
-    def __init__(self, language: str | None = "fi") -> None:
+    def __init__(
+        self,
+        language: str | None = "fi",
+        initial_prompt: str | None = None,
+    ) -> None:
         self.model: Any = None
         self._model_path: str | None = None
         self._mlx_whisper: Any = None
         self._load_failed = False
         self._load_once = threading.Lock()
         self._language = language
+        # Seeds every decoding window with the user's vocabulary — the fix
+        # for garbled proper nouns ("FLAG-sit" for Flagship-hanke).
+        self._initial_prompt = initial_prompt
 
     def _load_model(self) -> None:
         """Resolve the revision-pinned model path once (latch on failure)."""
@@ -103,6 +110,7 @@ class WhisperTranscriber:
             # Whisper repetition-loop trigger on long recordings).
             temperature=0.0,
             condition_on_previous_text=False,
+            initial_prompt=self._initial_prompt,
         )
         transcribe_time = time.time() - start
         audio_duration = len(audio) / SAMPLE_RATE
@@ -196,7 +204,9 @@ def slice_records_from_words(
 
 
 def decode_meeting(
-    audio: np.ndarray, slices: list[tuple[int, np.ndarray]]
+    audio: np.ndarray,
+    slices: list[tuple[int, np.ndarray]],
+    initial_prompt: str | None = None,
 ) -> dict[str, Any] | None:
     """Whole-file Whisper decode A for the meeting profile (fail-open).
 
@@ -207,7 +217,7 @@ def decode_meeting(
     """
     transcriber: WhisperTranscriber | None = None
     try:
-        transcriber = WhisperTranscriber()
+        transcriber = WhisperTranscriber(initial_prompt=initial_prompt)
         # Widen from the TranscriptionResult TypedDict: the slice records are
         # a pipeline-internal extension, not part of the transcriber contract.
         result: dict[str, Any] = dict(transcriber.transcribe(audio))

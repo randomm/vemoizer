@@ -42,7 +42,9 @@ _REPAIR_SYSTEM_PROMPT = (
 
 
 def repair_paragraphs(
-    client: LLMClient, paragraphs: list[dict[str, Any]]
+    client: LLMClient,
+    paragraphs: list[dict[str, Any]],
+    glossary: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Repair each paragraph's text; guarded, fail-open, metadata preserved.
 
@@ -50,6 +52,9 @@ def repair_paragraphs(
     only ``text`` changes, and only when the repair passes the
     no-invention guard.
     """
+    system = _REPAIR_SYSTEM_PROMPT
+    if glossary:
+        system += " Sanasto (oikeat kirjoitusasut): " + ", ".join(glossary) + "."
     repaired: list[dict[str, Any]] = []
     fixed = 0
     for para in paragraphs:
@@ -58,7 +63,7 @@ def repair_paragraphs(
             repaired.append(dict(para))
             continue
         try:
-            candidate = client.complete(_REPAIR_SYSTEM_PROMPT, original)
+            candidate = client.complete(system, original)
         except Exception as e:  # noqa: BLE001 - fail-open stage boundary
             logger.warning("repair failed; keeping originals: %s", e)
             candidate = None

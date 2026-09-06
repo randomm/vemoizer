@@ -134,6 +134,12 @@ def transcribe(
         help="Recording profile: dictation (solo memo, fast) or meeting "
         "(far-field multi-speaker; Whisper decode A).",
     ),
+    glossary: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--glossary",
+        help="Text file of domain terms and names (one per line); fed to "
+        "the recognizer and LLM stages so vocabulary is spelled right.",
+    ),
     repair: bool = typer.Option(  # noqa: B008
         False,
         "--repair",
@@ -193,6 +199,7 @@ def transcribe(
                 config_path=str(config) if config is not None else None,
                 profile=profile,
                 repair=repair,
+                glossary_path=str(glossary) if glossary is not None else None,
             )
             for warning in result.pop("warnings", []):
                 typer.echo(warning, err=True)

@@ -29,7 +29,11 @@ def test_notes_failure_lands_in_warnings_not_errors(tmp_path, monkeypatch) -> No
     """A failed notes stage warns and ships the transcript untouched."""
     _consensus_setup(monkeypatch)
     _patch_redecode(monkeypatch, "moikka")
-    monkeypatch.setattr(pipeline, "generate_notes", lambda client, text: None)
+    monkeypatch.setattr(
+        pipeline,
+        "generate_notes",
+        lambda client, text, paragraphs=None, glossary=None: None,
+    )
 
     class _Client:
         def adjudicate(self, a_text, candidates, context=""):
@@ -51,7 +55,11 @@ def test_notes_attach_when_generated(tmp_path, monkeypatch) -> None:
     _consensus_setup(monkeypatch)
     _patch_redecode(monkeypatch, "moikka")
     fake_notes = {"title": "T", "summary": "S", "key_points": [], "action_items": []}
-    monkeypatch.setattr(pipeline, "generate_notes", lambda client, text: fake_notes)
+    monkeypatch.setattr(
+        pipeline,
+        "generate_notes",
+        lambda client, text, paragraphs=None, glossary=None: fake_notes,
+    )
 
     class _Client:
         def adjudicate(self, a_text, candidates, context=""):
@@ -70,7 +78,7 @@ def test_no_llm_config_skips_notes_silently(tmp_path, monkeypatch) -> None:
     _consensus_setup(monkeypatch)
     _patch_redecode(monkeypatch, "moikka")
 
-    def _must_not_run(client, text):
+    def _must_not_run(client, text, paragraphs=None, glossary=None):
         raise AssertionError("notes stage ran without an LLM config")
 
     monkeypatch.setattr(pipeline, "generate_notes", _must_not_run)
@@ -116,7 +124,7 @@ def _patch_whisper_a(monkeypatch, text="hei maailma"):
         {"word": "maailma", "start": 0.5, "end": 1.0},
     ]
 
-    def fake_decode_meeting(audio, slices):
+    def fake_decode_meeting(audio, slices, initial_prompt=None):
         return {
             "text": text,
             "words": words,
@@ -157,7 +165,9 @@ def test_meeting_profile_whisper_failure_fails_open_to_empty(
     _patch_vad(monkeypatch)
 
     # decode_meeting fails open to None internally; simulate that outcome.
-    monkeypatch.setattr(pipeline, "decode_meeting", lambda audio, slices: None)
+    monkeypatch.setattr(
+        pipeline, "decode_meeting", lambda audio, slices, initial_prompt=None: None
+    )
     _patch_decoders(
         monkeypatch,
         {"text": "parakeet varalla", "words": []},
@@ -181,7 +191,7 @@ def test_dictation_profile_never_touches_whisper(tmp_path, monkeypatch) -> None:
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
 
-    def _must_not_run(audio, slices):
+    def _must_not_run(audio, slices, initial_prompt=None):
         raise AssertionError("decode_meeting ran under dictation profile")
 
     monkeypatch.setattr(pipeline, "decode_meeting", _must_not_run)
@@ -211,7 +221,11 @@ def test_repair_pass_updates_paragraphs_only(tmp_path, monkeypatch) -> None:
             pass
 
     monkeypatch.setattr(pipeline, "LLMClient", lambda cfg: _Client())
-    monkeypatch.setattr(pipeline, "generate_notes", lambda client, text: None)
+    monkeypatch.setattr(
+        pipeline,
+        "generate_notes",
+        lambda client, text, paragraphs=None, glossary=None: None,
+    )
     cfg = _llm_config(tmp_path)
     result = transcribe_file("/nonexistent.m4a", config_path=str(cfg), repair=True)
     assert result["paragraphs"][0]["text"] == "moikka!"
@@ -265,3 +279,48 @@ def test_paragraphs_exist_even_without_disputes(tmp_path, monkeypatch) -> None:
     )
     assert result["paragraphs"]
     assert result["paragraphs"][0]["text"] == "hei maailma"
+
+
+def test_glossary_reaches_whisper_and_notes(tmp_path, monkeypatch) -> None:
+    """The glossary must reach the recognizer (initial_prompt) and the
+    notes stage (canonical spellings) — issue #71 QA."""
+    _patch_ingest(monkeypatch)
+    _patch_vad(monkeypatch)
+    gl = tmp_path / "glossary.txt"
+    gl.write_text("Flagship-hanke\nRiihimäki\n", encoding="utf-8")
+    seen: dict = {}
+
+    def fake_decode_meeting(audio, slices, initial_prompt=None):
+        seen["initial_prompt"] = initial_prompt
+        return {
+            "text": "hei maailma",
+            "words": [{"word": "hei", "start": 0.0, "end": 0.4}],
+            "segments": [{"start": 0.0, "end": 1.0, "text": "hei maailma"}],
+            "slices": [],
+        }
+
+    monkeypatch.setattr(pipeline, "decode_meeting", fake_decode_meeting)
+
+    def fake_notes(client, text, paragraphs=None, glossary=None):
+        seen["notes_glossary"] = glossary
+        seen["notes_paragraphs"] = paragraphs
+        return None
+
+    monkeypatch.setattr(pipeline, "generate_notes", fake_notes)
+
+    class _Client:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(pipeline, "LLMClient", lambda cfg: _Client())
+    cfg = _llm_config(tmp_path)
+    transcribe_file(
+        "/nonexistent.m4a",
+        config_path=str(cfg),
+        profile="meeting",
+        glossary_path=str(gl),
+    )
+    assert "Flagship-hanke" in (seen["initial_prompt"] or "")
+    assert seen["notes_glossary"] == ["Flagship-hanke", "Riihimäki"]
+    # notes get the speaker-labelled paragraphs, not just raw text
+    assert seen["notes_paragraphs"] is not None
