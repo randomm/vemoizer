@@ -146,6 +146,12 @@ def transcribe(
         help="LLM repair pass over the final paragraphs (fixes phonetic "
         "ASR garble; guarded against invention; needs an LLM config).",
     ),
+    speakers: int | None = typer.Option(  # noqa: B008
+        None,
+        "--speakers",
+        help="Number of people in the recording (pins diarization "
+        "clustering; only used with --diarize).",
+    ),
     diarize: bool = typer.Option(  # noqa: B008
         False,
         "--diarize",
@@ -200,6 +206,7 @@ def transcribe(
                 profile=profile,
                 repair=repair,
                 glossary_path=str(glossary) if glossary is not None else None,
+                speakers=speakers,
             )
             for warning in result.pop("warnings", []):
                 typer.echo(warning, err=True)

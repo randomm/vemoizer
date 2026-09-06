@@ -324,3 +324,51 @@ def test_glossary_reaches_whisper_and_notes(tmp_path, monkeypatch) -> None:
     assert seen["notes_glossary"] == ["Flagship-hanke", "Riihimäki"]
     # notes get the speaker-labelled paragraphs, not just raw text
     assert seen["notes_paragraphs"] is not None
+
+
+def test_speakers_hint_reaches_diarization(tmp_path, monkeypatch) -> None:
+    """--speakers pins pyannote clustering (5 labels for 4 people was a
+    real forensics finding)."""
+    _patch_ingest(monkeypatch)
+    _patch_vad(monkeypatch)
+    _patch_whisper_a(monkeypatch)
+    seen = {}
+
+    def fake_diarize(audio, num_speakers=None, **kw):
+        from vemoizer.diarization import DiarizationResult
+
+        seen["num_speakers"] = num_speakers
+        return DiarizationResult(segments=[(0.0, 2.0, "SPEAKER_00")])
+
+    monkeypatch.setattr(pipeline, "diarize", fake_diarize)
+    transcribe_file(
+        "/nonexistent.m4a",
+        config_path=str(tmp_path / "none.toml"),
+        profile="meeting",
+        diarize=True,
+        speakers=4,
+    )
+    assert seen["num_speakers"] == 4
+
+
+def test_paragraph_hygiene_runs_in_the_pipeline(tmp_path, monkeypatch) -> None:
+    """A recognizer repetition loop must not survive into the output."""
+    _patch_ingest(monkeypatch)
+    _patch_vad(monkeypatch)
+
+    def fake_decode_meeting(audio, slices, initial_prompt=None):
+        loop = "Janni, " * 10 + "aloitetaan"
+        return {
+            "text": loop,
+            "words": [{"word": "Janni,", "start": 0.0, "end": 0.1}],
+            "segments": [{"start": 0.0, "end": 2.0, "text": loop}],
+            "slices": [],
+        }
+
+    monkeypatch.setattr(pipeline, "decode_meeting", fake_decode_meeting)
+    result = transcribe_file(
+        "/nonexistent.m4a",
+        config_path=str(tmp_path / "none.toml"),
+        profile="meeting",
+    )
+    assert result["paragraphs"][0]["text"].count("Janni") == 1

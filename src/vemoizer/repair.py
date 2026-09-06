@@ -54,7 +54,13 @@ def repair_paragraphs(
     """
     system = _REPAIR_SYSTEM_PROMPT
     if glossary:
-        system += " Sanasto (oikeat kirjoitusasut): " + ", ".join(glossary) + "."
+        system += (
+            " Sanasto (oikeat kirjoitusasut): " + ", ".join(glossary) + ". "
+            "Jos tekstissä on sana, joka on foneettisesti lähellä sanaston "
+            "termiä, korvaa se sanaston kirjoitusasulla (esim. 'Flaksi' -> "
+            "'Flagship'). Jos sama sana esiintyy lähikappaleissa sekä oikein "
+            "että vääristyneenä, käytä oikeaa muotoa."
+        )
     repaired: list[dict[str, Any]] = []
     fixed = 0
     for para in paragraphs:

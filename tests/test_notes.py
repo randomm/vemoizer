@@ -194,3 +194,12 @@ def test_notes_prompt_carries_glossary_terms() -> None:
     generate_notes(client, "teksti", glossary=["Flagship-hanke", "Riihimäki"])
     assert "Flagship-hanke" in seen["system"]
     assert "Riihimäki" in seen["system"]
+
+
+def test_notes_prompt_carries_commitment_rules() -> None:
+    """Declined proposals became action items; the prompt must rule on it."""
+    from vemoizer.notes import _NOTES_SYSTEM_PROMPT
+
+    assert "ACTION ITEM RULES" in _NOTES_SYSTEM_PROMPT
+    assert "declined" in _NOTES_SYSTEM_PROMPT
+    assert "name mentioned once is not an owner" in _NOTES_SYSTEM_PROMPT

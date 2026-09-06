@@ -43,16 +43,11 @@ from .llm import LLMClient, LLMConfig, load_config
 from .notes import generate_notes
 from .parakeet_transcriber import ParakeetTranscriber
 from .progress import StageProgress, format_duration
-from .readability import paragraphs, splice_verdicts
+from .readability import paragraphs, splice_verdicts, tidy_paragraphs
 from .redecode import WhisperReDecodeTranscriber
 from .repair import repair_paragraphs
 from .slice_align import find_disputed_slices
-from .spans import (
-    Span,
-    apply_span_guardrails,
-    span_context,
-    words_in_span,
-)
+from .spans import Span, apply_span_guardrails, span_context, words_in_span
 from .vad import SpeechSegment, vad_segments
 from .vad import load_model as load_vad_model
 from .whisper_transcriber import decode_meeting
@@ -298,7 +293,7 @@ def _assemble(
                 segment["speaker"] = speaker
     result: dict[str, Any] = {"text": text, "segments": segments}
     if segments:
-        result["paragraphs"] = paragraphs(segments)
+        result["paragraphs"] = tidy_paragraphs(paragraphs(segments))
     return result
 
 
@@ -317,6 +312,7 @@ def transcribe_file(
     profile: str = "dictation",
     repair: bool = False,
     glossary_path: str | None = None,
+    speakers: int | None = None,
 ) -> dict:
     """Run the full consensus pipeline over one audio file.
 
@@ -417,7 +413,7 @@ def transcribe_file(
     if diarize:
         logger.info("diarization: starting")
         diarize_start = time.monotonic()
-        speaker_segments = _run_diarization_stage(audio)
+        speaker_segments = _run_diarization_stage(audio, speakers)
         diarization_ran = speaker_segments is not None
         logger.info(
             "diarization: %s speaker segments in %s",
@@ -483,6 +479,7 @@ def transcribe_file(
 
 def _run_diarization_stage(
     audio: np.ndarray,
+    speakers: int | None = None,
 ) -> list[tuple[float, float, str]] | None:
     """Run the diarization stage; ``None`` (fail-open) on any failure.
 
@@ -492,7 +489,7 @@ def _run_diarization_stage(
     leaves the ``speaker`` key off every segment.
     """
     try:
-        result = diarize(audio)
+        result = diarize(audio, num_speakers=speakers)
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
         logger.warning("diarization failed, continuing without speaker labels: %s", e)
         return None

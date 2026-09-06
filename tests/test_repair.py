@@ -72,3 +72,19 @@ def test_empty_paragraph_is_skipped_without_a_call() -> None:
     out = repair_paragraphs(client, [_para("")])
     assert out[0]["text"] == ""
     assert client.complete.call_count == 0
+
+
+def test_repair_prompt_maps_glossary_near_misses() -> None:
+    """The glossary must come with the mapping instruction, not just a list
+    ('Flaksi' survived next to correct 'Flagship' without it)."""
+    seen = {}
+
+    def spy(system, user, max_tokens=2048):
+        seen["system"] = system
+        return user
+
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=spy)
+    repair_paragraphs(client, [_para("teksti")], glossary=["Flagship-hanke"])
+    assert "foneettisesti lähellä" in seen["system"]
+    assert "Flagship-hanke" in seen["system"]
