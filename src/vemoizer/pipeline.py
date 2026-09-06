@@ -357,9 +357,21 @@ def transcribe_file(
     result_b: dict[str, Any] | None = None
     parakeet: Any = None
     canary: Any = None
+    run_consensus = True
     if profile == "meeting":
         result_a = decode_meeting(audio, slices)
-    else:
+        if result_a is not None:
+            # Measured on the reference meeting (issue #71): consensus
+            # rewriting ON TOP of the whole-file Whisper read changes only
+            # ~2.6% of words and mostly injects noise — short-span
+            # re-decodes are exactly Whisper's hallucination mode. The
+            # meeting profile therefore skips decode B / re-decode /
+            # adjudication entirely (invariant #2 allows skip-by-flag).
+            run_consensus = False
+        else:
+            # Whisper failed: fail open INTO the dictation pipeline.
+            logger.warning("meeting decode failed; falling back to dictation path")
+    if result_a is None:
         try:
             parakeet = ParakeetTranscriber()
             result_a = decode_all(parakeet, slices, "decode A")
@@ -369,17 +381,18 @@ def transcribe_file(
             if parakeet is not None:
                 with suppress(Exception):  # cleanup is best-effort (fail-open)
                     parakeet.cleanup()
-    try:
-        canary = CanaryTranscriber()
-        result_b = decode_all(canary, slices, "decode B")
-    except Exception as e:  # noqa: BLE001 - fail-open stage boundary
-        logger.warning("decode B failed, using best available result: %s", e)
-    finally:
-        if canary is not None:
-            with suppress(Exception):  # cleanup is best-effort (fail-open)
-                canary.cleanup()
+    if run_consensus:
+        try:
+            canary = CanaryTranscriber()
+            result_b = decode_all(canary, slices, "decode B")
+        except Exception as e:  # noqa: BLE001 - fail-open stage boundary
+            logger.warning("decode B failed, using best available result: %s", e)
+        finally:
+            if canary is not None:
+                with suppress(Exception):  # cleanup is best-effort (fail-open)
+                    canary.cleanup()
 
-    spans = _find_spans(result_a, result_b)
+    spans = _find_spans(result_a, result_b) if run_consensus else []
     redecoded: list[dict[str, Any]] | None = None
     if spans:
         redecoded = _redecode_spans(audio, spans)

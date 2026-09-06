@@ -801,29 +801,26 @@ def _patch_whisper_a(monkeypatch, text="hei maailma"):
     monkeypatch.setattr(pipeline, "decode_meeting", fake_decode_meeting)
 
 
-def test_meeting_profile_uses_whisper_decode_a(tmp_path, monkeypatch) -> None:
+def test_meeting_profile_is_whisper_only_no_consensus(tmp_path, monkeypatch) -> None:
+    """Measured (issue #71): consensus rewriting on top of the whole-file
+    Whisper read injects noise. The meeting profile runs NO other decoder."""
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     _patch_whisper_a(monkeypatch)
 
-    def _parakeet_must_not_run():
-        raise AssertionError("Parakeet ran under the meeting profile")
+    def _must_not_construct(*a, **kw):
+        raise AssertionError("a consensus decoder ran under the meeting profile")
 
-    monkeypatch.setattr(pipeline, "ParakeetTranscriber", _parakeet_must_not_run)
-    _patch_decoders(
-        monkeypatch,
-        {"text": "unused", "words": []},
-        {"text": "nyt puhutaan aivan muusta", "words": []},
-    )
-    monkeypatch.setattr(pipeline, "ParakeetTranscriber", _parakeet_must_not_run)
-    _patch_redecode(monkeypatch, "moikka")
+    monkeypatch.setattr(pipeline, "ParakeetTranscriber", _must_not_construct)
+    monkeypatch.setattr(pipeline, "CanaryTranscriber", _must_not_construct)
+    monkeypatch.setattr(pipeline, "WhisperReDecodeTranscriber", _must_not_construct)
     result = transcribe_file(
         "/nonexistent.m4a",
         config_path=str(tmp_path / "none.toml"),
         profile="meeting",
     )
-    # whisper A text is the base; B disputes the slice; verdict splices in
-    assert result["segments"][0]["text"] == "moikka"
+    assert result["text"] == "hei maailma"  # whisper's read, unrewritten
+    assert result["segments"][0]["text"] == "hei maailma"
 
 
 def test_meeting_profile_whisper_failure_fails_open_to_empty(
@@ -836,16 +833,16 @@ def test_meeting_profile_whisper_failure_fails_open_to_empty(
     monkeypatch.setattr(pipeline, "decode_meeting", lambda audio, slices: None)
     _patch_decoders(
         monkeypatch,
-        {"text": "unused", "words": []},
-        {"text": "vain canary", "words": []},
+        {"text": "parakeet varalla", "words": []},
+        {"text": "parakeet varalla", "words": []},
     )
     result = transcribe_file(
         "/nonexistent.m4a",
         config_path=str(tmp_path / "none.toml"),
         profile="meeting",
     )
-    # decode A failed open; decode B's text is the best available base
-    assert result["text"] == "vain canary"
+    # whisper failed: the run falls open INTO the dictation pipeline
+    assert result["text"] == "parakeet varalla"
 
 
 def test_unknown_profile_raises() -> None:
