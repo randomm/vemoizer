@@ -285,8 +285,18 @@ def _assemble(
         # verdict list as the segments (the pre-splice contract).
         return {"text": base_text, "segments": verdicts}
     text, segments = splice_verdicts(base_text, words, sentences, verdicts)
+    if speaker_segments is not None:
+        # Speakers attach to EVERY segment, not only the adjudicated ones:
+        # the whisper-only meeting path has zero verdicts, and diarization
+        # that ran must never be thrown away (issue #71 QA regression).
+        for segment in segments:
+            speaker = speaker_for_span(
+                float(segment["start"]), float(segment["end"]), speaker_segments
+            )
+            if speaker is not None:
+                segment["speaker"] = speaker
     result: dict[str, Any] = {"text": text, "segments": segments}
-    if verdicts:
+    if segments:
         result["paragraphs"] = paragraphs(segments)
     return result
 
