@@ -29,6 +29,7 @@ from typing import Any
 import mlx.core as mx
 import numpy as np
 
+from .selfheal import heal
 from .transcriber import TranscriptionResult
 
 logger = logging.getLogger(__name__)
@@ -100,27 +101,29 @@ class WhisperTranscriber:
             audio = audio.astype(np.float32)
 
         start = time.time()
+        # Rolling context ON by default: with conditioning off, mlx-whisper
+        # resets the prompt after EVERY window (verified in 0.4.3 source),
+        # so the glossary initial_prompt reached only the first 30s. The
+        # fallback ladder + thresholds are whisper's designed anti-loop
+        # mechanism; when it fails anyway, the self-heal stage re-decodes
+        # the wall with conditioning off via the kwargs override.
+        options: dict[str, Any] = {
+            "temperature": (0.0, 0.2, 0.4),
+            "condition_on_previous_text": True,
+            "compression_ratio_threshold": 2.4,
+            "logprob_threshold": -1.0,
+            "no_speech_threshold": 0.6,
+            "hallucination_silence_threshold": 2.0,
+            "initial_prompt": self._initial_prompt,
+        }
+        options.update(kwargs)
         raw = self._mlx_whisper.transcribe(
             audio,
             path_or_hf_repo=self._model_path,
             word_timestamps=True,
             language=self._language,
             task="transcribe",
-            # Deterministic; never condition across windows (the classic
-            # Whisper repetition-loop trigger on long recordings).
-            # Rolling context ON: with conditioning off, mlx-whisper resets
-            # the prompt after EVERY window (verified in 0.4.3 source), so
-            # the glossary initial_prompt reached only the first 30s. The
-            # fallback ladder + thresholds below are whisper's designed
-            # anti-loop mechanism that makes conditioning safe; the
-            # deterministic loop-collapse in readability stays as backstop.
-            temperature=(0.0, 0.2, 0.4),
-            condition_on_previous_text=True,
-            compression_ratio_threshold=2.4,
-            logprob_threshold=-1.0,
-            no_speech_threshold=0.6,
-            hallucination_silence_threshold=2.0,
-            initial_prompt=self._initial_prompt,
+            **options,
         )
         transcribe_time = time.time() - start
         audio_duration = len(audio) / SAMPLE_RATE
@@ -236,6 +239,16 @@ def decode_meeting(
         # Widen from the TranscriptionResult TypedDict: the slice records are
         # a pipeline-internal extension, not part of the transcriber contract.
         result: dict[str, Any] = dict(transcriber.transcribe(audio))
+        # Hallucination walls (context-fed repetition loops) are repaired
+        # by re-decoding only the slices under them with conditioning off;
+        # heal() is a no-op on a clean decode and fail-open otherwise.
+        result = heal(
+            result,
+            slices,
+            lambda chunk: dict(
+                transcriber.transcribe(chunk, condition_on_previous_text=False)
+            ),
+        )
         result["slices"] = slice_records_from_words(
             list(result.get("words") or []), slices, language=result.get("language")
         )

@@ -17,6 +17,7 @@ from vemoizer.whisper_transcriber import (
     MODEL_ID,
     MODEL_REVISION,
     WhisperTranscriber,
+    decode_meeting,
     slice_records_from_words,
 )
 
@@ -180,3 +181,80 @@ def test_segment_confidence_is_kept() -> None:
     out = result["segments"][0]
     assert out["avg_logprob"] == -0.82
     assert out["no_speech_prob"] == 0.1
+
+
+def test_transcribe_kwargs_override_decode_options() -> None:
+    """The self-heal re-decode needs per-call conditioning off."""
+    raw = _raw([_seg("moro", [{"word": " moro", "start": 0.0, "end": 0.5}])])
+    mock = _mock_whisper(raw)
+    with (
+        patch.dict("sys.modules", {"mlx_whisper": mock}),
+        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
+    ):
+        t = WhisperTranscriber()
+        t.transcribe(_audio(10.0), condition_on_previous_text=False)
+
+    kwargs = mock.transcribe.call_args.kwargs
+    assert kwargs["condition_on_previous_text"] is False
+    assert kwargs["word_timestamps"] is True  # non-overridden defaults intact
+
+
+def test_decode_meeting_heals_hallucination_walls() -> None:
+    """A wall in the whole-file decode triggers a conditioning-off re-decode
+    of the slices under it, and the healed text ships."""
+    sr = 16_000
+    wall_words = [
+        [{"word": " Kiitos.", "start": 10.0 + i, "end": 10.5 + i}] for i in range(8)
+    ]
+    whole = _raw(
+        [
+            _seg(
+                "alussa ihan oikeaa puhetta tässä on",
+                [
+                    {"word": " alussa", "start": 0.0, "end": 0.4},
+                    {"word": " ihan", "start": 0.5, "end": 0.7},
+                    {"word": " oikeaa", "start": 0.8, "end": 1.1},
+                    {"word": " puhetta", "start": 1.2, "end": 1.5},
+                    {"word": " tässä", "start": 1.6, "end": 1.8},
+                    {"word": " on", "start": 1.9, "end": 2.0},
+                ],
+            )
+        ]
+        + [_seg("Kiitos.", w) for w in wall_words]
+    )
+    fixed = _raw(
+        [
+            _seg(
+                "demossa näytettiin ihan oikeita lukuja kaikille",
+                [
+                    {"word": " demossa", "start": 0.5, "end": 1.0},
+                    {"word": " näytettiin", "start": 1.1, "end": 1.6},
+                    {"word": " ihan", "start": 1.7, "end": 1.9},
+                    {"word": " oikeita", "start": 2.0, "end": 2.4},
+                    {"word": " lukuja", "start": 2.5, "end": 2.9},
+                    {"word": " kaikille", "start": 3.0, "end": 3.4},
+                ],
+            )
+        ]
+    )
+    mock = MagicMock()
+    mock.transcribe = MagicMock(side_effect=[whole, fixed])
+    slices = [
+        (0, np.zeros(8 * sr, dtype=np.float32)),
+        (9 * sr, np.zeros(11 * sr, dtype=np.float32)),
+    ]
+    with (
+        patch.dict("sys.modules", {"mlx_whisper": mock}),
+        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
+    ):
+        result = decode_meeting(_audio(20.0), slices)
+
+    assert result is not None
+    assert mock.transcribe.call_count == 2
+    heal_kwargs = mock.transcribe.call_args_list[1].kwargs
+    assert heal_kwargs["condition_on_previous_text"] is False
+    assert "Kiitos" not in result["text"]
+    assert "demossa" in result["text"]
+    # healed words shifted onto the recording timeline (slice offset 9s)
+    healed_word = next(w for w in result["words"] if w["word"] == "demossa")
+    assert healed_word["start"] == 9.5
