@@ -11,11 +11,9 @@ result (a failed decode B skips alignment and the output falls back to
 decode A's text; an unconfigured or failing LLM keeps the best non-LLM
 candidate) rather than aborting the run.
 
-VAD splits long recordings so the full decodes stay bounded; the per-VAD-slice
-word timestamps are shifted back onto the full-recording timeline before
-alignment, so disputed spans are valid on the full buffer that the re-decode
-stage slices from. VAD is optional: on any failure the whole recording is
-decoded as a single slice.
+VAD splits long recordings so decodes stay bounded; per-slice timestamps are
+shifted onto the full-recording timeline. VAD is optional: on failure the
+whole recording is one slice.
 
 Models are loaded lazily (each transcriber's own lazy loader) and released
 via ``cleanup()`` on every exit path.
@@ -34,44 +32,34 @@ import numpy as np
 
 from .audio_contract import SAMPLE_RATE
 from .canary_transcriber import CanaryTranscriber
+from .confidence import flag_suspect_segments
 from .decode_stage import decode_all
 from .diarization import ATTRIBUTION as DIARIZATION_ATTRIBUTION
 from .diarization import diarize, speaker_for_span
+from .glossary import (
+    apply_corrections,
+    glossary_prompt,
+    load_corrections,
+    load_glossary,
+)
 from .ingest import IngestError, ingest_audio
-from .llm import LLMClient, LLMConfig, load_config
+from .llm import LLMClient, LLMConfig, load_default_config
 from .notes import generate_notes
 from .parakeet_transcriber import ParakeetTranscriber
 from .progress import StageProgress, format_duration
-from .readability import paragraphs, splice_verdicts
+from .readability import paragraphs, splice_verdicts, tidy_paragraphs
 from .redecode import WhisperReDecodeTranscriber
+from .repair import repair_paragraphs
 from .slice_align import find_disputed_slices
-from .spans import (
-    Span,
-    apply_span_guardrails,
-    span_context,
-    words_in_span,
-)
+from .spans import Span, apply_span_guardrails, span_context, words_in_span
+from .speaker_align import assign_word_speakers, split_segments_at_speaker_changes
 from .vad import SpeechSegment, vad_segments
 from .vad import load_model as load_vad_model
+from .whisper_transcriber import decode_meeting
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_CONFIG_PATHS = (
-    Path.home() / ".config" / "vemoizer" / "config.toml",
-    Path.home() / ".vemoizer.toml",
-)
-
 Candidate = dict[str, str]  # {"source": str, "text": str}
-
-
-def _load_llm_config(path: str | None) -> LLMConfig | None:
-    """Load the LLM config; ``None`` (fail-open) when unconfigured."""
-    if path is not None:
-        return load_config(path)
-    for candidate in _DEFAULT_CONFIG_PATHS:
-        if candidate.is_file():
-            return load_config(candidate)
-    return None
 
 
 def _speech_slices(audio: np.ndarray) -> list[tuple[int, np.ndarray]]:
@@ -277,56 +265,41 @@ def _assemble(
 
     verdicts.sort(key=lambda s: s["start"])
     base_text = str(base.get("text", "")).strip()
-    sentences = list(base.get("segments") or [])
+    # Whisper segments carry avg_logprob; low-confidence regions get a
+    # suspect flag that survives into paragraphs and the rendered output.
+    sentences = flag_suspect_segments(list(base.get("segments") or []))
+    if speaker_segments and words:
+        # Word-level attribution: split whisper segments at true speaker
+        # boundaries so a Q&A exchange inside one segment cannot fuse
+        # under a single label (issue #71 round 2).
+        labels = assign_word_speakers(words, speaker_segments)
+        sentences = split_segments_at_speaker_changes(sentences, words, labels)
     if verdicts and not sentences:
         # A backend without sentence segments cannot be spliced; keep the
         # verdict list as the segments (the pre-splice contract).
         return {"text": base_text, "segments": verdicts}
     text, segments = splice_verdicts(base_text, words, sentences, verdicts)
+    if speaker_segments is not None:
+        # Speakers attach to EVERY segment, not only the adjudicated ones:
+        # the whisper-only meeting path has zero verdicts, and diarization
+        # that ran must never be thrown away (issue #71 QA regression).
+        for segment in segments:
+            speaker = speaker_for_span(
+                float(segment["start"]), float(segment["end"]), speaker_segments
+            )
+            if speaker is not None:
+                segment["speaker"] = speaker
     result: dict[str, Any] = {"text": text, "segments": segments}
-    if verdicts:
-        result["paragraphs"] = paragraphs(segments)
+    if segments:
+        result["paragraphs"] = tidy_paragraphs(paragraphs(segments))
     return result
 
 
-def transcribe_decode_only(path: str | Path, *, backend: str) -> dict[str, Any]:
-    """Run ingest -> VAD -> one single decode; no consensus, no LLM.
-
-    The eval harness scores each decode backend on its own so the consensus
-    gain is a measured number rather than an assertion (invariant #7). The
-    stage chain and fail-open behaviour mirror :func:`transcribe_file`'s
-    decode stage exactly — same VAD slicing, same merge — so a backend's
-    eval WER reflects what that backend contributes inside the pipeline.
-    """
-    backends = {"parakeet": ParakeetTranscriber, "canary": CanaryTranscriber}
-    if backend not in backends:
-        known = ", ".join(sorted(backends))
-        raise ValueError(f"unknown backend {backend!r} (known: {known})")
-    try:
-        audio = ingest_audio(Path(path))
-    except IngestError as e:
-        logger.error("ingest failed for %s: %s", path, e)
-        return {"text": "", "segments": [], "error": str(e)}
-    if len(audio) == 0:
-        return {"text": "", "segments": []}
-    slices = _speech_slices(audio)
-    transcriber: Any = None
-    result: dict[str, Any] | None = None
-    try:
-        transcriber = backends[backend]()
-        result = decode_all(transcriber, slices, f"decode ({backend})")
-    except Exception as e:  # noqa: BLE001 - fail-open stage boundary
-        logger.warning("decode (%s) failed: %s", backend, e)
-    finally:
-        if transcriber is not None:
-            with suppress(Exception):  # cleanup is best-effort (fail-open)
-                transcriber.cleanup()
-    if result is None:
-        return {"text": "", "segments": []}
-    return {
-        "text": str(result.get("text", "")).strip(),
-        "segments": list(result.get("segments") or []),
-    }
+#: Recording profiles: which decode A the pipeline runs. ``dictation`` is
+#: the fast per-slice Parakeet path; ``meeting`` decodes the whole file with
+#: whisper-large-v3-turbo, which decisively wins on far-field multi-speaker
+#: audio (issue #71) and provides word timestamps.
+PROFILES = ("dictation", "meeting")
 
 
 def transcribe_file(
@@ -334,6 +307,10 @@ def transcribe_file(
     *,
     config_path: str | None = None,
     diarize: bool = False,
+    profile: str = "dictation",
+    repair: bool = False,
+    glossary_path: str | None = None,
+    speakers: int | None = None,
 ) -> dict:
     """Run the full consensus pipeline over one audio file.
 
@@ -356,8 +333,11 @@ def transcribe_file(
         key when the diarization stage was enabled and produced a matching
         speaker for that span.
     """
+    if profile not in PROFILES:
+        known = ", ".join(PROFILES)
+        raise ValueError(f"unknown profile {profile!r} (known: {known})")
     run_start = time.monotonic()
-    logger.info("transcribe: %s", path)
+    logger.info("transcribe: %s (profile: %s)", path, profile)
     ingest_start = time.monotonic()
     try:
         audio = ingest_audio(Path(path))
@@ -373,7 +353,7 @@ def transcribe_file(
         format_duration(time.monotonic() - ingest_start),
     )
 
-    llm_config = _load_llm_config(config_path)
+    llm_config = load_default_config(config_path)
     logger.info(
         "LLM adjudication: %s", "configured" if llm_config is not None else "disabled"
     )
@@ -383,26 +363,46 @@ def transcribe_file(
     result_b: dict[str, Any] | None = None
     parakeet: Any = None
     canary: Any = None
-    try:
-        parakeet = ParakeetTranscriber()
-        result_a = decode_all(parakeet, slices, "decode A")
-    except Exception as e:  # noqa: BLE001 - fail-open stage boundary
-        logger.warning("decode A failed, using best available result: %s", e)
-    finally:
-        if parakeet is not None:
-            with suppress(Exception):  # cleanup is best-effort (fail-open)
-                parakeet.cleanup()
-    try:
-        canary = CanaryTranscriber()
-        result_b = decode_all(canary, slices, "decode B")
-    except Exception as e:  # noqa: BLE001 - fail-open stage boundary
-        logger.warning("decode B failed, using best available result: %s", e)
-    finally:
-        if canary is not None:
-            with suppress(Exception):  # cleanup is best-effort (fail-open)
-                canary.cleanup()
+    run_consensus = True
+    glossary = load_glossary(glossary_path)
+    corrections = load_corrections(glossary_path)
+    if profile == "meeting":
+        result_a = decode_meeting(
+            audio, slices, initial_prompt=glossary_prompt(glossary)
+        )
+        if result_a is not None:
+            # Measured on the reference meeting (issue #71): consensus
+            # rewriting ON TOP of the whole-file Whisper read changes only
+            # ~2.6% of words and mostly injects noise — short-span
+            # re-decodes are exactly Whisper's hallucination mode. The
+            # meeting profile therefore skips decode B / re-decode /
+            # adjudication entirely (invariant #2 allows skip-by-flag).
+            run_consensus = False
+        else:
+            # Whisper failed: fail open INTO the dictation pipeline.
+            logger.warning("meeting decode failed; falling back to dictation path")
+    if result_a is None:
+        try:
+            parakeet = ParakeetTranscriber()
+            result_a = decode_all(parakeet, slices, "decode A")
+        except Exception as e:  # noqa: BLE001 - fail-open stage boundary
+            logger.warning("decode A failed, using best available result: %s", e)
+        finally:
+            if parakeet is not None:
+                with suppress(Exception):  # cleanup is best-effort (fail-open)
+                    parakeet.cleanup()
+    if run_consensus:
+        try:
+            canary = CanaryTranscriber()
+            result_b = decode_all(canary, slices, "decode B")
+        except Exception as e:  # noqa: BLE001 - fail-open stage boundary
+            logger.warning("decode B failed, using best available result: %s", e)
+        finally:
+            if canary is not None:
+                with suppress(Exception):  # cleanup is best-effort (fail-open)
+                    canary.cleanup()
 
-    spans = _find_spans(result_a, result_b)
+    spans = _find_spans(result_a, result_b) if run_consensus else []
     redecoded: list[dict[str, Any]] | None = None
     if spans:
         redecoded = _redecode_spans(audio, spans)
@@ -412,7 +412,7 @@ def transcribe_file(
     if diarize:
         logger.info("diarization: starting")
         diarize_start = time.monotonic()
-        speaker_segments = _run_diarization_stage(audio)
+        speaker_segments = _run_diarization_stage(audio, speakers)
         diarization_ran = speaker_segments is not None
         logger.info(
             "diarization: %s speaker segments in %s",
@@ -424,16 +424,37 @@ def transcribe_file(
     result = _assemble(
         result_a, result_b, redecoded, llm_config, speaker_segments, spans=spans
     )
+    if corrections and result.get("paragraphs"):
+        # Deterministic known-garble replacement: "Blacksit" -> "Flagship"
+        # must never depend on a model's judgment.
+        result["paragraphs"] = apply_corrections(result["paragraphs"], corrections)
     if diarization_ran:
         # CC-BY-4.0: the gated pyannote weights require attribution whenever
         # they actually ran; the CLI prints the warnings channel.
         result.setdefault("warnings", []).append(DIARIZATION_ATTRIBUTION)
 
+    if repair and llm_config is not None and result.get("paragraphs"):
+        # Presentation-layer repair: paragraphs only (txt/md read well),
+        # while segments and the raw text stay the verbatim record for
+        # srt/vtt/json. Guarded against invention inside repair_paragraphs.
+        repair_client = LLMClient(llm_config)
+        try:
+            result["paragraphs"] = repair_paragraphs(
+                repair_client, result["paragraphs"], glossary=glossary or None
+            )
+        finally:
+            repair_client.close()
+
     if llm_config is not None and result.get("text"):
         notes_start = time.monotonic()
         client = LLMClient(llm_config)
         try:
-            notes = generate_notes(client, result["text"])
+            notes = generate_notes(
+                client,
+                result["text"],
+                paragraphs=result.get("paragraphs"),
+                glossary=glossary or None,
+            )
         finally:
             client.close()
         if notes is not None:
@@ -461,6 +482,7 @@ def transcribe_file(
 
 def _run_diarization_stage(
     audio: np.ndarray,
+    speakers: int | None = None,
 ) -> list[tuple[float, float, str]] | None:
     """Run the diarization stage; ``None`` (fail-open) on any failure.
 
@@ -470,7 +492,7 @@ def _run_diarization_stage(
     leaves the ``speaker`` key off every segment.
     """
     try:
-        result = diarize(audio)
+        result = diarize(audio, num_speakers=speakers)
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
         logger.warning("diarization failed, continuing without speaker labels: %s", e)
         return None

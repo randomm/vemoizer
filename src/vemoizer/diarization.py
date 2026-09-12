@@ -69,12 +69,21 @@ def _load_pipeline(device: str) -> object:
     return pipeline
 
 
-def diarize(audio: np.ndarray, *, device: str = "auto") -> DiarizationResult:
+def diarize(
+    audio: np.ndarray,
+    *,
+    device: str = "auto",
+    num_speakers: int | None = None,
+) -> DiarizationResult:
     """Run speaker diarization over 16 kHz mono float32 *audio*.
 
     ``device="auto"`` tries MPS first (Apple Silicon) and falls back to CPU
     on any load/inference exception. ``device`` may also be an explicit
     torch device name (e.g. ``"cpu"`` or ``"mps"``).
+
+    ``num_speakers`` pins the cluster count when the caller knows how many
+    people were in the room — unconstrained clustering split one of four
+    speakers into two on the reference meeting (issue #71 forensics).
     """
     import torch
 
@@ -86,20 +95,27 @@ def diarize(audio: np.ndarray, *, device: str = "auto") -> DiarizationResult:
         "sample_rate": _CONTRACT_SAMPLE_RATE,
     }
 
+    kwargs: dict = {}
+    if num_speakers is not None:
+        kwargs["num_speakers"] = num_speakers
     if device == "auto":
         try:
             pipeline = _load_pipeline("mps")
-            diarization = pipeline(waveforms)  # ty: ignore[call-non-callable]
+            diarization = pipeline(waveforms, **kwargs)  # ty: ignore[call-non-callable]
         except Exception:
             pipeline = _load_pipeline("cpu")
-            diarization = pipeline(waveforms)  # ty: ignore[call-non-callable]
+            diarization = pipeline(waveforms, **kwargs)  # ty: ignore[call-non-callable]
     else:
         pipeline = _load_pipeline(device)
-        diarization = pipeline(waveforms)  # ty: ignore[call-non-callable]
+        diarization = pipeline(waveforms, **kwargs)  # ty: ignore[call-non-callable]
 
-    # pyannote 4.x returns a DiarizeOutput wrapper; the Annotation lives on
-    # .speaker_diarization. Older versions return the Annotation directly.
-    annotation = getattr(diarization, "speaker_diarization", diarization)
+    # pyannote 4.x returns a DiarizeOutput wrapper. Prefer the exclusive
+    # partition (non-overlapping, purpose-built for ASR alignment — no
+    # overlap tie-breaking downstream); fall back to the plain annotation,
+    # then to the object itself for older versions.
+    annotation = getattr(diarization, "exclusive_speaker_diarization", None)
+    if annotation is None:
+        annotation = getattr(diarization, "speaker_diarization", diarization)
     segments: list[tuple[float, float, str]] = [
         (turn.start, turn.end, speaker)
         for turn, _track, speaker in annotation.itertracks(yield_label=True)

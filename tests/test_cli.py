@@ -227,3 +227,21 @@ def test_out_with_multiple_formats_warns(tmp_path, monkeypatch) -> None:
     )
     assert result.exit_code == 0
     assert "only the first" in result.stderr
+
+
+def test_profile_flag_is_forwarded(tmp_path, monkeypatch) -> None:
+    import vemoizer.pipeline as pipeline_module
+
+    seen = {}
+
+    def fake_transcribe(path, **kw):
+        seen.update(kw)
+        return {"text": "moikka", "segments": []}
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(
+        app, ["transcribe", "memo.m4a", "--format", "txt", "--profile", "meeting"]
+    )
+    assert result.exit_code == 0
+    assert seen.get("profile") == "meeting"

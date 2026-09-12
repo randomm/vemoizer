@@ -128,6 +128,30 @@ def transcribe(
         "--config",
         help="LLM config file (default: ~/.config/vemoizer/config.toml).",
     ),
+    profile: str = typer.Option(  # noqa: B008
+        "dictation",
+        "--profile",
+        help="Recording profile: dictation (solo memo, fast) or meeting "
+        "(far-field multi-speaker; Whisper decode A).",
+    ),
+    glossary: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--glossary",
+        help="Text file of domain terms and names (one per line); fed to "
+        "the recognizer and LLM stages so vocabulary is spelled right.",
+    ),
+    repair: bool = typer.Option(  # noqa: B008
+        False,
+        "--repair",
+        help="LLM repair pass over the final paragraphs (fixes phonetic "
+        "ASR garble; guarded against invention; needs an LLM config).",
+    ),
+    speakers: int | None = typer.Option(  # noqa: B008
+        None,
+        "--speakers",
+        help="Number of people in the recording (pins diarization "
+        "clustering; only used with --diarize).",
+    ),
     diarize: bool = typer.Option(  # noqa: B008
         False,
         "--diarize",
@@ -179,6 +203,10 @@ def transcribe(
                 file,
                 diarize=diarize,
                 config_path=str(config) if config is not None else None,
+                profile=profile,
+                repair=repair,
+                glossary_path=str(glossary) if glossary is not None else None,
+                speakers=speakers,
             )
             for warning in result.pop("warnings", []):
                 typer.echo(warning, err=True)

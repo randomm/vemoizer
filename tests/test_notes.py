@@ -130,3 +130,76 @@ def test_generate_notes_never_raises() -> None:
     client = MagicMock()
     client.complete = MagicMock(side_effect=RuntimeError("provider exploded"))
     assert generate_notes(client, "teksti") is None
+
+
+# -- speaker grounding + glossary (issue #71 QA) -------------------------
+#
+# QA on a real meeting: the notes stage received raw text with NO speaker
+# information, so action items attributed tasks to invented names ("Mui")
+# and to the wrong people. Notes must see the speaker-labelled paragraphs
+# and be forbidden from inventing attributions.
+
+
+def test_notes_prompt_carries_speaker_labels() -> None:
+    paragraphs = [
+        {
+            "start": 0.0,
+            "end": 5.0,
+            "text": "minä teen matskut",
+            "speaker": "SPEAKER_01",
+        },
+        {"start": 6.0, "end": 9.0, "text": "sovitaan niin", "speaker": "SPEAKER_00"},
+    ]
+    seen = {}
+
+    def spy(system, user, max_tokens=2048):
+        seen["system"], seen["user"] = system, user
+        return _notes_json()
+
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=spy)
+    notes = generate_notes(
+        client, "minä teen matskut sovitaan niin", paragraphs=paragraphs
+    )
+    assert notes is not None
+    assert "[SPEAKER_01]" in seen["user"]
+    assert "[SPEAKER_00]" in seen["user"]
+    # attribution rules present
+    assert "SPEAKER" in seen["system"]
+
+
+def test_notes_prompt_forbids_inventing_names() -> None:
+    seen = {}
+
+    def spy(system, user, max_tokens=2048):
+        seen["system"] = system
+        return _notes_json()
+
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=spy)
+    generate_notes(client, "teksti tässä")
+    lowered = seen["system"].lower()
+    assert "älä keksi" in lowered or "never invent" in lowered
+
+
+def test_notes_prompt_carries_glossary_terms() -> None:
+    seen = {}
+
+    def spy(system, user, max_tokens=2048):
+        seen["system"] = system
+        return _notes_json()
+
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=spy)
+    generate_notes(client, "teksti", glossary=["Flagship-hanke", "Riihimäki"])
+    assert "Flagship-hanke" in seen["system"]
+    assert "Riihimäki" in seen["system"]
+
+
+def test_notes_prompt_carries_commitment_rules() -> None:
+    """Declined proposals became action items; the prompt must rule on it."""
+    from vemoizer.notes import _NOTES_SYSTEM_PROMPT
+
+    assert "ACTION ITEM RULES" in _NOTES_SYSTEM_PROMPT
+    assert "declined" in _NOTES_SYSTEM_PROMPT
+    assert "name mentioned once is not an owner" in _NOTES_SYSTEM_PROMPT

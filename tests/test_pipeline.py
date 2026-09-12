@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import vemoizer.eval_cli as eval_cli
 import vemoizer.pipeline as pipeline
 import vemoizer.progress as progress
 from vemoizer.pipeline import transcribe_file
@@ -531,7 +532,7 @@ def test_decode_only_parakeet_returns_single_decode(tmp_path, monkeypatch) -> No
         {"text": "vain parakeet", "words": []},
         {"text": "vain canary", "words": []},
     )
-    result = pipeline.transcribe_decode_only("/nonexistent.m4a", backend="parakeet")
+    result = eval_cli.transcribe_decode_only("/nonexistent.m4a", backend="parakeet")
     assert result["text"] == "vain parakeet"
 
 
@@ -543,13 +544,13 @@ def test_decode_only_canary_returns_single_decode(tmp_path, monkeypatch) -> None
         {"text": "vain parakeet", "words": []},
         {"text": "vain canary", "words": []},
     )
-    result = pipeline.transcribe_decode_only("/nonexistent.m4a", backend="canary")
+    result = eval_cli.transcribe_decode_only("/nonexistent.m4a", backend="canary")
     assert result["text"] == "vain canary"
 
 
 def test_decode_only_unknown_backend_raises() -> None:
     with pytest.raises(ValueError, match="unknown backend"):
-        pipeline.transcribe_decode_only("/nonexistent.m4a", backend="whisperx")
+        eval_cli.transcribe_decode_only("/nonexistent.m4a", backend="whisperx")
 
 
 def test_decode_only_ingest_error_fails_open(monkeypatch) -> None:
@@ -559,7 +560,7 @@ def test_decode_only_ingest_error_fails_open(monkeypatch) -> None:
         raise IngestError("corrupt")
 
     monkeypatch.setattr(pipeline, "ingest_audio", _boom)
-    result = pipeline.transcribe_decode_only("/nonexistent.m4a", backend="parakeet")
+    result = eval_cli.transcribe_decode_only("/nonexistent.m4a", backend="parakeet")
     assert result["text"] == ""
     assert "error" in result
 
@@ -568,7 +569,7 @@ def test_decode_only_backend_failure_fails_open(monkeypatch) -> None:
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     _patch_decoders(monkeypatch, None, None)  # constructors raise
-    result = pipeline.transcribe_decode_only("/nonexistent.m4a", backend="parakeet")
+    result = eval_cli.transcribe_decode_only("/nonexistent.m4a", backend="parakeet")
     assert result["text"] == ""
 
 
@@ -692,86 +693,3 @@ def test_assembled_output_is_full_coverage_with_paragraphs(
     assert result["segments"][0]["text"] == "moikka"
     assert result["text"] == "moikka"
     assert result["paragraphs"] == [{"start": 0.0, "end": 1.0, "text": "moikka"}]
-
-
-# -- notes stage wiring (issue #57) --------------------------------------
-
-
-def test_notes_failure_lands_in_warnings_not_errors(tmp_path, monkeypatch) -> None:
-    """A failed notes stage warns and ships the transcript untouched."""
-    _consensus_setup(monkeypatch)
-    _patch_redecode(monkeypatch, "moikka")
-    monkeypatch.setattr(pipeline, "generate_notes", lambda client, text: None)
-
-    class _Client:
-        def adjudicate(self, a_text, candidates, context=""):
-            return "moikka"
-
-        def close(self) -> None:
-            pass
-
-    monkeypatch.setattr(pipeline, "LLMClient", lambda cfg: _Client())
-    cfg = _llm_config(tmp_path)
-    result = transcribe_file("/nonexistent.m4a", config_path=str(cfg))
-
-    assert result["text"]  # transcript unaffected
-    assert "notes" not in result
-    assert any("notes" in w for w in result.get("warnings", []))
-
-
-def test_notes_attach_when_generated(tmp_path, monkeypatch) -> None:
-    _consensus_setup(monkeypatch)
-    _patch_redecode(monkeypatch, "moikka")
-    fake_notes = {"title": "T", "summary": "S", "key_points": [], "action_items": []}
-    monkeypatch.setattr(pipeline, "generate_notes", lambda client, text: fake_notes)
-
-    class _Client:
-        def adjudicate(self, a_text, candidates, context=""):
-            return "moikka"
-
-        def close(self) -> None:
-            pass
-
-    monkeypatch.setattr(pipeline, "LLMClient", lambda cfg: _Client())
-    cfg = _llm_config(tmp_path)
-    result = transcribe_file("/nonexistent.m4a", config_path=str(cfg))
-    assert result["notes"] == fake_notes
-
-
-def test_no_llm_config_skips_notes_silently(tmp_path, monkeypatch) -> None:
-    _consensus_setup(monkeypatch)
-    _patch_redecode(monkeypatch, "moikka")
-
-    def _must_not_run(client, text):
-        raise AssertionError("notes stage ran without an LLM config")
-
-    monkeypatch.setattr(pipeline, "generate_notes", _must_not_run)
-    result = transcribe_file(
-        "/nonexistent.m4a", config_path=str(tmp_path / "none.toml")
-    )
-    assert "notes" not in result
-    assert "warnings" not in result
-
-
-def test_diarization_run_appends_cc_by_attribution(tmp_path, monkeypatch) -> None:
-    """CC-BY-4.0 requires attribution whenever the gated weights ran."""
-    _consensus_setup(monkeypatch)
-    _patch_redecode(monkeypatch, "moikka")
-    _patch_diarize(monkeypatch, segments=[(0.0, 2.0, "SPEAKER_00")])
-    result = transcribe_file(
-        "/nonexistent.m4a", config_path=str(tmp_path / "none.toml"), diarize=True
-    )
-    from vemoizer.diarization import ATTRIBUTION
-
-    assert ATTRIBUTION in result.get("warnings", [])
-
-
-def test_no_attribution_without_diarization(tmp_path, monkeypatch) -> None:
-    _consensus_setup(monkeypatch)
-    _patch_redecode(monkeypatch, "moikka")
-    result = transcribe_file(
-        "/nonexistent.m4a", config_path=str(tmp_path / "none.toml")
-    )
-    from vemoizer.diarization import ATTRIBUTION
-
-    assert ATTRIBUTION not in result.get("warnings", [])

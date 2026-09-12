@@ -59,6 +59,10 @@ def format_md(transcript: dict[str, Any]) -> str:
                 continue
             speaker = para.get("speaker")
             prefix = f"[{speaker}] " if speaker else ""
+            if para.get("suspect"):
+                # Low recognizer confidence: warn the reader instead of
+                # silently shipping likely garble as fact.
+                prefix = "⚠ " + prefix
             blocks.append(prefix + body)
         lines.append("\n\n".join(blocks))
     else:
