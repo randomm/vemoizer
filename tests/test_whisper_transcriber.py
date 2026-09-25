@@ -258,3 +258,44 @@ def test_decode_meeting_heals_hallucination_walls() -> None:
     # healed words shifted onto the recording timeline (slice offset 9s)
     healed_word = next(w for w in result["words"] if w["word"] == "demossa")
     assert healed_word["start"] == 9.5
+
+
+def test_decode_meeting_falls_back_to_prompt_free_redecode() -> None:
+    """When the prompted re-decode still loops (the prompt itself being
+    echoed), the fallback re-decodes the slice without the glossary."""
+    sr = 16_000
+    wall = [
+        _seg("Janni.", [{"word": " Janni.", "start": 1.0 + i, "end": 1.5 + i}])
+        for i in range(8)
+    ]
+    still_looping = _raw(
+        [
+            _seg("Janni.", [{"word": " Janni.", "start": 0.5 + i, "end": 0.9 + i}])
+            for i in range(6)
+        ]
+    )
+    clean = _raw(
+        [
+            _seg(
+                "we talked about the data platform today",
+                [{"word": " we", "start": 0.5, "end": 0.7}],
+            )
+        ]
+    )
+    mock = MagicMock()
+    mock.transcribe = MagicMock(side_effect=[_raw(wall), still_looping, clean])
+    slices = [(0, np.zeros(10 * sr, dtype=np.float32))]
+    with (
+        patch.dict("sys.modules", {"mlx_whisper": mock}),
+        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
+    ):
+        result = decode_meeting(_audio(10.0), slices, initial_prompt="Sanasto: Janni.")
+
+    assert result is not None
+    assert mock.transcribe.call_count == 3
+    primary, fallback = (c.kwargs for c in mock.transcribe.call_args_list[1:])
+    assert primary["initial_prompt"] == "Sanasto: Janni."
+    assert fallback["initial_prompt"] is None
+    assert fallback["condition_on_previous_text"] is False
+    assert "Janni" not in result["text"]
+    assert "data platform" in result["text"]

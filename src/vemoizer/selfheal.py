@@ -10,8 +10,12 @@ This stage detects such walls after the whole-file decode and re-decodes
 only the VAD slices under them with conditioning OFF — each slice gets a
 fresh context (and the glossary ``initial_prompt`` again), so the loop
 cannot propagate. A replacement is accepted only when it is not itself
-degenerate; a failed or still-looping re-decode keeps the original slice
-(fail-open, invariant #5). Detection and splicing are pure functions.
+degenerate. When the primary re-decode still loops or fails, an optional
+*fallback* (the caller passes a prompt-free decode) gets one try: a
+name-heavy glossary prompt can itself be what whisper echoes ("Janni."
+walls), and re-sending that prompt reproduces the loop. If both fail
+the original slice is kept (fail-open, invariant #5). Detection and
+splicing are pure functions.
 """
 
 from __future__ import annotations
@@ -49,8 +53,11 @@ MERGE_GAP_S = 10.0
 #: than this.
 MIN_OVERLAP_S = 0.2
 
-#: Runaway backstop: never re-decode more slices than this per file.
-MAX_HEAL_SLICES = 200
+#: Runaway backstop: never re-decode more than this much audio per file.
+#: Time-based, not a slice count: fine-grained VAD on dictaphone audio
+#: puts 200+ slices under a 12-minute wall, and a count cap left the tail
+#: of such walls unhealed.
+MAX_HEAL_SECONDS = 1800.0
 
 RedecodeFn = Callable[[np.ndarray], dict[str, Any]]
 
@@ -111,15 +118,36 @@ def _shift(items: list[dict[str, Any]], offset_s: float) -> list[dict[str, Any]]
     ]
 
 
+def _attempt(
+    fn: RedecodeFn, chunk: np.ndarray, start_s: float, end_s: float
+) -> dict[str, Any] | None:
+    """One re-decode try; ``None`` when it raises or still loops."""
+    try:
+        replacement = fn(chunk)
+    except Exception as e:  # noqa: BLE001 - fail-open stage boundary
+        logger.warning(
+            "self-heal: re-decode failed for [%.0fs, %.0fs): %s", start_s, end_s, e
+        )
+        return None
+    if find_degenerate_windows(list(replacement.get("segments") or [])):
+        logger.info(
+            "self-heal: re-decode of [%.0fs, %.0fs) still loops", start_s, end_s
+        )
+        return None
+    return replacement
+
+
 def heal(
     result: dict[str, Any],
     slices: list[tuple[int, np.ndarray]],
     redecode: RedecodeFn,
+    fallback: RedecodeFn | None = None,
 ) -> dict[str, Any]:
     """Re-decode the VAD slices under hallucination walls; fail-open.
 
     *redecode* transcribes one slice with conditioning off and returns
-    ``{"segments": [...], "words": [...]}`` on slice-local time. Returns
+    ``{"segments": [...], "words": [...]}`` on slice-local time;
+    *fallback* is tried when that still loops or fails. Returns
     *result* unchanged when nothing is degenerate or nothing could be
     healed; otherwise a new dict with segments/words/text rebuilt.
     """
@@ -136,6 +164,7 @@ def heal(
     )
 
     healed_bounds: list[tuple[float, float]] = []
+    healed_s = 0.0
     new_segments: list[dict[str, Any]] = []
     new_words: list[dict[str, Any]] = []
     for offset, chunk in slices:
@@ -147,27 +176,16 @@ def heal(
         )
         if not overlaps:
             continue
-        if len(healed_bounds) >= MAX_HEAL_SLICES:
-            logger.warning("self-heal: slice cap reached, leaving the rest as-is")
+        if healed_s + (end_s - start_s) > MAX_HEAL_SECONDS:
+            logger.warning("self-heal: time budget reached, leaving the rest as-is")
             break
-        try:
-            replacement = redecode(chunk)
-        except Exception as e:  # noqa: BLE001 - fail-open stage boundary
-            logger.warning(
-                "self-heal: re-decode failed for [%.0fs, %.0fs), keeping original: %s",
-                start_s,
-                end_s,
-                e,
-            )
+        replacement = _attempt(redecode, chunk, start_s, end_s)
+        if replacement is None and fallback is not None:
+            replacement = _attempt(fallback, chunk, start_s, end_s)
+        if replacement is None:
             continue
+        healed_s += end_s - start_s
         repl_segments = list(replacement.get("segments") or [])
-        if find_degenerate_windows(repl_segments):
-            logger.info(
-                "self-heal: re-decode of [%.0fs, %.0fs) still loops, keeping original",
-                start_s,
-                end_s,
-            )
-            continue
         healed_bounds.append((start_s, end_s))
         new_segments.extend(_shift(repl_segments, start_s))
         new_words.extend(_shift(list(replacement.get("words") or []), start_s))

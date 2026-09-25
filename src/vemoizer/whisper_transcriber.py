@@ -242,11 +242,18 @@ def decode_meeting(
         # Hallucination walls (context-fed repetition loops) are repaired
         # by re-decoding only the slices under them with conditioning off;
         # heal() is a no-op on a clean decode and fail-open otherwise.
+        # The fallback drops the glossary prompt: when the wall is the
+        # prompt itself being echoed, re-sending it reproduces the loop.
         result = heal(
             result,
             slices,
             lambda chunk: dict(
                 transcriber.transcribe(chunk, condition_on_previous_text=False)
+            ),
+            fallback=lambda chunk: dict(
+                transcriber.transcribe(
+                    chunk, condition_on_previous_text=False, initial_prompt=None
+                )
             ),
         )
         result["slices"] = slice_records_from_words(

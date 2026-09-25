@@ -193,3 +193,55 @@ def test_heal_accepts_silence_as_replacement() -> None:
     texts = [s["text"] for s in healed["segments"]]
     assert "Kiitos." not in texts
     assert len(texts) == 2  # only the good head and tail remain
+
+
+# --- prompt-echo fallback + time budget (2026-09-25 live failure) ---
+#
+# A name-heavy glossary prompt made whisper echo "Janni." whenever the
+# audio was unclear; the conditioning-off re-decode re-sent the same
+# prompt and looped again. The fallback re-decodes without the prompt.
+
+
+def _looping(chunk: np.ndarray) -> dict[str, Any]:
+    return {
+        "segments": [_seg("Janni.", float(i), float(i) + 1.0) for i in range(6)],
+        "words": [],
+    }
+
+
+def test_fallback_used_when_primary_redecode_still_loops() -> None:
+    healed = heal(_wall_result(), _slices(), _looping, fallback=_good_redecode)
+    texts = [s["text"] for s in healed["segments"]]
+    assert "Kiitos." not in texts
+    assert "Tässä kohtaa puhuttiin demosta ihan oikeasti." in texts
+
+
+def test_fallback_used_when_primary_redecode_raises() -> None:
+    def broken(chunk: np.ndarray) -> dict[str, Any]:
+        raise RuntimeError("decode exploded")
+
+    healed = heal(_wall_result(), _slices(), broken, fallback=_good_redecode)
+    assert "Kiitos" not in healed["text"]
+
+
+def test_original_kept_when_fallback_also_loops() -> None:
+    result = _wall_result()
+    healed = heal(result, _slices(), _looping, fallback=_looping)
+    assert [s["text"] for s in healed["segments"]] == [
+        s["text"] for s in result["segments"]
+    ]
+
+
+def test_heal_budget_is_time_based_not_slice_count() -> None:
+    """Many short slices under a wall all heal while their audio fits."""
+    wall = [_seg("Kiitos.", float(i), float(i) + 1.0) for i in range(300)]
+    result = {"text": "", "segments": wall, "words": []}
+    slices = [(i * SR, np.zeros(SR, dtype=np.float32)) for i in range(300)]
+    calls: list[int] = []
+
+    def counting(chunk: np.ndarray) -> dict[str, Any]:
+        calls.append(1)
+        return {"segments": [], "words": []}
+
+    heal(result, slices, counting)
+    assert len(calls) == 300  # the old 200-slice cap would stop here
