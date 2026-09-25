@@ -71,9 +71,12 @@ def test_corrections_parse_from_arrow_lines(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert load_corrections(f) == {"Blacksit": "Flagship", "Newport": "Nyborg"}
-    # arrow lines are corrections, not prompt terms; right sides join terms
-    assert "Blacksit" not in load_glossary(f)
-    assert "Flagship" in load_glossary(f)
+    # arrow lines are corrections, never prompt terms — neither side:
+    # prompt order is load-bearing (whisper echoes what leads it), so only
+    # explicitly listed terms may seed recognition. A name deliberately
+    # kept out of the prompt ("Peltsi" leaked into a clip) must not come
+    # back through a pair's right side.
+    assert load_glossary(f) == ["Flagship-hanke"]
 
 
 def test_corrections_apply_on_word_boundaries() -> None:

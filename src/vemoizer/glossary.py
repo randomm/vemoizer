@@ -44,19 +44,13 @@ def _read_lines(path: str | Path | None) -> list[str]:
 def load_glossary(path: str | Path | None) -> list[str]:
     """Prompt terms from the glossary file; ``[]`` when absent (fail-open).
 
-    ``wrong => right`` correction lines contribute their *right* side (the
-    canonical spelling is a good recognition seed); the wrong side must
-    never appear in a prompt.
+    Only explicitly listed terms seed the prompt; ``wrong => right``
+    correction lines are post-recognition fixes and contribute nothing.
+    Prompt order is load-bearing (whisper echoes whatever leads it when
+    audio is unclear), so a term kept out of the list on purpose must not
+    re-enter through a pair's right side.
     """
-    terms: list[str] = []
-    for line in _read_lines(path):
-        if "=>" in line:
-            _wrong, _, right = line.partition("=>")
-            right = right.strip()
-            if right:
-                terms.append(right)
-        else:
-            terms.append(line)
+    terms = [line for line in _read_lines(path) if "=>" not in line]
     if terms:
         logger.info("glossary: %d terms from %s", len(terms), path)
     return terms
