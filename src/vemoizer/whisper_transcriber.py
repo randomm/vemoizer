@@ -5,12 +5,19 @@ outperforms both Parakeet and Canary (measured on the reference 4-person
 meeting: it recovers "Siemensin logiikoista" and "RFID-lukijat" where both
 garble) at ~23x realtime, with word timestamps.
 
-Unlike the per-slice decoders, this transcriber feeds the WHOLE recording
-to one ``mlx_whisper.transcribe`` call — mlx-whisper windows internally,
-and long-window decoding is exactly where Whisper beats slice-by-slice
-decoding (fewer boundary artifacts, better context). Per-VAD-slice records
-for the dispute stage are derived afterwards from the word timestamps
-(:func:`slice_records_from_words`).
+To keep the glossary in every decoding window, the recording is decoded in
+:data:`WINDOW_SECONDS` windows: each window is its own
+``mlx_whisper.transcribe`` call, so the ``initial_prompt`` seeds it from
+window 1 (issue #76: a single whole-file call slides the prompt past
+mlx-whisper's 223-token keep-window after ~1 minute of rolling context).
+Each window is short, so its own rolling context stays inside the
+keep-window. Per-VAD-slice records for the dispute stage are derived from
+the word timestamps (:func:`slice_records_from_words`).
+
+Spike (see the issue #76 spike report): the per-window loop costs ~+40%
+wall-clock vs the single call (12.1 vs 8.7 min/hour measured on 15 min of
+synthetic audio), which is the price of the glossary actually reaching
+later windows.
 
 Model loading is lazy and revision-pinned (invariant #4); a failed resolve
 latches so hundreds of calls never re-attempt a broken download; language
@@ -40,6 +47,12 @@ MODEL_REVISION = "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb"
 
 #: Audio contract (project invariant #6): 16 kHz mono float32.
 SAMPLE_RATE = 16_000
+
+#: Decode window length in seconds. Each window is one transcribe() call so
+#: the glossary initial_prompt re-seeds it; shorter windows keep the
+#: per-window rolling context inside the prompt keep-window, at the cost of
+#: boundary artifacts (mitigated by whisper's own segmentation).
+WINDOW_SECONDS = 30.0
 
 
 class WhisperTranscriber:
@@ -86,7 +99,17 @@ class WhisperTranscriber:
             logger.info("Whisper model resolved in %.2fs", time.time() - start)
 
     def transcribe(self, audio: np.ndarray, **kwargs: Any) -> TranscriptionResult:
-        """Transcribe the whole recording in one call (16 kHz mono float32)."""
+        """Transcribe the recording in :data:`WINDOW_SECONDS` windows.
+
+        Each window is a separate ``mlx_whisper.transcribe`` call (16 kHz
+        mono float32 in, recording-timeline timestamps out): a single
+        whole-file call would let the rolling context slide the glossary
+        out of the prompt keep-window, so the prompt must re-seed at
+        every window boundary. The self-heal kwargs override still works:
+        ``transcribe(chunk, condition_on_previous_text=False)`` and
+        ``transcribe(chunk, initial_prompt=None)`` re-encode a single
+        slice.
+        """
         if len(audio) == 0:
             return {
                 "text": "",
@@ -101,12 +124,13 @@ class WhisperTranscriber:
             audio = audio.astype(np.float32)
 
         start = time.time()
-        # Rolling context ON by default: with conditioning off, mlx-whisper
-        # resets the prompt after EVERY window (verified in 0.4.3 source),
-        # so the glossary initial_prompt reached only the first 30s. The
-        # fallback ladder + thresholds are whisper's designed anti-loop
-        # mechanism; when it fails anyway, the self-heal stage re-decodes
-        # the wall with conditioning off via the kwargs override.
+        # Rolling context ON by default: mlx-whisper resets the prompt only
+        # on temperature > 0.5 or conditioning off (verified in 0.4.3
+        # source), and the fallback ladder + thresholds are whisper's
+        # designed anti-loop mechanism. Because every window is its own
+        # transcribe() call, the glossary re-seeds at each boundary;
+        # when the ladder still fails, the self-heal stage re-decodes the
+        # wall with conditioning off via the kwargs override.
         options: dict[str, Any] = {
             "temperature": (0.0, 0.2, 0.4),
             "condition_on_previous_text": True,
@@ -117,25 +141,61 @@ class WhisperTranscriber:
             "initial_prompt": self._initial_prompt,
         }
         options.update(kwargs)
-        raw = self._mlx_whisper.transcribe(
-            audio,
-            path_or_hf_repo=self._model_path,
-            word_timestamps=True,
-            language=self._language,
-            task="transcribe",
-            **options,
-        )
+
+        window_frames = int(WINDOW_SECONDS * SAMPLE_RATE)
+        # mlx_whisper can return None on transient GPU/MLX faults; the
+        # guard below names the failing window, so the annotation matches
+        # the runtime contract.
+        raws: list[dict[str, Any]] = []
+        for index, offset in enumerate(range(0, len(audio), window_frames)):
+            raw = self._mlx_whisper.transcribe(
+                audio[offset : offset + window_frames],
+                path_or_hf_repo=self._model_path,
+                word_timestamps=True,
+                language=self._language,
+                task="transcribe",
+                **options,
+            )
+            if raw is None:
+                # A transient GPU fault / MLX memory pressure can make
+                # mlx_whisper.transcribe return None instead of raising;
+                # name the failing window instead of dying mid-loop on
+                # an opaque AttributeError in raw.get below.
+                raise RuntimeError(
+                    f"whisper window {index} (offset {offset / SAMPLE_RATE:.0f}s) "
+                    "returned None"
+                )
+            raws.append(raw)
         transcribe_time = time.time() - start
         audio_duration = len(audio) / SAMPLE_RATE
 
         words: list[dict[str, Any]] = []
         segments: list[dict[str, Any]] = []
-        for seg in raw.get("segments") or []:
-            text = str(seg.get("text", "")).strip()
-            if text:
+        for index, raw in enumerate(raws):
+            offset_s = index * WINDOW_SECONDS
+            # A non-empty window that decoded to zero segments (malformed
+            # payload, or the model hearing nothing) would otherwise flow
+            # into the fail-open path in decode_meeting indistinguishable
+            # from a model failure; make the degradation observable.
+            if not raw.get("segments"):
+                # Per-window, this fires once a window's worth of audio
+                # produced nothing; a long mostly-silent recording would
+                # spam a warning per window, so the routine case stays at
+                # debug (a fully empty decode still surfaces through the
+                # fail-open path in decode_meeting).
+                logger.debug(
+                    "whisper window %d (offset %.0fs) returned no segments; "
+                    "transcript may be incomplete",
+                    index,
+                    offset_s,
+                )
+            for seg in raw.get("segments") or []:
+                text = str(seg.get("text", "")).strip()
+                if not text:
+                    continue
                 entry: dict[str, Any] = {
-                    "start": float(seg.get("start", 0.0)),
-                    "end": float(seg.get("end", 0.0)),
+                    "start": float(seg.get("start", 0.0)) + offset_s,
+                    "end": float(seg.get("end", 0.0)) + offset_s,
                     "text": text,
                 }
                 # Per-segment confidence feeds the suspect-region flagging;
@@ -145,28 +205,36 @@ class WhisperTranscriber:
                     if seg.get(key) is not None:
                         entry[key] = float(seg[key])
                 segments.append(entry)
-            for w in seg.get("words") or []:
-                word = str(w.get("word", "")).strip()
-                if word:
-                    words.append(
-                        {
-                            "word": word,
-                            "start": float(w.get("start", 0.0)),
-                            "end": float(w.get("end", 0.0)),
-                        }
-                    )
+                for w in seg.get("words") or []:
+                    word = str(w.get("word", "")).strip()
+                    if word:
+                        words.append(
+                            {
+                                "word": word,
+                                "start": float(w.get("start", 0.0)) + offset_s,
+                                "end": float(w.get("end", 0.0)) + offset_s,
+                            }
+                        )
 
         result: TranscriptionResult = {
-            "text": str(raw.get("text", "")).strip(),
+            "text": " ".join(str(raw["text"]).strip() for raw in raws).strip(),
             "words": words,
             "segments": segments,
             "transcribe_time": transcribe_time,
             "audio_duration": audio_duration,
             "rtf": transcribe_time / audio_duration if audio_duration > 0 else 0.0,
         }
-        language = raw.get("language")
-        if language:
-            result["language"] = str(language)
+        # Language detection is redundant across windows (same model, same
+        # audio); take the first non-empty one.
+        languages = {str(raw["language"]) for raw in raws if raw.get("language")}
+        if len(languages) == 1:
+            result["language"] = next(iter(languages))
+        elif languages:
+            logger.warning(
+                "window language disagreement %s; not attributing a run "
+                "language (per-slice language from decode B wins downstream)",
+                sorted(languages),
+            )
         return result
 
     def cleanup(self) -> None:
@@ -226,12 +294,12 @@ def decode_meeting(
     slices: list[tuple[int, np.ndarray]],
     initial_prompt: str | None = None,
 ) -> dict[str, Any] | None:
-    """Whole-file Whisper decode A for the meeting profile (fail-open).
+    """Per-window Whisper decode A for the meeting profile (fail-open).
 
-    One transcribe call over the full recording (mlx-whisper windows
-    internally; per-slice calls would forfeit Whisper's long-window
-    strength and pay 1000+ fixed overheads). The per-slice records the
-    dispute stage needs are derived from the word timestamps.
+    The recording is decoded in :data:`WINDOW_SECONDS` windows (each its
+    own transcribe() call so the glossary re-seeds every window); the
+    per-slice records the dispute stage needs are derived from the word
+    timestamps.
     """
     transcriber: WhisperTranscriber | None = None
     try:

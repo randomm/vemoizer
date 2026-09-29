@@ -1,0 +1,8 @@
+# Meeting-eval glossary (issue #76): the terms the whisper prompt is
+# judged on. One term per line; # comments allowed. The reference
+# transcript (meeting_sample.txt) contains every term at least once, so
+# the term-hit metric has a non-vacuous denominator.
+sprint planning
+backlog
+priorisoimme
+prioriteetit

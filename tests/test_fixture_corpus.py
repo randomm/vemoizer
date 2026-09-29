@@ -16,6 +16,8 @@ from pathlib import Path
 import pytest
 
 from vemoizer.audio_contract import SAMPLE_RATE
+from vemoizer.eval_harness import _terms_present
+from vemoizer.textnorm import textnorm
 
 CORPUS_DIR = Path(__file__).resolve().parent / "fixtures" / "corpus"
 
@@ -27,7 +29,11 @@ SAMPLE_WIDTH = 2  # 16-bit PCM
 #: bound is a short silence-tail guard that catches empty or truncated
 #: WAVs. Tunes with the fixtures in ``scripts/gen_fixtures.py``.
 MIN_SECONDS = 1.0
-MAX_SECONDS = 10.0
+#: The single-shot fixtures are short clips; the multi-speaker meeting eval
+#: fixture (issue #76, ``meeting_sample``) is deliberately longer (~20s) to
+#: exercise the meeting profile over multiple turns, so the upper bound is
+#: set to cover both without special-casing the stem.
+MAX_SECONDS = 30.0
 
 
 def _read_headers(fixture: Path) -> wave.Wave_read:
@@ -95,13 +101,45 @@ def test_no_stray_files_in_corpus_dir() -> None:
         if not p.is_file():
             stray.append(p.name)
             continue
-        if p.suffix not in {".wav", ".txt"}:
+        if p.suffix not in {".wav", ".txt", ".terms"}:
             stray.append(p.name)
         elif p.suffix == ".wav" and p.stem not in txts:
             stray.append(f"{p.name} (no same-stem .txt)")
-        elif p.suffix == ".txt" and p.stem not in wavs:
+        elif p.suffix in {".txt", ".terms"} and p.stem not in wavs:
             stray.append(f"{p.name} (no same-stem .wav)")
     assert not stray, f"stray or mismatched files in corpus: {stray}"
+
+
+def test_meeting_sample_fixture_present() -> None:
+    """The multi-speaker meeting eval fixture (issue #76) must ship with the corpus.
+
+    The meeting eval scores WER plus a glossary term-hit rate on
+    ``meeting_sample.wav``; the ``.terms`` file pins the glossary the
+    metric is judged on. A future corpus re-gen must keep this stem
+    (or the meeting eval metric loses its fixture).
+    """
+    wav = CORPUS_DIR / "meeting_sample.wav"
+    txt = CORPUS_DIR / "meeting_sample.txt"
+    terms = CORPUS_DIR / "meeting_sample.terms"
+    assert wav.is_file(), "missing meeting_sample.wav (meeting eval fixture)"
+    assert txt.is_file(), "missing meeting_sample.txt (reference transcript)"
+    assert terms.is_file(), "missing meeting_sample.terms (glossary)"
+    body = terms.read_text(encoding="utf-8").strip()
+    assert body, "meeting_sample.terms is empty"
+    # The reference must contain at least one glossary term, else the
+    # term-hit metric has a vacuous denominator (always 1.0) and the
+    # glossary work is unmeasurable.
+    ref = textnorm(txt.read_text(encoding="utf-8")).split()
+    glossary = [
+        line.strip()
+        for line in body.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    hit = bool(_terms_present(ref, glossary))
+    assert hit, (
+        "meeting_sample.txt contains none of the glossary terms; the "
+        "term-hit metric would be vacuous"
+    )
 
 
 def test_fixture_duration_within_bounds() -> None:

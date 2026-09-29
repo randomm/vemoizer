@@ -15,7 +15,9 @@ from vemoizer.eval_harness import (
     AGGREGATE_KEY,
     compare_to_baseline,
     corpus_fingerprint,
+    glossary_term_hit_rate,
     run_eval,
+    run_meeting_eval,
     wer,
 )
 
@@ -79,8 +81,10 @@ def test_run_eval_scores_the_injected_transcriber(tmp_path: Path) -> None:
     def perfect(wav: Path) -> str:
         return (wav.with_suffix(".txt")).read_text(encoding="utf-8")
 
-    results = run_eval(corpus, perfect)
+    hyps: dict[str, str] = {}
+    results = run_eval(corpus, perfect, hyps)
     assert results == {"one": 0.0, "two": 0.0, AGGREGATE_KEY: 0.0}
+    assert hyps == {"one": "moro aami", "two": "toista tallaista"}
 
 
 def test_run_eval_reports_real_errors(tmp_path: Path) -> None:
@@ -99,9 +103,11 @@ def test_run_eval_transcriber_failure_scores_one_not_crash(tmp_path: Path) -> No
             raise RuntimeError("model exploded")
         return wav.with_suffix(".txt").read_text(encoding="utf-8")
 
-    results = run_eval(corpus, flaky)
+    hyps: dict[str, str] = {}
+    results = run_eval(corpus, flaky, hyps)
     assert results["bad"] == 1.0  # empty hypothesis against a real reference
     assert results["good"] == 0.0
+    assert hyps == {"bad": "", "good": "c d"}
 
 
 def test_run_eval_ignores_unpaired_stems(tmp_path: Path) -> None:
@@ -109,11 +115,13 @@ def test_run_eval_ignores_unpaired_stems(tmp_path: Path) -> None:
     (tmp_path / "lone.wav").write_bytes(b"RIFF")
     _corpus(tmp_path, {"paired": "hello world"})
 
-    results = run_eval(tmp_path, lambda wav: "hello world")
+    hyps: dict[str, str] = {}
+    results = run_eval(tmp_path, lambda wav: "hello world", hyps)
 
     assert "orphan" not in results
     assert "lone" not in results
     assert results["paired"] == 0.0
+    assert hyps == {"paired": "hello world"}
 
 
 def test_run_eval_missing_directory_raises(tmp_path: Path) -> None:
@@ -122,7 +130,213 @@ def test_run_eval_missing_directory_raises(tmp_path: Path) -> None:
 
 
 def test_run_eval_empty_corpus_gives_zero_aggregate(tmp_path: Path) -> None:
-    assert run_eval(tmp_path, lambda wav: "") == {AGGREGATE_KEY: 0.0}
+    hyps: dict[str, str] = {}
+    results = run_eval(tmp_path, lambda wav: "", hyps)
+    assert results == {AGGREGATE_KEY: 0.0}
+    assert hyps == {}
+
+
+# --- glossary_term_hit_rate ------------------------------------------------
+# issue #76: the meeting eval metric. A term "appears" when it stands alone
+# as a whole-word token (case-insensitive); near-misses (substrings, stem
+# variants) do not count. Repeated occurrences count once. The metric is the
+# number the glossary prompt work is judged by (kept only if term hits rise
+# and WER does not regress).
+
+
+def test_term_hit_all_terms_present_in_both_sides_is_one() -> None:
+    ref = "meidän sprint planning alkaa ja backlog on täynnä"
+    hyp = "sprint planning alkaa ja backlog on täynnä"
+    terms = ["sprint planning", "backlog"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 1.0
+
+
+def test_term_hit_no_term_in_hypothesis_is_zero() -> None:
+    ref = "meidän sprint planning alkaa ja backlog on täynnä"
+    hyp = "tämä on joku muu puhdasta"
+    terms = ["sprint planning", "backlog"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 0.0
+
+
+def test_term_hit_partial_term_occurrence() -> None:
+    ref = "sprint planning alkaa ja backlog on täynnä"
+    hyp = "backlog on täynnä"  # only one of two terms
+    terms = ["sprint planning", "backlog"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 0.5
+
+
+def test_term_hit_one_of_three_terms() -> None:
+    ref = "sprint planning alkaa ja backlog on täynnä ja prioriteetit selkeät"
+    hyp = "backlog on täynnä"
+    terms = ["sprint planning", "backlog", "prioriteetit"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == pytest.approx(1 / 3)
+
+
+def test_term_hit_case_insensitive() -> None:
+    ref = "Sprint Planning alkaa"
+    hyp = "sprint planning alkaa"
+    terms = ["sprint planning"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 1.0
+
+
+def test_term_hit_punctuation_around_term_does_not_break_match() -> None:
+    ref = "sprint planning alkaa, ja backlog täynnä."
+    hyp = "sprint planning alkaa ja backlog täynnä"
+    terms = ["sprint planning", "backlog"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 1.0
+
+
+def test_term_hit_substring_is_not_a_whole_word_match() -> None:
+    # "backlogi" contains "backlog" as a substring but is a different
+    # (inflected) word; a whole-word match must not count it.
+    ref = "backlog on täynnä"
+    hyp = "backlogi on täynnä"
+    assert glossary_term_hit_rate(ref, hyp, ["backlog"]) == 0.0
+
+
+def test_term_hit_hyphenated_form_matches() -> None:
+    # "sprint-planning" normalizes to the two words "sprint planning"
+    # (punctuation-as-space), so it still counts.
+    ref = "sprint planning alkaa"
+    hyp = "sprint-planning alkaa"
+    assert glossary_term_hit_rate(ref, hyp, ["sprint planning"]) == 1.0
+
+
+def test_term_hit_vacuous_when_no_term_in_reference_is_one() -> None:
+    # A glossary with no term in the reference yields 1.0 (no work to do),
+    # not 0.0 — the metric is "of the terms the reference uses, how many
+    # survived", and the empty set has no survivors to lose.
+    ref = "ei termejä tässä"
+    hyp = "ei termejä tässä"
+    terms = ["sprint planning", "backlog"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 1.0
+
+
+def test_term_hit_repeated_occurrences_count_once() -> None:
+    ref = "backlog on täynnä ja backlog on täynnä"
+    hyp = "backlog on täynnä"
+    terms = ["backlog"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 1.0
+
+
+def test_term_hit_case_and_punctuation_variants_count_once() -> None:
+    # "backlog" and "Backlog" normalize to the same token, so they share one
+    # slot in both reference and hypothesis and never double-count.
+    ref = "backlog on täynnä"
+    hyp = "backlog on täynnä"
+    terms = ["backlog", "Backlog", "backlog,"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 1.0
+
+
+def test_term_hit_empty_terms_returns_one() -> None:
+    # No terms in the glossary means nothing can be missed; 1.0 keeps the
+    # metric well-defined and composable with a 0.0 baseline entry.
+    ref = "jokin puhdasta"
+    hyp = "jokin puhdasta"
+    assert glossary_term_hit_rate(ref, hyp, []) == 1.0
+
+
+# --- run_meeting_eval -------------------------------------------------------
+# The meeting eval consumes a single multi-speaker fixture: <stem>.wav +
+# <stem>.txt + <stem>.terms. The harness must skip samples without a .terms
+# file (they belong to the WER walk, not the meeting eval), and a crashing
+# backend must not abort the run.
+
+
+def _meeting_corpus(tmp_path: Path, stem: str = "meeting_sample") -> Path:
+    (tmp_path / f"{stem}.wav").write_bytes(b"RIFF0000WAVE")
+    (tmp_path / f"{stem}.txt").write_text(
+        "sprint planning alkaa ja backlog on täynnä",
+        encoding="utf-8",
+    )
+    (tmp_path / f"{stem}.terms").write_text(
+        "sprint planning\nbacklog\n", encoding="utf-8"
+    )
+    return tmp_path
+
+
+def test_run_meeting_eval_scores_wer_and_term_hit(tmp_path: Path) -> None:
+    corpus = _meeting_corpus(tmp_path)
+    results = run_meeting_eval(corpus, lambda wav: "backlog on täynnä")
+    assert "meeting_sample" in results
+    sample = results["meeting_sample"]
+    assert sample["term_hit"] == pytest.approx(0.5)  # only "backlog" survived
+    assert sample["wer"] == pytest.approx(4 / 7)  # 4 edits over 7 reference words
+
+
+def test_run_meeting_eval_perfect_transcript_is_zero_wer_one_term_hit(
+    tmp_path: Path,
+) -> None:
+    corpus = _meeting_corpus(tmp_path)
+    ref = (corpus / "meeting_sample.txt").read_text(encoding="utf-8")
+    results = run_meeting_eval(corpus, lambda wav: ref)
+    sample = results["meeting_sample"]
+    assert sample["wer"] == 0.0
+    assert sample["term_hit"] == 1.0
+
+
+def test_run_meeting_eval_skips_samples_without_terms_file(tmp_path: Path) -> None:
+    # A corpus with only WER samples (no .terms) yields the aggregate-only
+    # shape: the WER walk is unaffected by the meeting eval.
+    _corpus(tmp_path, {"one": "moro aami"})
+    results = run_meeting_eval(tmp_path, lambda wav: "moro aami")
+    assert results == {AGGREGATE_KEY: {"wer": 0.0, "term_hit": 0.0}}
+
+
+def test_run_meeting_eval_reuses_hypotheses_from_run_eval(tmp_path: Path) -> None:
+    """run_meeting_eval reuses hypotheses passed via *reuse*, so the WER walk
+    and the term-hit walk share a single decode (issue #76 review finding:
+    the double-decode cost compounds as the meeting set grows)."""
+    corpus = _meeting_corpus(tmp_path)
+    decoded: list[str] = []
+
+    def counting_transcribe(wav: Path) -> str:
+        decoded.append(wav.stem)
+        return "backlog on täynnä"
+
+    # Without reuse: the meeting walk decodes the sample fresh.
+    run_meeting_eval(corpus, counting_transcribe)
+    assert decoded == ["meeting_sample"]
+
+    # With reuse: the meeting walk skips the decode entirely.
+    decoded.clear()
+    reuse = {"meeting_sample": "backlog on täynnä"}
+    results = run_meeting_eval(corpus, counting_transcribe, reuse=reuse)
+    assert decoded == []
+    sample = results["meeting_sample"]
+    assert sample["term_hit"] == pytest.approx(0.5)
+
+
+def test_run_meeting_eval_falls_back_when_stem_not_in_reuse(tmp_path: Path) -> None:
+    """A sample not in *reuse* (e.g. not scored by the WER walk) still gets
+    decoded through *transcribe*."""
+    corpus = _meeting_corpus(tmp_path)
+    decoded: list[str] = []
+
+    def counting_transcribe(wav: Path) -> str:
+        decoded.append(wav.stem)
+        return "backlog on täynnä"
+
+    # Reuse only has a different stem — the meeting sample is not in it.
+    run_meeting_eval(corpus, counting_transcribe, reuse={"other_sample": "something"})
+    assert decoded == ["meeting_sample"]
+
+
+def test_run_meeting_eval_transcriber_failure_scores_as_empty(tmp_path: Path) -> None:
+    corpus = _meeting_corpus(tmp_path)
+
+    def crash(wav: Path) -> str:
+        raise RuntimeError("model exploded")
+
+    results = run_meeting_eval(corpus, crash)
+    sample = results["meeting_sample"]
+    assert sample["term_hit"] == 0.0  # nothing captured
+    assert sample["wer"] == 1.0
+
+
+def test_run_meeting_eval_missing_directory_raises(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        run_meeting_eval(tmp_path / "no-such-corpus", lambda wav: "")
 
 
 # --- corpus_fingerprint ----------------------------------------------------
