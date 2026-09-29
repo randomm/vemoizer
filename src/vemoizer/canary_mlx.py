@@ -24,6 +24,7 @@ from .canary_checkpoint import (  # noqa: E402
 )
 from .canary_decoder import CanaryDecoder  # noqa: E402,F401
 from .canary_tokenizer import (  # noqa: E402
+    CANARY_UNKLANG,
     CanaryTokenizer,
     parse_sentencepiece_model,  # noqa: F401 - re-export for test access
 )
@@ -111,7 +112,10 @@ def compute_features(audio: np.ndarray, *, dtype: mx.Dtype = mx.float32) -> mx.a
     mean = mel.mean(axis=0, keepdims=True)
     std = mel.std(axis=0, keepdims=True)
     norm = (mel - mean) / (std + 1e-5)
-    return mx.array(norm.T.astype(np.float32))[None, ...].astype(dtype)
+    # (B, T, n_mels) — the layout DwStridingSubsampling documents and the one
+    # the short-audio early return above already produces. Transposing to
+    # (B, n_mels, T) here fed frequency into the conv's time axis.
+    return mx.array(norm.astype(np.float32))[None, ...].astype(dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +304,6 @@ class ConformerBlock(nn.Module):
         self.feed_forward1 = FeedForward(d, d * args.ff_expansion_factor, args.use_bias)
         self.norm_self_att = nn.LayerNorm(d)
         self.self_attn = RelPosMultiHeadAttention(d, args.n_heads, args.use_bias)
-        self.norm_mha_out = nn.LayerNorm(d)
         self.norm_conv = nn.LayerNorm(d)
         self.conv = ConformerConvolution(args)
         self.norm_feed_forward2 = nn.LayerNorm(d)
@@ -347,13 +350,20 @@ class DwStridingSubsampling(nn.Module):
         self.out = nn.Linear(args.subsampling_conv_channels * final_freq, args.d_model)
 
     def __call__(self, x: mx.array) -> tuple[mx.array, mx.array]:
-        # x: (B, T, feat); conv_forward transposes to NCHW, runs convs, back
-        x = mx.expand_dims(x, 1)
-        x = x.transpose(0, 2, 3, 1)  # (B, feat, T, 1) -> MLX NCHW (B, 1, T, feat)
+        # x: (B, T, feat). MLX convs are NHWC, so the channel axis goes last:
+        # (B, T, feat, 1) puts time on H and frequency on W, matching NeMo's
+        # (B, C=1, H=T, W=feat).
+        x = mx.expand_dims(x, -1)
         for layer in self.conv:
             x = layer(x)
-        b, c, t, f = x.shape
-        x = self.out(x.reshape(b, t, -1))
+        # Still NHWC: (B, T', freq', channels). NeMo flattens its NCHW
+        # (B, C, T', F') as ``x.transpose(1, 2).reshape(b, t, -1)`` — i.e.
+        # channel-major, [c0f0..c0fF, c1f0..]. Reshaping NHWC directly would
+        # interleave frequency-major instead and feed ``self.out`` a permuted
+        # 4096-vector, so swap the last two axes first.
+        b, t, freq, channels = x.shape
+        x = x.transpose(0, 1, 3, 2).reshape(b, t, channels * freq)
+        x = self.out(x)
         lengths = mx.full((x.shape[0],), x.shape[1], dtype=mx.int32)
         return x, lengths
 
@@ -383,30 +393,88 @@ class CanaryModel(nn.Module):
         self.encoder = ConformerEncoder(config)
         self.decoder = CanaryDecoder(config)
 
+    def detect_language(self, enc: mx.array) -> str | None:
+        """The model's own language ID for this utterance (``"fi"``), or None.
+
+        Canary names the source language in a prompt slot, so the next-token
+        distribution after the emotion tag is a language classifier. Reading it
+        keeps language a per-utterance property (project invariant #3) instead
+        of a value pinned for a whole recording.
+
+        ``<|unklang|>`` cannot stand in for the *target* language — the model
+        emits an immediate end-of-transcript when asked to write in an
+        unspecified language — so the detected code is what makes an
+        auto-detected transcribe possible at all.
+        """
+        languages = self.tokenizer.language_tokens
+        if not languages:
+            return None
+        prefix = self.tokenizer.detect_prefix()
+        if not prefix:
+            return None
+        logits = self.decoder(
+            mx.array([prefix], dtype=mx.int32),
+            enc,
+            start_pos=0,
+            cache=self.decoder.make_cache(),
+        )
+        lang_ids = sorted(languages)
+        # Cast to float32 before numpy: bfloat16 has no PEP 3118 buffer format.
+        scores = np.asarray(
+            mx.take(logits[0, -1], mx.array(lang_ids, dtype=mx.int32)).astype(
+                mx.float32
+            )
+        )
+        return languages[lang_ids[int(np.argmax(scores))]]
+
     def generate(
         self,
         mel: mx.array,
-        prompt_ids: list[int],
-        source_lang: str = "unklang",
-        target_lang: str = "unklang",
+        prompt_ids: list[int] | None = None,
+        source_lang: str = CANARY_UNKLANG,
+        target_lang: str = CANARY_UNKLANG,
         *,
         max_tokens: int = 256,
-    ) -> str:
+    ) -> tuple[str, str | None]:
+        """Transcribe *mel*; returns ``(text, language)``.
+
+        ``language`` is the model's detected code when it was auto-detected,
+        else None. It is reported rather than assumed, so callers can attach
+        it to the span they decoded.
+        """
         enc, _ = self.encoder(mel)
-        prompt_ids = prompt_ids or self.tokenizer.build_prompt(source_lang, target_lang)
+        language: str | None = None
+        if not prompt_ids:
+            if source_lang == CANARY_UNKLANG:
+                language = self.detect_language(enc)
+                # Transcription, not translation: the target language is the
+                # one actually spoken. Leaving the target as <|unklang|> makes
+                # the model emit EOS immediately and return "".
+                source_lang = target_lang = language or "en"
+            prompt_ids = self.tokenizer.build_prompt(source_lang, target_lang)
         generated = list(prompt_ids)
         eos_id = self.tokenizer.eos_id
-        for step in range(max_tokens):
-            input_ids = mx.array(
-                [generated[-1:]] if generated else prompt_ids, dtype=mx.int32
-            )
-            if step == 0:
-                input_ids = mx.array([prompt_ids], dtype=mx.int32)
-            logits = self.decoder(input_ids, enc, start_pos=step)
+
+        # One KV cache for the whole run: the prompt is encoded once, then each
+        # step appends a single token's K/V. Cross-attention K/V come from the
+        # encoder output, so they are computed on the first pass and reused.
+        cache = self.decoder.make_cache()
+        logits = self.decoder(
+            mx.array([prompt_ids], dtype=mx.int32), enc, start_pos=0, cache=cache
+        )
+        pos = len(prompt_ids)
+        for _ in range(max_tokens):
             next_token = int(mx.argmax(logits[:, -1], axis=-1).item())
             if next_token == eos_id:
                 break
             generated.append(next_token)
+            logits = self.decoder(
+                mx.array([[next_token]], dtype=mx.int32),
+                enc,
+                start_pos=pos,
+                cache=cache,
+            )
+            pos += 1
         special_vals = self.tokenizer.special_tokens.values()
         decoded = [t for t in generated[len(prompt_ids) :] if t not in special_vals]
-        return self.tokenizer.decode(decoded)
+        return self.tokenizer.decode(decoded), language

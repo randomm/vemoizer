@@ -8,6 +8,7 @@ and the ``CanaryTokenizer`` class used by the transcriber and model.
 from __future__ import annotations
 
 import base64
+import re
 from typing import Any
 
 # Canary special-token strings (stable across the Canary model family).
@@ -17,6 +18,21 @@ CANARY_NOSPEECH = "<|nospeech|>"
 CANARY_PNC = "<|pnc|>"
 CANARY_NOPNC = "<|nopnc|>"
 CANARY2_BOCTX = "<|startofcontext|>"
+
+#: End-of-transcript spellings, most specific first. Canary-1b-v2 uses
+#: ``<|endoftext|>``; the Whisper-style ``<|endoftranscript|>`` is kept so a
+#: checkpoint using that name still terminates.
+_EOS_TOKEN_NAMES = ("<|endoftext|>", "<|endoftranscript|>")
+
+#: Language tags are ISO 639-1/2 codes, e.g. ``<|fi|>``. This deliberately
+#: excludes the flag tokens that share the ``<|..|>`` shape (``<|pnc|>``,
+#: ``<|itn|>``, ``<|unklang|>``) so a language argmax cannot select one.
+_LANGUAGE_TOKEN_RE = re.compile(r"^<\|[a-z]{2,3}\|>$")
+_NON_LANGUAGE_TAGS = frozenset({"<|pnc|>", "<|itn|>"})
+
+#: Source-language placeholder: ask the model to identify the language itself
+#: rather than pinning one (project invariant #3).
+CANARY_UNKLANG = "unklang"
 
 # ---------------------------------------------------------------------------
 # SentencePiece model parsing (pure Python — no `sentencepiece` dependency)
@@ -150,16 +166,46 @@ class CanaryTokenizer:
 
     @property
     def eos_id(self) -> int:
-        """Id of the transcript end token, or -1 if the vocab has none.
+        """Id of the end-of-transcript token, or -1 if the vocab has none.
 
-        The real Canary-1b-v2 SentencePiece vocab (16k pieces) has no explicit
-        end-of-transcript token — its special tokens are only ``<|...|>``
-        prompts, so decoding terminates on the ``max_tokens`` budget.
+        Canary-1b-v2 spells this ``<|endoftext|>``. An earlier version looked
+        only for ``endoftranscript`` (the Whisper spelling), found nothing, and
+        returned -1 — which no token id can equal, so the generation loop's
+        EOS break was dead and every slice ran the full ``max_tokens`` budget
+        regardless of how short the utterance was.
+
+        The names are tried in order and -1 is still the answer for a vocab
+        that genuinely has no end token, so callers must keep treating a
+        never-matching id as "stop on the budget".
         """
-        for token, token_id in self.special_tokens.items():
-            if "endoftranscript" in token:
-                return token_id
+        for name in _EOS_TOKEN_NAMES:
+            if name in self.special_tokens:
+                return self.special_tokens[name]
         return -1
+
+    @property
+    def language_tokens(self) -> dict[int, str]:
+        """Map each language token id to its bare code (``17 -> "fi"``).
+
+        Used to read the model's own language prediction: the slot after the
+        emotion tag is a language token, so restricting an argmax to these ids
+        yields per-utterance language ID instead of a pinned one.
+        """
+        return {
+            token_id: token[2:-2]
+            for token, token_id in self.special_tokens.items()
+            if _LANGUAGE_TOKEN_RE.match(token) and token not in _NON_LANGUAGE_TAGS
+        }
+
+    def detect_prefix(self) -> list[int]:
+        """Prompt prefix ending where the source-language token belongs.
+
+        Decoding this prefix puts the model one step short of naming the
+        language, so its next-token distribution *is* its language ID.
+        """
+        return self.encode(
+            f"{CANARY2_BOCTX}{CANARY_BOS}<|emo:undefined|>", "spl_tokens"
+        )
 
     @property
     def bos_id(self) -> int:
