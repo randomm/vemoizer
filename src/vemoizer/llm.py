@@ -12,6 +12,7 @@ An explicit path (or ``"os.devnull"``) short-circuits the search.
 from __future__ import annotations
 
 import contextlib
+import math
 import os
 import sys
 import tomllib
@@ -86,7 +87,10 @@ def load_config(path: Path | str) -> LLMConfig | None:
         return None
     if timeout <= 0:
         return None
-
+    if not math.isfinite(float(timeout)):
+        # TOML's 1e400 parses to float("inf"); an infinite LLM timeout is
+        # as malformed as a missing one (issue #82 review).
+        return None
     return LLMConfig(
         base_url=base_url.rstrip("/"),
         model=model.strip(),
@@ -344,7 +348,11 @@ def _parse_llm_section(section: dict[str, Any]) -> LLMConfig | None:
         return None
     if timeout <= 0:
         return None
-
+    if not math.isfinite(float(timeout)):
+        # TOML's 1e400 parses to float("inf"); the strict path turns this
+        # into a ConfigError (the section is malformed, not a 10^400-second
+        # timeout) (issue #82 review).
+        return None
     return LLMConfig(
         base_url=base_url.rstrip("/"),
         model=model.strip(),

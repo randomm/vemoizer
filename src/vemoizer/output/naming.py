@@ -126,6 +126,38 @@ def dated_basename(
     return f"{d} {base}"
 
 
+def collision_free_paths(
+    directory: Path | str, base: str, suffixes: list[str]
+) -> tuple[Path, ...]:
+    """Return one non-colliding path per suffix, ALL sharing one stem.
+
+    The *suffixes* are probed as a unit: any taken name (``X.md`` or
+    ``X.json``) bumps the whole pair to `` (2)``, never one file at a
+    time (an ``X.md`` + ``X (2).json`` pair would look like two different
+    runs of the same meeting). Every candidate is NFC-normalised before
+    probing, so an APFS NFD spelling of an existing file is a collision
+    (never overwritten). ``collision_free_path`` is the single-suffix
+    convenience wrapper over this.
+    """
+    dir_path = nfc_path(Path(directory))
+    base = nfc(base)
+    nfc_suffixes = [nfc(s) for s in suffixes]
+
+    def _all_free(stem: str) -> bool:
+        return all((dir_path / f"{stem}{s}").exists() is False for s in nfc_suffixes)
+
+    if _all_free(base):
+        n = 1
+    else:
+        n = 2
+        while True:
+            if _all_free(f"{base} ({n})"):
+                break
+            n += 1
+    stem = base if n == 1 else f"{base} ({n})"
+    return tuple(dir_path / f"{stem}{s}" for s in nfc_suffixes)
+
+
 def collision_free_path(directory: Path | str, base: str, suffix: str) -> Path:
     """Return a non-colliding path in *directory* for *base* + *suffix*.
 
@@ -136,15 +168,4 @@ def collision_free_path(directory: Path | str, base: str, suffix: str) -> Path:
     Candidates are checked against the real filesystem via
     ``Path.exists``. The returned path is NFC.
     """
-    dir_path = nfc_path(Path(directory))
-    base = nfc(base)
-    suffix = nfc(suffix)
-    candidate = dir_path / f"{base}{suffix}"
-    if not candidate.exists():
-        return candidate
-    n = 2
-    while True:
-        candidate = dir_path / f"{base} ({n}){suffix}"
-        if not candidate.exists():
-            return candidate
-        n += 1
+    return collision_free_paths(directory, base, [suffix])[0]

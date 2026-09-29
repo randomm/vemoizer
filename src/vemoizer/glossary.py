@@ -95,20 +95,22 @@ def load_glossary(path: str | Path | None) -> list[str]:
 
     Only explicitly listed terms seed the prompt; ``wrong => right``
     correction lines are post-recognition fixes and contribute nothing.
-    ``@``-prefixed lines are LLM-only terms (issue #76): they stay out of
-    the whisper prompt at any budget (see ``glossary_prompt``) and out of
-    the ASR prompt here. Prompt order is load-bearing (whisper echoes
-    whatever leads it when audio is unclear), so a term kept out of the
-    list on purpose must not re-enter through a pair's right side.
+    ``@``-prefixed lines are LLM-only terms (issue #76/#82): they are
+    excluded from this list AND stay out of the whisper prompt at any
+    budget (belt-and-suspenders with ``glossary_prompt``'s own filter).
+    The LLM stages still get them, with the ``@`` stripped by
+    ``llm_tail.apply_llm_tail`` — the delivery seam is the layered
+    glossary/temp-file path (issue #79 glossary check), not this loader.
+    Prompt order is
+    load-bearing (whisper echoes whatever leads it when audio is unclear),
+    so a term kept out of the list on purpose must not re-enter through a
+    pair's right side.
     """
-    terms = [
+    return [
         line
         for line in _read_lines(path)
         if "=>" not in line and not line.startswith("@")
     ]
-    if terms:
-        logger.info("glossary: %d terms from %s", len(terms), path)
-    return terms
 
 
 def load_corrections(path: str | Path | None) -> dict[str, str]:

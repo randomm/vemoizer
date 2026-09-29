@@ -41,13 +41,31 @@ from vemoizer.caffeinate import caffeinate_context
 from vemoizer.diarization import SpeakerCount
 from vemoizer.llm import ConfigError
 from vemoizer.output.naming import (
-    collision_free_path,
+    collision_free_paths,
     dated_basename,
     nfc_stem_and_suffix,
 )
 
 #: The two output formats the meeting and memo presets write.
 PRESET_FORMATS = ("md", "json")
+
+
+def _resolve_llm_config(config_path: str | None):
+    """Resolve the LLM config for a batch run (issue #82 review).
+
+    Explicit ``--config`` short-circuits to ``load_config`` (fail-open).
+    Without one, the strict layered search runs; its ``ConfigError``
+    (malformed ``./.vemoizer/config.toml``) is caught by the caller and
+    becomes a clean ``error: ...`` line — never a raw traceback (the
+    fail-open ``load_default_config`` is NOT used here, because its
+    ``except Exception`` swallows ``ConfigError`` silently, which would
+    hide a broken project config).``None`` (no config found) is fine.
+    """
+    from vemoizer.llm import _default_search, load_config
+
+    if config_path is not None:
+        return load_config(config_path)
+    return _default_search()
 
 
 def _write_output(target: Path, result: dict, fmt: str) -> bool:
@@ -100,13 +118,64 @@ def _write_preset_output(
             title = t
 
     base = dated_basename(title, fallback_stem=first_stem)
+    # The .md/.json pair is probed as a unit so both files always share
+    # one stem (never ``X.md`` + ``X (2).json``) — issue #82 review.
+    paths = collision_free_paths(out_dir, base, [f".{fmt}" for fmt in PRESET_FORMATS])
     written: list[str] = []
-    for fmt in PRESET_FORMATS:
-        suffix = f".{fmt}"
-        path = collision_free_path(out_dir, base, suffix)
+    for path, fmt in zip(paths, PRESET_FORMATS, strict=True):
         if _write_output(path, result, fmt):
             written.append(path.name)
     return written
+
+
+def _check_result(
+    file: Path, result: dict, *, diarize: bool, diarize_label: str = "--diarize"
+) -> int:
+    """The M1 fail-loud checks over one file's result (issue #78).
+
+    Prints the warnings channel, then fails (1) on an ``error`` key, an
+    empty transcript, or ``--diarize`` without speaker labels; returns 0
+    when the result looks like a real transcript. The messages are pinned
+    by tests — both ``transcribe_batch`` and ``run_preset`` go through
+    here (one implementation); ``diarize_label`` preserves each entry
+    point's pre-M2 wording for the no-labels line.
+    """
+    for warning in result.pop("warnings", []):
+        typer.echo(warning, err=True)
+    if "error" in result:
+        typer.echo(f"error: {result['error']}", err=True)
+        return 1
+    if not result.get("text") and not result.get("segments"):
+        typer.echo(
+            f"error: no transcript produced for {file.name} (empty transcript)",
+            err=True,
+        )
+        return 1
+    if (
+        diarize
+        and result.get("segments")
+        and not any("speaker" in seg for seg in result["segments"])
+    ):
+        typer.echo(
+            f"error: {diarize_label} requested but "
+            f"no speaker labels returned for {file.name}",
+            err=True,
+        )
+        return 1
+    return 0
+
+
+def _write_temp_glossary(lines: list[str]) -> str:
+    """Write *lines* to a fresh temp glossary file; return its path.
+
+    Raises ``OSError`` on a write failure so the caller can fail with a
+    clean error line inside the protected region (no leaked file).
+    """
+    fd, name = tempfile.mkstemp(prefix="vemoizer-glossary-", suffix=".txt")
+    os.close(fd)
+    path = Path(name)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(path)
 
 
 def transcribe_batch(
@@ -132,6 +201,16 @@ def transcribe_batch(
     exit_code = 0
     with caffeinate_context():
         for file in files:
+            try:
+                # Fail loud on a malformed project config (issue #78):
+                # clean error line, never a traceback.
+                _resolve_llm_config(config_path)
+            except ConfigError as e:
+                # A malformed .vemoizer/config.toml must fail loud with a
+                # clean error line, not a traceback (issue #78); consistent
+                # with run_preset: stop the batch, no sibling files.
+                typer.echo(f"error: {e}", err=True)
+                return 1
             result = transcribe_file(
                 file,
                 diarize=diarize,
@@ -141,35 +220,7 @@ def transcribe_batch(
                 glossary_path=glossary_path,
                 speakers=speakers,
             )
-            for warning in result.pop("warnings", []):
-                typer.echo(warning, err=True)
-            if "error" in result:
-                typer.echo(f"error: {result['error']}", err=True)
-                exit_code = 1
-                continue
-            # Fail loud (issue #78): an empty transcript must not look
-            # like success.
-            if (
-                not result.get("text")
-                and not result.get("segments")
-                and "error" not in result
-            ):
-                typer.echo(
-                    f"error: no transcript produced for {file.name} (empty transcript)",
-                    err=True,
-                )
-                exit_code = 1
-                continue
-            elif (
-                diarize
-                and result.get("segments")
-                and not any("speaker" in seg for seg in result["segments"])
-            ):
-                typer.echo(
-                    f"error: --diarize requested but no speaker labels "
-                    f"returned for {file.name}",
-                    err=True,
-                )
+            if _check_result(file, result, diarize=diarize, diarize_label="--diarize"):
                 exit_code = 1
                 continue
             stem, _suffix = nfc_stem_and_suffix(file)
@@ -285,96 +336,67 @@ def run_preset(
     # whisper prompt stays empty); meeting: merged terms (bare + @ lines)
     # plus the merged correction pairs.
     temp_path: Path | None = None
-    if options.glossary_path is None:
-        if command == "memo":
-            lines = [f"{w} => {r}" for w, r in options.corrections.items()]
-        else:
-            lines = [
-                *options.whisper_prompt,
-                *[f"@{t}" for t in options.llm_terms],
-                *[f"{w} => {r}" for w, r in options.corrections.items()],
-            ]
-        if lines:
-            fd, name = tempfile.mkstemp(prefix="vemoizer-glossary-", suffix=".txt")
-            os.close(fd)
-            temp_path = Path(name)
-            temp_path.write_text(
-                "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8"
-            )
-            effective_glossary = str(temp_path)
-        else:
-            effective_glossary = None
-    else:
-        effective_glossary = options.glossary_path
-        # Memo seam with an explicit --glossary (issue #82): the file
-        # replaces both layers, but the whisper initial_prompt must stay
-        # empty — so filter it to correction pairs only (same invariant
-        # as the layered memo path) via a temp file.
-        if command == "memo":
-            from vemoizer.glossary import load_corrections
-
-            lines = [
-                f"{w} => {r}" for w, r in load_corrections(effective_glossary).items()
-            ]
-            if lines:
-                fd, name = tempfile.mkstemp(prefix="vemoizer-glossary-", suffix=".txt")
-                os.close(fd)
-                temp_path = Path(name)
-                temp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-                effective_glossary = str(temp_path)
-            else:
-                effective_glossary = None
-
+    effective_glossary: str | None = None
     exit_code = 0
     written: list[str] = []
 
+    # The temp file is created INSIDE the protected region so a write
+    # failure neither leaks the file nor raises a raw traceback
+    # (issue #82 review): a clean error line and exit 1 instead.
     try:
+        if options.glossary_path is None:
+            if command == "memo":
+                lines = [f"{w} => {r}" for w, r in options.corrections.items()]
+            else:
+                lines = [
+                    *options.whisper_prompt,
+                    *[f"@{t}" for t in options.llm_terms],
+                    *[f"{w} => {r}" for w, r in options.corrections.items()],
+                ]
+            if lines:
+                temp_path = Path(_write_temp_glossary(lines))
+                effective_glossary = str(temp_path)
+        else:
+            effective_glossary = options.glossary_path
+            # Memo seam with an explicit --glossary (issue #82): the file
+            # replaces both layers, but the whisper initial_prompt must
+            # stay empty — so filter it to correction pairs only (same
+            # invariant as the layered memo path) via a temp file.
+            if command == "memo":
+                from vemoizer.glossary import load_corrections
+
+                lines = [
+                    f"{w} => {r}"
+                    for w, r in load_corrections(effective_glossary).items()
+                ]
+                if lines:
+                    temp_path = Path(_write_temp_glossary(lines))
+                    effective_glossary = str(temp_path)
+                else:
+                    effective_glossary = None
+
         with caffeinate_context():
             for file in files:
                 try:
-                    result = transcribe_file(
-                        file,
-                        diarize=options.diarize,
-                        config_path=options.config_path,
-                        profile=options.profile,
-                        repair=options.repair,
-                        glossary_path=effective_glossary,
-                        speakers=options.speakers,
-                    )
+                    # Fail loud on a malformed project config (issue #78).
+                    _resolve_llm_config(options.config_path)
                 except ConfigError as e:
                     # A malformed .vemoizer/config.toml must fail loud
                     # with a clean error line, not a traceback (issue #78).
                     typer.echo(f"error: {e}", err=True)
-                    exit_code = 1
-                    continue
-                for warning in result.pop("warnings", []):
-                    typer.echo(warning, err=True)
-                if "error" in result:
-                    typer.echo(f"error: {result['error']}", err=True)
-                    exit_code = 1
-                    continue
-                if (
-                    not result.get("text")
-                    and not result.get("segments")
-                    and "error" not in result
+                    return 1
+                result = transcribe_file(
+                    file,
+                    diarize=options.diarize,
+                    config_path=options.config_path,
+                    profile=options.profile,
+                    repair=options.repair,
+                    glossary_path=effective_glossary,
+                    speakers=options.speakers,
+                )
+                if _check_result(
+                    file, result, diarize=options.diarize, diarize_label="diarize"
                 ):
-                    typer.echo(
-                        "error: no transcript produced for "
-                        f"{file.name} (empty transcript)",
-                        err=True,
-                    )
-                    exit_code = 1
-                    continue
-                elif (
-                    options.diarize
-                    and result.get("segments")
-                    and not any("speaker" in seg for seg in result["segments"])
-                ):
-                    typer.echo(
-                        f"error: diarize requested but no speaker labels "
-                        f"returned for {file.name}",
-                        err=True,
-                    )
                     exit_code = 1
                     continue
 
@@ -382,6 +404,11 @@ def run_preset(
                 # argument list (deterministic), not the current iteration.
                 first_stem, _ = nfc_stem_and_suffix(files[0])
                 written.extend(_write_preset_output(result, first_stem, Path.cwd()))
+    except OSError as e:
+        # Temp-glossary write failure: clean error, non-zero exit, no
+        # leaked file (the finally still cleans up what exists).
+        typer.echo(f"error: could not write glossary: {e}", err=True)
+        return 1
     finally:
         # The temp glossary file is deleted after the run (issue #82).
         if temp_path is not None:
