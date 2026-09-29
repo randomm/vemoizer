@@ -127,7 +127,7 @@ BACKENDS: dict[str, Callable[[Path], str]] = {
 def register_eval(app) -> None:
     """Attach the ``eval`` command to *app* (the main Typer instance)."""
 
-    @app.command("eval")
+    @app.command("eval", hidden=True)
     def eval(  # noqa: A001, A002 - mirrors vemoizer CLI subcommand name
         corpus: Path = typer.Option(  # noqa: B008
             Path("tests/fixtures/corpus"),
