@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
+import pytest
 
 from vemoizer.diarization import (
     ATTRIBUTION,
@@ -120,6 +121,32 @@ def test_load_pipeline_lazy_imports_pyannote(monkeypatch):
     )
     # Pipeline loads from the local snapshot path, never the bare repo ID.
     fake_pipeline_cls.from_pretrained.assert_called_once_with("/fake/hf-cache/snapshot")
+
+
+def test_load_pipeline_raises_on_none(monkeypatch):
+    """A snapshot that yields no loadable pipeline fails loudly with a clear
+    error (instead of ``None.to``) rather than a confusing downstream crash."""
+    import sys
+    import types
+
+    fake_pipeline_cls = mock.Mock()
+    fake_pipeline_cls.from_pretrained.return_value = None
+
+    module = types.ModuleType("pyannote.audio")
+    module.Pipeline = fake_pipeline_cls  # ty: ignore[unresolved-attribute]
+    parent = types.ModuleType("pyannote")
+    parent.audio = module  # ty: ignore[unresolved-attribute]
+    monkeypatch.setitem(sys.modules, "pyannote", parent)
+    monkeypatch.setitem(sys.modules, "pyannote.audio", module)
+    monkeypatch.setitem(sys.modules, "torch", mock.Mock())
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+
+    hf_mod = types.ModuleType("huggingface_hub")
+    hf_mod.snapshot_download = mock.Mock(return_value="/fake/hf-cache/snapshot")  # ty: ignore[unresolved-attribute]
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hf_mod)
+
+    with pytest.raises(RuntimeError, match="returned None"):
+        _load_pipeline("cpu")
 
 
 def test_attribution_string_is_cc_by():

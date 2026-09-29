@@ -69,6 +69,13 @@ def _load_pipeline(device: str) -> object:
         token=os.environ.get(_HF_TOKEN_ENV),
     )
     pipeline = Pipeline.from_pretrained(local_path)
+    if pipeline is None:
+        raise RuntimeError(
+            f"pyannote Pipeline.from_pretrained returned None for "
+            f"{DIARIZATION_REPO_ID}@{DIARIZATION_REVISION}; "
+            "the snapshot at the pinned revision is missing, unreadable, "
+            "or not a loadable pyannote pipeline."
+        )
     pipeline.to(torch.device(device))
     return pipeline
 
