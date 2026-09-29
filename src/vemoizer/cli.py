@@ -14,6 +14,10 @@ Model management (issue #3):
 - ``models pull`` — pre-download the three revision-pinned consensus models
   and report per-model + total cache sizes
 
+Preset commands (issue #82):
+- ``meeting FILES`` — profile=meeting, diarize, repair, .md+.json to CWD
+- ``memo FILES`` — whisper meeting decode without diarization, .md+.json
+
 Progress bars render to stderr via rich; transcripts render to stdout
 (rich auto-detects TTY and disables progress on non-TTY stderr).
 """
@@ -27,8 +31,6 @@ from pathlib import Path
 import typer
 
 from vemoizer.battery import on_battery
-from vemoizer.caffeinate import caffeinate_context
-from vemoizer.copy import copy_to_clipboard
 from vemoizer.diarization import SpeakerCount
 from vemoizer.eval_cli import register_eval
 from vemoizer.low_memory import apply_low_memory_mode, default_low_memory
@@ -191,9 +193,8 @@ def transcribe(
     if verbose:
         logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 
+    from vemoizer.batch import transcribe_batch
     from vemoizer.output.formatters import FORMAT_EXTENSIONS, OUTPUT_FORMATS
-    from vemoizer.output.naming import nfc_stem_and_suffix
-    from vemoizer.pipeline import transcribe_file
 
     # Resolve and validate formats BEFORE any transcription: an invalid
     # --format must fail in milliseconds, not after minutes of decoding
@@ -218,106 +219,166 @@ def transcribe(
             err=True,
         )
 
-    exit_code = 0
-    with caffeinate_context():
-        for file in files:
-            result = transcribe_file(
-                file,
-                diarize=diarize,
-                config_path=str(config) if config is not None else None,
-                profile=profile,
-                repair=repair,
-                glossary_path=str(glossary) if glossary is not None else None,
-                speakers=speaker_count,
-            )
-            for warning in result.pop("warnings", []):
-                typer.echo(warning, err=True)
-            if "error" in result:
-                typer.echo(f"error: {result['error']}", err=True)
-                exit_code = 1
-                continue
-            # Fail loud (issue #78): an empty transcript — no text and no
-            # segments, no "error" key — must not look like success. This
-            # intentionally catches legitimately-empty (silent) audio too;
-            # there is no pipeline marker distinguishing silence, so the
-            # simple rule is to treat any empty result as a failure. Checked
-            # before file writing so no output files are produced on failure.
-            if (
-                not result.get("text")
-                and not result.get("segments")
-                and "error" not in result
-            ):
-                typer.echo(
-                    f"error: no transcript produced for {file.name} (empty transcript)",
-                    err=True,
-                )
-                exit_code = 1
-                continue
-            # Fail loud (issue #78): the user asked for speaker labels but
-            # none came back. Distinct from the empty-transcript rule above:
-            # that fires only when there are NO segments, so these two never
-            # double-report on a single result. if/elif keeps them exclusive.
-            elif (
-                diarize
-                and result.get("segments")
-                and not any("speaker" in seg for seg in result["segments"])
-            ):
-                typer.echo(
-                    f"error: --diarize requested but no speaker labels "
-                    f"returned for {file.name}",
-                    err=True,
-                )
-                exit_code = 1
-                continue
-            stem, _suffix = nfc_stem_and_suffix(file)
-            if out is not None:
-                ok = _write_output(out, result, formats[0] if formats else "txt")
-            else:
-                ok = all(
-                    # all() over a list, not a generator: every format must be
-                    # attempted even after one fails.
-                    [
-                        _write_output(
-                            Path(f"{stem}{FORMAT_EXTENSIONS[fmt]}"), result, fmt
-                        )
-                        for fmt in formats
-                    ]
-                )
-            if not ok:
-                exit_code = 1
-                continue
-            if copy:
-                copy_to_clipboard(result["text"])
-            if not quiet:
-                typer.echo(f"wrote transcript for {file.name}")
+    exit_code = transcribe_batch(
+        files,
+        formats=formats,
+        config_path=str(config) if config is not None else None,
+        profile=profile,
+        repair=repair,
+        glossary_path=str(glossary) if glossary is not None else None,
+        speakers=speaker_count,
+        diarize=diarize,
+        out=out,
+        quiet=quiet,
+        copy=copy,
+    )
     if exit_code:
         raise typer.Exit(code=exit_code)
 
 
-def _write_output(target: Path, result: dict, fmt: str) -> bool:
-    """Render *result* in *fmt* and write it to *target* (``-`` = stdout).
+@app.command()
+def meeting(
+    # B008: typer.Argument/Option in defaults are Typer's documented pattern
+    files: list[Path] = typer.Argument(  # noqa: B008
+        ...,
+        help="One or more audio files (.m4a etc.) from a meeting.",
+    ),
+    quiet: bool = typer.Option(  # noqa: B008
+        False,
+        "--quiet",
+        "-q",
+        help="Suppress the summary output.",
+    ),
+    verbose: bool = typer.Option(  # noqa: B008
+        False,
+        "--verbose",
+        "-v",
+        help="Emit per-stage progress logging to stderr.",
+    ),
+    low_memory: bool | None = typer.Option(  # noqa: B008
+        None,
+        "--low-memory",
+        "--no-low-memory",
+        help=(
+            "Enable low-memory model-loading mode (auto-detected when "
+            "not set; on by default for <=16 GiB RAM)."
+        ),
+    ),
+    config: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        help="LLM config file (default: layered .vemoizer/config.toml search).",
+    ),
+    glossary: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--glossary",
+        help="Explicit glossary file (replaces both .vemoizer layers).",
+    ),
+    repair: bool = typer.Option(  # noqa: B008
+        True,
+        "--repair",
+        "--no-repair",
+        help="LLM repair pass over the final paragraphs (on by default).",
+    ),
+    speakers: str | None = typer.Option(  # noqa: B008
+        None,
+        "--speakers",
+        help="People in the recording: N or MIN-MAX (default 2-6).",
+    ),
+    no_diarize: bool = typer.Option(  # noqa: B008
+        False,
+        "--no-diarize",
+        help="Skip speaker diarization (on by default for meetings).",
+    ),
+) -> None:
+    """Transcribe a meeting: whisper decode, diarization, repair, .md+.json."""
+    lm = _resolve_low_memory(low_memory)
+    apply_low_memory_mode(lm)
+    _warn_on_battery()
 
-    Returns True on success; False after printing the error, so the caller
-    can fail the run instead of reporting a transcript that was never
-    written.
-    """
-    from vemoizer.output.formatters import format_transcript
+    if verbose:
+        logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 
-    try:
-        rendered = format_transcript(result, fmt)
-    except (ValueError, KeyError) as e:
-        typer.echo(f"error: {e}", err=True)
-        return False
-    if str(target) == "-":
-        typer.echo(rendered)
-        return True
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(rendered, encoding="utf-8")
-    except OSError as e:
-        typer.echo(f"error: could not write {target}: {e}", err=True)
-        return False
-    return True
+    from vemoizer.batch import run_preset
+
+    speaker_count = _parse_speakers(speakers)
+    exit_code = run_preset(
+        files,
+        command="meeting",
+        config_path=str(config) if config is not None else None,
+        glossary_path=str(glossary) if glossary is not None else None,
+        repair=repair,
+        diarize=False if no_diarize else None,
+        speakers=speaker_count,
+    )
+    if exit_code:
+        raise typer.Exit(code=exit_code)
+
+
+@app.command()
+def memo(
+    # B008: typer.Argument/Option in defaults are Typer's documented pattern
+    files: list[Path] = typer.Argument(  # noqa: B008
+        ...,
+        help="One or more audio files (.m4a etc.) to transcribe as a memo.",
+    ),
+    quiet: bool = typer.Option(  # noqa: B008
+        False,
+        "--quiet",
+        "-q",
+        help="Suppress the summary output.",
+    ),
+    verbose: bool = typer.Option(  # noqa: B008
+        False,
+        "--verbose",
+        "-v",
+        help="Emit per-stage progress logging to stderr.",
+    ),
+    low_memory: bool | None = typer.Option(  # noqa: B008
+        None,
+        "--low-memory",
+        "--no-low-memory",
+        help=(
+            "Enable low-memory model-loading mode (auto-detected when "
+            "not set; on by default for <=16 GiB RAM)."
+        ),
+    ),
+    config: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        help="LLM config file (default: layered .vemoizer/config.toml search).",
+    ),
+    glossary: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--glossary",
+        help="Explicit glossary file (correction pairs only for memo).",
+    ),
+    repair: bool = typer.Option(  # noqa: B008
+        True,
+        "--repair",
+        "--no-repair",
+        help="LLM repair pass over the final paragraphs (on by default).",
+    ),
+) -> None:
+    """Transcribe a memo: whisper decode, no diarization, repair, .md+.json."""
+    lm = _resolve_low_memory(low_memory)
+    apply_low_memory_mode(lm)
+    _warn_on_battery()
+
+    if verbose:
+        logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+
+    from vemoizer.batch import run_preset
+
+    exit_code = run_preset(
+        files,
+        command="memo",
+        config_path=str(config) if config is not None else None,
+        glossary_path=str(glossary) if glossary is not None else None,
+        repair=repair,
+    )
+    if exit_code:
+        raise typer.Exit(code=exit_code)
 
 
 def main() -> None:
