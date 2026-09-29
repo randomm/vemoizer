@@ -137,16 +137,25 @@ def test_prompt_at_only_terms_give_no_prompt() -> None:
 def test_corrections_parse_from_arrow_lines(tmp_path: Path) -> None:
     f = tmp_path / "glossary.txt"
     f.write_text(
-        "# terms\nFlagship-hanke\nBlacksit => Flagship\nNewport => Nyborg\n",
+        "# terms\n"
+        "Flagship-hanke\n"
+        "@Janni Peltola\n"
+        "Blacksit => Flagship\n"
+        "Newport => Nyborg\n",
         encoding="utf-8",
     )
     assert load_corrections(f) == {"Blacksit": "Flagship", "Newport": "Nyborg"}
     # arrow lines are corrections, never prompt terms — neither side:
     # prompt order is load-bearing (whisper echoes what leads it), so only
     # explicitly listed terms may seed recognition. A name deliberately
-    # kept out of the prompt ("Peltsi" leaked into a clip) must not come
-    # back through a pair's right side.
-    assert load_glossary(f) == ["Flagship-hanke"]
+    # kept out of the prompt must not come back through a pair's right
+    # side. @-lines ARE returned (LLM-only, stripped at the LLM boundary);
+    # glossary_prompt is where they stay out of the whisper prompt.
+    assert load_glossary(f) == ["Flagship-hanke", "@Janni Peltola"]
+    prompt = glossary_prompt(load_glossary(f), FakeTokenizer())
+    assert prompt is not None
+    assert "Janni Peltola" not in prompt
+    assert "Flagship-hanke" in prompt
 
 
 def test_corrections_apply_on_word_boundaries() -> None:

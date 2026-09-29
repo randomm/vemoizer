@@ -93,24 +93,22 @@ def _token_cost(tokenizer: Tokenizer, text: str) -> int:
 def load_glossary(path: str | Path | None) -> list[str]:
     """Prompt terms from the glossary file; ``[]`` when absent (fail-open).
 
-    Only explicitly listed terms seed the prompt; ``wrong => right``
-    correction lines are post-recognition fixes and contribute nothing.
-    ``@``-prefixed lines are LLM-only terms (issue #76/#82): they are
-    excluded from this list AND stay out of the whisper prompt at any
-    budget (belt-and-suspenders with ``glossary_prompt``'s own filter).
-    The LLM stages still get them, with the ``@`` stripped by
-    ``llm_tail.apply_llm_tail`` — the delivery seam is the layered
-    glossary/temp-file path (issue #79 glossary check), not this loader.
-    Prompt order is
-    load-bearing (whisper echoes whatever leads it when audio is unclear),
-    so a term kept out of the list on purpose must not re-enter through a
-    pair's right side.
+    Returns every non-``=>`` line, INCLUDING ``@``-prefixed LLM-only terms
+    (issue #76/#82), with the ``@`` prefix intact. The ``@`` filter lives
+    in ONE place, ``glossary_prompt``: that is where the whisper
+    ``initial_prompt`` is built, so @-terms never seed recognition at any
+    budget, while the LLM stages (repair / notes, via
+    ``llm_tail.apply_llm_tail``) receive the same list with the ``@``
+    stripped at the LLM boundary. Both the direct ``--glossary`` path and
+    the preset temp-file path flow through this loader, so one seam feeds
+    the recognizer and the LLM stages.
+
+    Only explicitly listed terms may seed the prompt; ``wrong => right``
+    correction lines are post-recognition fixes and contribute nothing
+    (prompt order is load-bearing, so a term kept out on purpose must not
+    re-enter through a pair's right side).
     """
-    return [
-        line
-        for line in _read_lines(path)
-        if "=>" not in line and not line.startswith("@")
-    ]
+    return [line for line in _read_lines(path) if "=>" not in line]
 
 
 def load_corrections(path: str | Path | None) -> dict[str, str]:

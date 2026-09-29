@@ -98,12 +98,13 @@ def apply_llm_tail(
     to the notes (never to the verbatim segments). Both stages are skipped
     without an LLM config (fail-open).
 
-    ``glossary`` is the prompt-term list handed to the LLM stages; any
-    ``@``-prefixed entries are LLM-only terms (issue #82, delivered
-    through the layered glossary / temp-file seam) — the ``@`` is
-    stripped before reaching the model (a leading ``@`` would read as a
-    mention marker). ``@``-terms never enter the whisper prompt, so they
-    are delivered here, at no budget.
+    ``glossary`` is the list ``load_glossary`` returns (bare prompt terms
+    plus ``@``-prefixed LLM-only terms, one list for both consumers). The
+    ``@`` is stripped at this boundary — the LLM stages — before it reaches
+    the model (a leading ``@`` would read as a mention marker). ``@``-terms
+    never enter the whisper prompt: ``glossary_prompt`` is the single
+    enforcement point for that, so they reach repair and notes here, at no
+    budget.
 
     The ``*_fn`` / ``llm_client_cls`` parameters let the caller (pipeline)
     pass its own namespace references so that test monkeypatching of the
