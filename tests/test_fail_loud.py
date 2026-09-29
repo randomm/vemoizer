@@ -395,3 +395,111 @@ def test_cli_latched_total_failure_exits_nonzero_and_writes_nothing(
     # The check must run BEFORE _write_output: no file of any format exists.
     for ext in (".txt", ".json", ".srt", ".vtt", ".md"):
         assert not (tmp_path / f"memo{ext}").exists(), f"memo{ext} was written"
+
+
+def test_cli_empty_transcript_exits_nonzero_and_writes_nothing(
+    tmp_path, monkeypatch
+) -> None:
+    """The empty-transcript rule: no text AND no segments AND no "error" key
+    exits non-zero and writes NOTHING — the check runs before the
+    file-writing loop (a silently-succeeded run must not ship empty files).
+    Legitimately silent audio hits this rule by design (committed simple
+    rule per the ticket: no pipeline marker distinguishes silence)."""
+    from typer.testing import CliRunner
+
+    import vemoizer.pipeline as pipeline_module
+    from vemoizer.cli import app as cli_app
+
+    def fake_transcribe_file(path, **kwargs):
+        # No "error" key: the empty-transcript rule, not the error branch.
+        return {"text": "", "segments": []}
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli_app, ["transcribe", "silent.m4a"])
+    assert result.exit_code == 1
+    assert "empty transcript" in result.stderr
+    # The rule runs BEFORE _write_output: no output file of any format.
+    for ext in (".txt", ".json", ".srt", ".vtt", ".md"):
+        assert not (tmp_path / f"silent{ext}").exists(), f"silent{ext} was written"
+
+
+def test_cli_diarize_no_labels_exits_nonzero(tmp_path, monkeypatch) -> None:
+    """The diarize-no-labels rule: --diarize with segments that carry no
+    "speaker" key exits non-zero (even though the transcript is non-empty,
+    so the empty-transcript rule does NOT fire — no double-report)."""
+    from typer.testing import CliRunner
+
+    import vemoizer.pipeline as pipeline_module
+    from vemoizer.cli import app as cli_app
+
+    def fake_transcribe_file(path, **kwargs):
+        assert kwargs.get("diarize") is True
+        return {
+            "text": "moikka",
+            "segments": [{"start": 0.0, "end": 1.0, "text": "moikka"}],
+        }
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli_app, ["transcribe", "a.m4a", "--diarize"])
+    assert result.exit_code == 1
+    assert "no speaker labels" in result.stderr
+    # Exactly one error line: the diarize rule, not the empty-transcript rule.
+    assert "empty transcript" not in result.stderr
+    assert result.stderr.count("error:") == 1
+
+
+def test_cli_diarize_with_labels_exits_zero(tmp_path, monkeypatch) -> None:
+    """Control: --diarize with at least one labeled segment exits 0 and
+    writes the transcript — the diarize-no-labels rule only fires when NO
+    segment carries a "speaker" key."""
+    from typer.testing import CliRunner
+
+    import vemoizer.pipeline as pipeline_module
+    from vemoizer.cli import app as cli_app
+
+    def fake_transcribe_file(path, **kwargs):
+        return {
+            "text": "moikka",
+            "segments": [
+                {"start": 0.0, "end": 1.0, "text": "moikka", "speaker": "SPEAKER_00"}
+            ],
+        }
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_app, ["transcribe", "a.m4a", "--diarize", "--format", "txt"]
+    )
+    assert result.exit_code == 0
+    assert (tmp_path / "a.txt").is_file()
+
+
+def test_cli_batch_continues_after_empty_transcript(tmp_path, monkeypatch) -> None:
+    """Batch continuation: the first file yields an empty transcript
+    (exit_code 1 + continue, no files for it) and the second succeeds and
+    IS written; the final exit code is 1."""
+    from typer.testing import CliRunner
+
+    import vemoizer.pipeline as pipeline_module
+    from vemoizer.cli import app as cli_app
+
+    def fake_transcribe_file(path, **kwargs):
+        if str(path).endswith("silent.m4a"):
+            return {"text": "", "segments": []}
+        return {"text": "moikka", "segments": []}
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_app, ["transcribe", "silent.m4a", "good.m4a", "--format", "txt"]
+    )
+    assert result.exit_code == 1
+    assert not (tmp_path / "silent.txt").exists()
+    assert (tmp_path / "good.txt").is_file()
+    assert "wrote transcript for good.m4a" in result.stdout
