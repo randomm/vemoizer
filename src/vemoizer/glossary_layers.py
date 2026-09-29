@@ -20,6 +20,7 @@ Merge rules
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from vemoizer.glossary import (
@@ -45,7 +46,7 @@ def _nearest_project_glossary(start: Path | None = None) -> Path | None:
     if no project glossary exists.  Symlink loops are prevented by tracking
     the real-path of each directory visited.
     """
-    current = start or Path.cwd()
+    current = start or Path(os.path.realpath(os.getcwd()))
     seen: set[str] = set()
     while True:
         real = str(current.resolve())
@@ -128,7 +129,10 @@ def _budget_terms(
     tokens.
 
     ``tokenizer=None`` means budget cannot be computed (fail-open): all
-    non-``@`` terms are kept and no drop notice is generated.
+    non-``@`` terms are kept and no drop notice is generated.  The presets
+    call ``merge`` without a tokenizer, so this function's budgeting is
+    skipped and the token budget is applied downstream by
+    ``glossary.glossary_prompt`` (M0) when the whisper prompt is built.
     """
     asr_terms = [t for t in terms if not t.startswith("@")]
     llm_only_terms = [t for t in terms if t.startswith("@")]
@@ -185,9 +189,11 @@ def merge(
     tokenizer:
         The mlx-whisper tokenizer; ``None`` disables budgeting (fail-open).
         When ``None`` the ``budget`` parameter has no effect: all terms are
-        kept unchanged and no drop notices are produced. The presets call
-        ``merge`` without a tokenizer (budgeting happens downstream in
-        ``glossary_prompt``, which owns the whisper tokenizer).
+        kept unchanged and no drop notices are produced. The presets
+        (``run_preset``) call ``merge`` without a tokenizer, so this
+        function's own budgeting never runs for them — the token budget is
+        applied downstream by ``glossary.glossary_prompt`` (M0) when the
+        whisper prompt is built.
     budget:
         Token budget for the merged whisper prompt (default: M0 budget);
         only enforced when *tokenizer* is not ``None``.
@@ -197,8 +203,10 @@ def merge(
     (merged_terms, merged_corrections, notices)
 
     * ``merged_terms`` — case-insensitive dedupe keeping the project
-      spelling; project terms first; token budget applied after merge;
-      ``@``-prefixed LLM-only terms are preserved.
+      spelling; project terms first; token budget applied after merge
+      (only when a tokenizer is passed; otherwise budgeting is deferred
+      to ``glossary_prompt``); ``@``-prefixed LLM-only terms are
+      preserved.
     * ``merged_corrections`` — union of both layers; for the same
       wrong-side key the project's right side wins.
     * ``notices`` — one string per dropped term (budget overflows), naming
