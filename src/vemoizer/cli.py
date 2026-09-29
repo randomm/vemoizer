@@ -239,9 +239,6 @@ def transcribe(
             f"({formats[0]}) is written to it",
             err=True,
         )
-    if yes and no_group:
-        typer.echo("error: --yes and --no-group are mutually exclusive", err=True)
-        raise typer.Exit(code=2)
 
     # Two or more files: M3 split-recording grouping (issue #77) — natural
     # sort, 20s boundary decodes, confirmation (--yes / --no-group /

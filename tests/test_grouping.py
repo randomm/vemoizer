@@ -338,14 +338,14 @@ def test_decode_boundaries_calls_transcribe_once_per_edge(
         f.touch()
 
     tails, heads = decode_boundaries(files, transcribe_fn=fake_transcribe)
-    # 2 files: 2 tails (one per file) + 1 head (first 20 s of file 2) = 3 decodes.
-    assert len(tails) == 2
+    # 2 files: 1 tail (file 1 — the last file's tail has no successor) +
+    # 1 head (first 20 s of file 2) = 2 decodes.
+    assert len(tails) == 1
     assert len(heads) == 1
     # Tail of the 60 s file: last 20 s. Head of the 45 s file: first 20 s.
     assert abs(transcribe_calls[0] - 20.0) < 0.01
     assert abs(transcribe_calls[1] - 20.0) < 0.01
-    assert abs(transcribe_calls[2] - 20.0) < 0.01
-    assert tails == ["hei", "hei"]
+    assert tails == ["hei"]
     assert heads == ["hei"]
 
 
@@ -369,10 +369,10 @@ def test_decode_boundaries_short_file_tail_clips(tmp_path, monkeypatch) -> None:
     files[0].touch()
 
     tails, heads = decode_boundaries(files, transcribe_fn=fake_transcribe)
-    # Single file: one tail decode, clipped to the file's full 5 s.
-    assert len(tails) == 1
+    # Single file: no boundary at all — no tail, no head.
+    assert len(tails) == 0
     assert len(heads) == 0
-    assert abs(transcribe_calls[0] - 5.0) < 0.01
+    assert transcribe_calls == []
 
 
 def test_decode_boundaries_decode_failure_degrades_to_empty(
@@ -390,28 +390,56 @@ def test_decode_boundaries_decode_failure_degrades_to_empty(
     def fake_transcribe(audio):
         raise RuntimeError("model exploded")
 
-    files = [tmp_path / "Uusi äänitys 425.m4a"]
-    files[0].touch()
+    files = [tmp_path / "Uusi äänitys 425.m4a", tmp_path / "Uusi äänitys 426.m4a"]
+    for f in files:
+        f.touch()
+    monkeypatch.setattr(grouping, "probe_duration_seconds", lambda p: 30.0)
 
     tails, heads = decode_boundaries(files, transcribe_fn=fake_transcribe)
+    # Both edges (file 1 tail, file 2 head) degrade to "" on the decode
+    # failure — never a raise.
     assert tails == [""]
-    assert heads == []
+    assert heads == [""]
 
 
 def test_decode_boundaries_empty_audio_is_empty_text(tmp_path, monkeypatch) -> None:
     import vemoizer.grouping as grouping
 
-    monkeypatch.setattr(grouping, "probe_duration_seconds", lambda p: 0.0)
+    monkeypatch.setattr(grouping, "probe_duration_seconds", lambda p: 60.0)
     monkeypatch.setattr(
         grouping,
         "_decode_edge_window",
         lambda path, start, end: np.zeros(0, dtype=np.float32),
     )
+    files = [tmp_path / "Uusi äänitys 425.m4a", tmp_path / "Uusi äänitys 426.m4a"]
+    for f in files:
+        f.touch()
+    tails, heads = decode_boundaries(files, transcribe_fn=lambda a: {"text": "no"})
+    # An empty edge decode (silence/truncation) degrades to "" (no evidence).
+    assert tails == [""]
+    assert heads == [""]
+
+
+def test_decode_boundaries_probe_failure_skips_tail(tmp_path, monkeypatch) -> None:
+    """A file ffprobe cannot read (duration 0.0): the tail is skipped
+    ("" = no evidence) rather than requesting an unbounded decode window."""
+    import vemoizer.grouping as grouping
+
+    monkeypatch.setattr(grouping, "probe_duration_seconds", lambda p: 0.0)
+    decoded_windows: list[tuple[float, float]] = []
+
+    def fake_edge_window(path, start, end):
+        decoded_windows.append((start, end))
+        return np.zeros(int((end - start) * 16000), dtype=np.float32)
+
+    monkeypatch.setattr(grouping, "_decode_edge_window", fake_edge_window)
     files = [tmp_path / "Uusi äänitys 425.m4a"]
     files[0].touch()
     tails, heads = decode_boundaries(files, transcribe_fn=lambda a: {"text": "no"})
-    assert tails == [""]
+    # Single file, no probe evidence: no tail decode at all, no head.
+    assert tails == []
     assert heads == []
+    assert decoded_windows == []
 
 
 # ---------------------------------------------------------------------------

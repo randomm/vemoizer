@@ -50,6 +50,7 @@ import typer
 
 from vemoizer.caffeinate import caffeinate_context
 from vemoizer.diarization import SpeakerCount
+from vemoizer.ingest import IngestError
 from vemoizer.llm import ConfigError
 from vemoizer.output.naming import (
     collision_free_paths,
@@ -141,16 +142,18 @@ def _write_preset_output(
 
 
 def _check_result(
-    file: Path, result: dict, *, diarize: bool, diarize_label: str = "--diarize"
+    file: Path | str, result: dict, *, diarize: bool, diarize_label: str = "--diarize"
 ) -> int:
     """The M1 fail-loud checks over one file's result (issue #78).
 
-    Prints the warnings channel, then fails (1) on an ``error`` key, an
-    empty transcript, or ``--diarize`` without speaker labels; returns 0
-    when the result looks like a real transcript. The messages are pinned
-    by tests — both ``transcribe_batch`` and ``run_preset`` go through
-    here (one implementation); ``diarize_label`` preserves each entry
-    point's pre-M2 wording for the no-labels line.
+    *file* may be a path or a string label (a multi-part group's "a.m4a+
+    b.m4a"); only display matters, so a bare label string is accepted
+    directly. Prints the warnings channel, then fails (1) on an ``error``
+    key, an empty transcript, or ``--diarize`` without speaker labels;
+    returns 0 when the result looks like a real transcript. The messages
+    are pinned by tests — both ``transcribe_batch`` and ``run_preset`` go
+    through here (one implementation); ``diarize_label`` preserves each
+    entry point's pre-M2 wording for the no-labels line.
     """
     for warning in result.pop("warnings", []):
         typer.echo(warning, err=True)
@@ -159,7 +162,7 @@ def _check_result(
         return 1
     if not result.get("text") and not result.get("segments"):
         typer.echo(
-            f"error: no transcript produced for {file.name} (empty transcript)",
+            f"error: no transcript produced for {file} (empty transcript)",
             err=True,
         )
         return 1
@@ -170,7 +173,7 @@ def _check_result(
     ):
         typer.echo(
             f"error: {diarize_label} requested but "
-            f"no speaker labels returned for {file.name}",
+            f"no speaker labels returned for {file}",
             err=True,
         )
         return 1
@@ -344,19 +347,10 @@ def run_batch(
         return 2
 
     # Single file: no grouping work at all — no boundary slice, no
-    # boundary model load, no prompt — the plain per-file loop.
-    if len(ordered) < 2:
-        return _run_plain(
-            ordered,
-            options,
-            formats=formats,
-            out=out,
-            quiet=quiet,
-        )
-
-    if no_group:
-        # --no-group: each file standalone — no boundary decode, no
-        # concat, no part markers.
+    # boundary model load, no prompt — the plain per-file loop. Same for
+    # --no-group: each file is transcribed standalone, no boundary decode,
+    # no concat, no part markers.
+    if len(ordered) < 2 or no_group:
         return _run_plain(
             ordered,
             options,
@@ -406,11 +400,27 @@ def run_batch(
                 try:
                     merged = concat_groups(group)
                 except GroupingError as e:
+                    # Fail this group, continue with the rest (the
+                    # _check_result pattern): the remaining groups are
+                    # transcribed, and the failure is visible.
                     typer.echo(f"error: {e}", err=True)
-                    return 1
+                    exit_code = 1
+                    continue
                 merged_is_temp = merged != group[0]
                 try:
+                    # A per-part ingest failure (missing/corrupt file) is
+                    # a group failure, not a crash: clean error line and
+                    # continue with the remaining groups.
                     offsets = part_offsets(group)
+                except IngestError as e:
+                    if merged_is_temp:
+                        from vemoizer.grouping import remove_concat_output
+
+                        remove_concat_output(merged)
+                    typer.echo(f"error: {e}", err=True)
+                    exit_code = 1
+                    continue
+                try:
                     result = _transcribe_one(merged, options)
                 finally:
                     if merged_is_temp:
@@ -430,7 +440,7 @@ def run_batch(
                     ]
                 label = "+".join(p.name for p in group)
 
-            if _check_result(Path(label), result, diarize=options.diarize):
+            if _check_result(label, result, diarize=options.diarize):
                 exit_code = 1
                 continue
             if not _write_group_outputs(
@@ -438,7 +448,6 @@ def run_batch(
                 result,
                 formats=list(formats),
                 out=out,
-                quiet=quiet,
             ):
                 exit_code = 1
                 continue
@@ -476,7 +485,6 @@ def _run_plain(
                 result,
                 formats=list(formats),
                 out=out,
-                quiet=quiet,
             ):
                 exit_code = 1
                 continue
@@ -491,7 +499,6 @@ def _write_group_outputs(
     *,
     formats: list[str],
     out: Path | None,
-    quiet: bool,
 ) -> bool:
     """Write one group's outputs; True on success (the --out override
     still applies, as in the plain loop)."""

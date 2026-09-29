@@ -46,6 +46,7 @@ import numpy as np
 from vemoizer.ingest import IngestError, duration_seconds, ingest_audio
 from vemoizer.output.naming import nfc_stem_and_suffix
 from vemoizer.textnorm import textnorm
+from vemoizer.transcriber import Transcriber
 
 logger = logging.getLogger(__name__)
 
@@ -283,7 +284,7 @@ def _decode_edge_window(path: Path, start: float, end: float) -> np.ndarray:
         "-i",
         str(path),
     ]
-    proc = subprocess.run(argv, capture_output=True, check=False)
+    proc = subprocess.run(argv, capture_output=True, check=False, timeout=60.0)
     if proc.returncode != 0:
         raise IngestError(f"ffmpeg edge decode failed for {path}: {proc.stderr!r}")
     raw = proc.stdout
@@ -297,31 +298,33 @@ def decode_boundaries(
     files: Sequence[Path | str],
     transcribe_fn: Callable[[np.ndarray], dict[str, Any]] | None = None,
 ) -> tuple[list[str], list[str]]:
-    """Decode each file's 20 s tail and its next file's 20 s head.
+    """Decode each boundary's 20 s tail and head.
 
-    Returns ``(tail_texts, head_texts)`` for the naturally-sorted input.
-    One shared *transcribe_fn* (defaults to a lazily created
-    ``WhisperTranscriber(language=None)`` — boundary text can be Finnish
-    or English, so no language pinning) is loaded once and cleaned up
-    after the last boundary. Any per-slice decode failure degrades that
+    Returns ``(tail_texts, head_texts)`` — one entry per boundary, i.e.
+    ``len(files) - 1`` of each (the last file's tail has no successor,
+    so it is never decoded). A shared *transcribe_fn* is loaded once and
+    cleaned up after the last boundary. The default is a lazily created
+    ``WhisperTranscriber(language=None)`` — the concrete class the meeting
+    profile decodes with: boundary text can be Finnish or English (no
+    language pinning), and the closing-cue heuristic only needs a coarse
+    read, not full accuracy. Any per-slice decode failure degrades that
     edge to ``""`` (no evidence) — never a raise.
 
     Only the 20 s edge windows are decoded (ffmpeg ``-ss`` / ``-t``); the
     file's full duration is probed with ffprobe for bounds only (the
     decoded PCM still defines every offset — ffprobe never measures
-    transcribed audio).
+    transcribed audio). When ffprobe yields no duration (``0.0``) for an
+    existing file, the tail edge is skipped (``""``) rather than
+    requesting an unbounded decode window.
     """
     ordered = natural_sort(files)
 
-    transcriber: Any | None = None
+    transcriber: Transcriber | None = None
     try:
         if transcribe_fn is None:
             from vemoizer.whisper_transcriber import WhisperTranscriber
 
             transcriber = WhisperTranscriber(language=None)
-            fn: Any = transcriber.transcribe
-        else:
-            fn = transcribe_fn
 
         def _edge_text(path: Path, start: float, end: float) -> str:
             """Decode ``[start, end)`` seconds of *path*; ``""`` on failure."""
@@ -329,22 +332,28 @@ def decode_boundaries(
                 audio = _decode_edge_window(path, start, end)
                 if len(audio) == 0:
                     return ""
-                return str(fn(audio).get("text", "")).strip()
-            except Exception as e:  # noqa: BLE001 - fail-open boundary edge
+                if transcribe_fn is not None:
+                    text = transcribe_fn(audio).get("text", "")
+                else:
+                    assert transcriber is not None  # resolved above
+                    text = transcriber.transcribe(audio).get("text", "")
+                return str(text).strip()
+            except (IngestError, RuntimeError, OSError) as e:
                 logger.warning("boundary decode failed for %s: %s", path, e)
                 return ""
 
         tail_texts: list[str] = []
         head_texts: list[str] = []
-        for i, path in enumerate(ordered):
-            dur = max(probe_duration_seconds(path), 0.0)
-            tail_texts.append(
-                _edge_text(path, max(0.0, dur - BOUNDARY_SECONDS), max(dur, 0.0))
-            )
-            if i + 1 < len(ordered):
-                # The head is the first 20 s of the NEXT file (the one the
-                # boundary leads into), not of the current file.
-                head_texts.append(_edge_text(ordered[i + 1], 0.0, BOUNDARY_SECONDS))
+        for i in range(len(ordered) - 1):
+            path = ordered[i]
+            dur = probe_duration_seconds(path)
+            # No probe evidence (``0.0``): skip the tail rather than
+            # requesting an unbounded decode window (ffprobe failure).
+            tail = _edge_text(path, dur - BOUNDARY_SECONDS, dur) if dur > 0.0 else ""
+            tail_texts.append(tail)
+            # The head is the first 20 s of the NEXT file (the one the
+            # boundary leads into), not of the current file.
+            head_texts.append(_edge_text(ordered[i + 1], 0.0, BOUNDARY_SECONDS))
         return tail_texts, head_texts
     finally:
         if transcriber is not None:
@@ -385,6 +394,7 @@ def _probe_stream(part: Path) -> str:
             ],
             capture_output=True,
             check=False,
+            timeout=30.0,
         )
     except FileNotFoundError:
         raise GroupingError(
@@ -422,6 +432,7 @@ def probe_duration_seconds(path: Path) -> float:
             ],
             capture_output=True,
             check=False,
+            timeout=30.0,
         )
     except FileNotFoundError:
         return 0.0
@@ -476,26 +487,34 @@ def concat_groups(group: Sequence[Path | str]) -> Path:
             "".join(_escape_concat_path(p) + "\n" for p in parts),
             encoding="utf-8",
         )
-        proc = subprocess.run(
-            [
-                "ffmpeg",
-                "-nostdin",
-                "-v",
-                "error",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(list_path),
-                "-c",
-                "copy",
-                "-y",
-                str(out_path),
-            ],
-            capture_output=True,
-            check=False,
-        )
+        try:
+            proc = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-nostdin",
+                    "-v",
+                    "error",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-i",
+                    str(list_path),
+                    "-c",
+                    "copy",
+                    "-y",
+                    str(out_path),
+                ],
+                capture_output=True,
+                check=False,
+                timeout=120.0,
+            )
+        except FileNotFoundError as e:
+            raise GroupingError(
+                "ffmpeg not found on PATH; install ffmpeg (e.g. `brew install ffmpeg`)"
+            ) from e
+        except subprocess.TimeoutExpired:
+            raise GroupingError("concat: ffmpeg timed out") from None
         if proc.returncode != 0:
             stderr = proc.stderr.decode("utf-8", errors="replace").strip()
             names = ", ".join(p.name for p in parts)
@@ -508,6 +527,13 @@ def concat_groups(group: Sequence[Path | str]) -> Path:
         # file and deletes it after transcription (the list file always
         # goes).
         list_path.unlink(missing_ok=True)
+        # On any failure path (missing list file, ffmpeg error, timeout)
+        # the merged file is never returned — remove it and the temp dir
+        # so no partial private audio leaks. On success the dir outlives
+        # the call: the caller owns the merged file.
+        if not out_path.exists():
+            with suppress(OSError):
+                tmp_dir.rmdir()
 
 
 def remove_concat_output(merged: Path) -> None:
@@ -531,6 +557,11 @@ def part_offsets(group: Sequence[Path | str]) -> list[PartOffset]:
     durations of parts 1..N-1. Durations come from ``ingest_audio``
     (decoded PCM byte count) — never ffprobe or container metadata (iOS
     Voice Memos edit lists make container duration lie).
+
+    Note: the full decode of every part here (plus the pipeline's decode
+    of the merged group) is the spec-mandated decoded-PCM offset contract
+    — the cost of never trusting container metadata for transcription
+    alignment.
     """
     parts = [Path(p) for p in group]
     offsets: list[PartOffset] = []
