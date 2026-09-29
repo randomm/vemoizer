@@ -71,7 +71,8 @@ class TestLoadLayers:
         assert proj_corr == {"Newport": "Nyborg"}
 
     def test_missing_home_file_is_empty(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         proj_g = tmp_path / "glossary.txt"
         proj_g.write_text("Nordea\n", encoding="utf-8")
@@ -83,7 +84,8 @@ class TestLoadLayers:
         assert pt == ["Nordea"] and pc == {}
 
     def test_missing_project_file_is_empty(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         home_g = tmp_path / "glossary.txt"
         home_g.write_text("Nordea\n", encoding="utf-8")
@@ -95,7 +97,8 @@ class TestLoadLayers:
         assert pt == [] and pc == {}
 
     def test_at_lines_preserved_in_terms(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """@-prefixed lines stay in the terms list (LLM-only, no stripping)."""
         g = tmp_path / "glossary.txt"
@@ -268,12 +271,11 @@ class TestGlossaryOverrideBypass:
     the single-file contents, which batch.py passes directly."""
 
     def test_single_file_replaces_both_layers(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         g = tmp_path / "override.txt"
-        g.write_text(
-            "Nordea\n@Jukka\nBlacksit => Flagship\n", encoding="utf-8"
-        )
+        g.write_text("Nordea\n@Jukka\nBlacksit => Flagship\n", encoding="utf-8")
         ht, hc, pt, pc = load_layers(
             home_path=tmp_path / "missing.txt",  # missing → empty
             project_path=g,

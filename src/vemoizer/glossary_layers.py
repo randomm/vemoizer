@@ -88,9 +88,7 @@ def _parse_glossary(
 def load_layers(
     home_path: Path | None = None,
     project_path: Path | None = None,
-) -> tuple[
-    list[str], dict[str, str], list[str], dict[str, str]
-]:
+) -> tuple[list[str], dict[str, str], list[str], dict[str, str]]:
     """Read both glossary layers and return ``(home_terms, home_corrections,
     project_terms, project_corrections)``.
 
@@ -221,8 +219,7 @@ def merge(
 
     # --- notices: one per dropped term, lowest-priority first ---
     notices: list[str] = [
-        f"glossary: dropped '{t}' (token budget {budget} exceeded)"
-        for t in dropped
+        f"glossary: dropped '{t}' (token budget {budget} exceeded)" for t in dropped
     ]
 
     return kept, merged_corrections, notices
