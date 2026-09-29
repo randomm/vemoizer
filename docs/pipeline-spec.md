@@ -222,10 +222,20 @@ raises, the warning is exactly
 ``"diarization failed; continuing without speaker labels"``. The transcript
 still ships (fail-open); no ``"error"`` key.
 
-The CLI empty-transcript rule (``not result.get("text") and not result.get("segments") and "error" not in result``)
-exits non-zero and writes no output files; it runs before the file-writing
-loop. Legitimately silent audio (empty decode, no error) is treated as a
-failure under this rule.
+The CLI exit rules run after the ``"error"`` branch and before the
+file-writing loop (issue #78):
+
+- **Empty-transcript:** when ``not result.get("text") and not
+  result.get("segments") and "error" not in result``, the CLI exits non-zero
+  and writes no output files. Legitimately silent audio (empty decode, no
+  error) is treated as a failure under this simple rule; there is no
+  pipeline marker that distinguishes silence from failure.
+- **Diarize no labels:** when ``diarize`` and ``result.get("segments")``
+  and no segment carries a ``"speaker"`` key, the CLI exits non-zero. The
+  two rules are mutually exclusive by construction (one requires empty
+  output, the other requires non-empty segments), so a run never
+  double-reports; a result with an ``"error"`` key exits via the error
+  branch and neither rule runs.
 
 ### 11. LLM notes (optional, fails open)
 
