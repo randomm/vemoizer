@@ -1,0 +1,1 @@
+Käytämme Kubernetesta ja PostgreSQL-tietokantaa, mutta Redis-cache pitää vielä konfiguroida.

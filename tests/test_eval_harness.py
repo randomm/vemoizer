@@ -11,7 +11,13 @@ from pathlib import Path
 
 import pytest
 
-from vemoizer.eval_harness import AGGREGATE_KEY, run_eval, wer
+from vemoizer.eval_harness import (
+    AGGREGATE_KEY,
+    compare_to_baseline,
+    corpus_fingerprint,
+    run_eval,
+    wer,
+)
 
 # --- wer -------------------------------------------------------------------
 
@@ -53,42 +59,126 @@ def test_wer_finnish_special_characters() -> None:
 
 
 # --- run_eval --------------------------------------------------------------
+#
+# run_eval takes the transcription callable as an argument: the harness owns
+# corpus walking and scoring, the caller owns model loading. The old stub
+# compared each reference against itself (always 0.0) and never invoked a
+# model -- these tests pin the seam that replaced it.
 
 
-def test_run_eval_walks_corpus_and_computes_zero_wer(
-    tmp_path: Path,
-) -> None:
-    (tmp_path / "one.wav").write_bytes(b"RIFF")
-    (tmp_path / "one.txt").write_text("moro aami", encoding="utf-8")
-    (tmp_path / "two.wav").write_bytes(b"RIFF")
-    (tmp_path / "two.txt").write_text("toista tallaista", encoding="utf-8")
+def _corpus(tmp_path: Path, samples: dict[str, str]) -> Path:
+    for stem, ref in samples.items():
+        (tmp_path / f"{stem}.wav").write_bytes(b"RIFF0000WAVE")
+        (tmp_path / f"{stem}.txt").write_text(ref, encoding="utf-8")
+    return tmp_path
 
-    results = run_eval(tmp_path)
 
-    assert results["one"] == 0.0
-    assert results["two"] == 0.0
-    assert results[AGGREGATE_KEY] == 0.0
+def test_run_eval_scores_the_injected_transcriber(tmp_path: Path) -> None:
+    corpus = _corpus(tmp_path, {"one": "moro aami", "two": "toista tallaista"})
+
+    def perfect(wav: Path) -> str:
+        return (wav.with_suffix(".txt")).read_text(encoding="utf-8")
+
+    results = run_eval(corpus, perfect)
+    assert results == {"one": 0.0, "two": 0.0, AGGREGATE_KEY: 0.0}
+
+
+def test_run_eval_reports_real_errors(tmp_path: Path) -> None:
+    corpus = _corpus(tmp_path, {"one": "a b c"})
+    results = run_eval(corpus, lambda wav: "a x c")
+    assert results["one"] == pytest.approx(1 / 3)
+    assert results[AGGREGATE_KEY] == pytest.approx(1 / 3)
+
+
+def test_run_eval_transcriber_failure_scores_one_not_crash(tmp_path: Path) -> None:
+    """A backend crash on one sample must not abort the whole eval run."""
+    corpus = _corpus(tmp_path, {"bad": "a b", "good": "c d"})
+
+    def flaky(wav: Path) -> str:
+        if wav.stem == "bad":
+            raise RuntimeError("model exploded")
+        return wav.with_suffix(".txt").read_text(encoding="utf-8")
+
+    results = run_eval(corpus, flaky)
+    assert results["bad"] == 1.0  # empty hypothesis against a real reference
+    assert results["good"] == 0.0
 
 
 def test_run_eval_ignores_unpaired_stems(tmp_path: Path) -> None:
-    # .wav without .txt is skipped; .txt without .wav is skipped
     (tmp_path / "orphan.txt").write_text("hello", encoding="utf-8")
     (tmp_path / "lone.wav").write_bytes(b"RIFF")
-    (tmp_path / "paired.wav").write_bytes(b"RIFF")
-    (tmp_path / "paired.txt").write_text("hello world", encoding="utf-8")
+    _corpus(tmp_path, {"paired": "hello world"})
 
-    results = run_eval(tmp_path)
+    results = run_eval(tmp_path, lambda wav: "hello world")
 
     assert "orphan" not in results
     assert "lone" not in results
-    assert "paired" in results
-    assert results[AGGREGATE_KEY] == 0.0
+    assert results["paired"] == 0.0
 
 
 def test_run_eval_missing_directory_raises(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
-        run_eval(tmp_path / "no-such-corpus")
+        run_eval(tmp_path / "no-such-corpus", lambda wav: "")
 
 
 def test_run_eval_empty_corpus_gives_zero_aggregate(tmp_path: Path) -> None:
-    assert run_eval(tmp_path) == {AGGREGATE_KEY: 0.0}
+    assert run_eval(tmp_path, lambda wav: "") == {AGGREGATE_KEY: 0.0}
+
+
+# --- corpus_fingerprint ----------------------------------------------------
+
+
+def test_fingerprint_is_stable_for_identical_corpora(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    a = _corpus(tmp_path / "a", {"one": "moro"})
+    b = _corpus(tmp_path / "b", {"one": "moro"})
+    assert corpus_fingerprint(a) == corpus_fingerprint(b)
+
+
+def test_fingerprint_changes_when_audio_changes(tmp_path: Path) -> None:
+    corpus = _corpus(tmp_path, {"one": "moro"})
+    before = corpus_fingerprint(corpus)
+    (corpus / "one.wav").write_bytes(b"RIFF1111WAVE")
+    assert corpus_fingerprint(corpus) != before
+
+
+def test_fingerprint_changes_when_reference_changes(tmp_path: Path) -> None:
+    corpus = _corpus(tmp_path, {"one": "moro"})
+    before = corpus_fingerprint(corpus)
+    (corpus / "one.txt").write_text("muutettu", encoding="utf-8")
+    assert corpus_fingerprint(corpus) != before
+
+
+# --- compare_to_baseline ---------------------------------------------------
+
+
+def test_compare_passes_within_tolerance() -> None:
+    measured = {"one": 0.11, AGGREGATE_KEY: 0.11}
+    baseline = {"one": 0.10, AGGREGATE_KEY: 0.10}
+    assert compare_to_baseline(measured, baseline, tolerance=0.02) == []
+
+
+def test_compare_flags_regressions_beyond_tolerance() -> None:
+    measured = {"one": 0.20, AGGREGATE_KEY: 0.20}
+    baseline = {"one": 0.10, AGGREGATE_KEY: 0.10}
+    regressions = compare_to_baseline(measured, baseline, tolerance=0.02)
+    names = [r.name for r in regressions]
+    assert "one" in names
+    assert AGGREGATE_KEY in names
+    reg = regressions[0]
+    assert reg.baseline == 0.10
+    assert reg.measured == 0.20
+
+
+def test_compare_improvements_never_flag() -> None:
+    measured = {"one": 0.05, AGGREGATE_KEY: 0.05}
+    baseline = {"one": 0.10, AGGREGATE_KEY: 0.10}
+    assert compare_to_baseline(measured, baseline, tolerance=0.0) == []
+
+
+def test_compare_new_sample_missing_from_baseline_flags() -> None:
+    """A sample the baseline has never seen means the corpus drifted."""
+    measured = {"new": 0.0, AGGREGATE_KEY: 0.0}
+    regressions = compare_to_baseline(measured, {AGGREGATE_KEY: 0.0}, tolerance=0.02)
+    assert [r.name for r in regressions] == ["new"]

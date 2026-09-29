@@ -1,0 +1,40 @@
+{
+ "backends": {
+  "canary": {
+   "aggregate": 0.5098630536130536,
+   "en_pure_short": 1.0,
+   "fi_code_switch_dense": 0.3076923076923077,
+   "fi_code_switch_short": 0.09090909090909091,
+   "fi_english_mixed": 0.5454545454545454,
+   "fi_numbers": 0.4,
+   "fi_product_names": 0.8181818181818182,
+   "fi_pure_short": 0.0,
+   "fi_technical_terms": 0.9166666666666666
+  },
+  "consensus": {
+   "aggregate": 0.4086392773892774,
+   "en_pure_short": 1.0,
+   "fi_code_switch_dense": 0.46153846153846156,
+   "fi_code_switch_short": 0.2727272727272727,
+   "fi_english_mixed": 0.36363636363636365,
+   "fi_numbers": 0.3,
+   "fi_product_names": 0.45454545454545453,
+   "fi_pure_short": 0.0,
+   "fi_technical_terms": 0.4166666666666667
+  },
+  "parakeet": {
+   "aggregate": 0.4086392773892774,
+   "en_pure_short": 1.0,
+   "fi_code_switch_dense": 0.46153846153846156,
+   "fi_code_switch_short": 0.2727272727272727,
+   "fi_english_mixed": 0.36363636363636365,
+   "fi_numbers": 0.3,
+   "fi_product_names": 0.45454545454545453,
+   "fi_pure_short": 0.0,
+   "fi_technical_terms": 0.4166666666666667
+  }
+ },
+ "corpus_fingerprint": "5548ad2bed8d1445aae3ad5dc2b44812642189ac655f81fd5aa90995a8020e2b",
+ "note": "WER over tests/fixtures/corpus; update only in a dedicated commit.",
+ "tolerance": 0.02
+}

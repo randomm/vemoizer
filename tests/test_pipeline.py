@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 import vemoizer.pipeline as pipeline
 import vemoizer.progress as progress
@@ -473,3 +474,58 @@ def test_alignment_skip_is_logged_not_silent(monkeypatch, caplog) -> None:
     assert "alignment skipped: decode A has 1 words, decode B has 0" in log
     assert "disputed spans: 0 (no alignment, re-decode skipped)" in log
     assert result["segments"] == []  # consensus path produced nothing
+
+
+# -- transcribe_decode_only (issue #51) ----------------------------------
+#
+# The eval harness needs each decode backend's raw output as its own
+# number, so the consensus gain is measurable instead of asserted.
+
+
+def test_decode_only_parakeet_returns_single_decode(tmp_path, monkeypatch) -> None:
+    _patch_ingest(monkeypatch)
+    _patch_vad(monkeypatch)
+    _patch_decoders(
+        monkeypatch,
+        {"text": "vain parakeet", "words": []},
+        {"text": "vain canary", "words": []},
+    )
+    result = pipeline.transcribe_decode_only("/nonexistent.m4a", backend="parakeet")
+    assert result["text"] == "vain parakeet"
+
+
+def test_decode_only_canary_returns_single_decode(tmp_path, monkeypatch) -> None:
+    _patch_ingest(monkeypatch)
+    _patch_vad(monkeypatch)
+    _patch_decoders(
+        monkeypatch,
+        {"text": "vain parakeet", "words": []},
+        {"text": "vain canary", "words": []},
+    )
+    result = pipeline.transcribe_decode_only("/nonexistent.m4a", backend="canary")
+    assert result["text"] == "vain canary"
+
+
+def test_decode_only_unknown_backend_raises() -> None:
+    with pytest.raises(ValueError, match="unknown backend"):
+        pipeline.transcribe_decode_only("/nonexistent.m4a", backend="whisperx")
+
+
+def test_decode_only_ingest_error_fails_open(monkeypatch) -> None:
+    from vemoizer.ingest import IngestError
+
+    def _boom(path):
+        raise IngestError("corrupt")
+
+    monkeypatch.setattr(pipeline, "ingest_audio", _boom)
+    result = pipeline.transcribe_decode_only("/nonexistent.m4a", backend="parakeet")
+    assert result["text"] == ""
+    assert "error" in result
+
+
+def test_decode_only_backend_failure_fails_open(monkeypatch) -> None:
+    _patch_ingest(monkeypatch)
+    _patch_vad(monkeypatch)
+    _patch_decoders(monkeypatch, None, None)  # constructors raise
+    result = pipeline.transcribe_decode_only("/nonexistent.m4a", backend="parakeet")
+    assert result["text"] == ""

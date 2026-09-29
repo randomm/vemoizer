@@ -111,13 +111,19 @@ uv run ty check src/ tests/
 uv run ruff format --check src/ tests/
 ```
 
-If you changed an ASR backend, the audio contract, or the alignment logic,
-additionally run the WER regression over the fixture corpus and paste the
-before/after table into the PR body:
+If you changed an ASR backend, the audio contract, alignment, spans,
+re-decode, or the LLM stage, additionally run the WER regression gate and
+paste its output into the PR body:
 
 ```bash
-uv run vemoizer eval --corpus tests/fixtures/corpus
+uv run vemoizer eval --backend all --check
 ```
+
+The gate scores parakeet / canary / consensus over the committed Piper
+speech corpus and compares against `tests/fixtures/wer_baseline.json`
+(exit 2 on regression or corpus drift). Improvements are recorded with
+`--update-baseline` in a dedicated commit, never mixed into a feature
+commit.
 
 Do NOT:
 - ❌ Use `--no-verify` to skip hooks
@@ -226,7 +232,8 @@ Before creating documentation, ask: "Will this be true in 200 PRs?"
 | Format check | `uv run ruff format --check src/ tests/` |
 | Regenerate lockfile | `uv lock` |
 | Transcribe a memo | `uv run vemoizer transcribe memo.m4a --out memo.md` |
-| WER regression | `uv run vemoizer eval --corpus tests/fixtures/corpus` |
+| WER regression gate | `uv run vemoizer eval --backend all --check` |
+| Update WER baseline | `uv run vemoizer eval --backend all --update-baseline` |
 | Pre-download models | `uv run vemoizer models pull` |
 
 Every `vemoizer` subcommand row above is the target CLI surface, not a
