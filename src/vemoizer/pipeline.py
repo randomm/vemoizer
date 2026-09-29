@@ -33,7 +33,7 @@ from .canary_transcriber import CanaryTranscriber
 from .confidence import flag_suspect_segments
 from .decode_stage import decode_all
 from .diarization import ATTRIBUTION as DIARIZATION_ATTRIBUTION
-from .diarization import diarize, speaker_for_span
+from .diarization import SpeakerCount, diarize, speaker_for_span
 from .glossary import (
     apply_corrections,
     apply_corrections_to_notes,
@@ -309,7 +309,7 @@ def transcribe_file(
     profile: str = "dictation",
     repair: bool = False,
     glossary_path: str | None = None,
-    speakers: int | None = None,
+    speakers: SpeakerCount | None = None,
 ) -> dict:
     """Run the full consensus pipeline over one audio file.
 
@@ -483,7 +483,7 @@ def transcribe_file(
 
 def _run_diarization_stage(
     audio: np.ndarray,
-    speakers: int | None = None,
+    speakers: SpeakerCount | None = None,
 ) -> list[tuple[float, float, str]] | None:
     """Run the diarization stage; ``None`` (fail-open) on any failure.
 

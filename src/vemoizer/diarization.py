@@ -35,6 +35,10 @@ ATTRIBUTION = (
 #: Sample rate of the internal audio contract (AGENTS.md invariant #6).
 _CONTRACT_SAMPLE_RATE = 16000
 
+#: An exact speaker count, or ``(min, max)`` bounds for meetings where
+#: people join and leave (no single count is right for the whole file).
+SpeakerCount = int | tuple[int, int]
+
 #: Environment variable holding the HuggingFace access token for the gated repo.
 _HF_TOKEN_ENV = "HF_TOKEN"
 
@@ -73,7 +77,7 @@ def diarize(
     audio: np.ndarray,
     *,
     device: str = "auto",
-    num_speakers: int | None = None,
+    num_speakers: SpeakerCount | None = None,
 ) -> DiarizationResult:
     """Run speaker diarization over 16 kHz mono float32 *audio*.
 
@@ -83,7 +87,9 @@ def diarize(
 
     ``num_speakers`` pins the cluster count when the caller knows how many
     people were in the room — unconstrained clustering split one of four
-    speakers into two on the reference meeting (issue #71 forensics).
+    speakers into two on the reference meeting (issue #71 forensics). A
+    ``(min, max)`` tuple bounds the clustering instead: a pinned count too
+    high splits one voice, too low merges two, when attendance changes.
     """
     import torch
 
@@ -96,7 +102,9 @@ def diarize(
     }
 
     kwargs: dict = {}
-    if num_speakers is not None:
+    if isinstance(num_speakers, tuple):
+        kwargs["min_speakers"], kwargs["max_speakers"] = num_speakers
+    elif num_speakers is not None:
         kwargs["num_speakers"] = num_speakers
     if device == "auto":
         try:

@@ -154,3 +154,33 @@ def test_pipeline_receives_waveform_tensor_not_ndarray(monkeypatch):
     waveform = received["waveform"]
     # (channel, time) with a leading singleton channel dim
     assert tuple(waveform.shape) == (1, len(_AUDIO))
+
+
+def _received_kwargs(monkeypatch, speakers) -> dict:
+    received: dict = {}
+
+    def fake_pipeline(waveforms, **kwargs):
+        received.update(kwargs)
+        wrapper = mock.Mock(spec=["speaker_diarization"])
+        wrapper.speaker_diarization = _fake_diarization()
+        return wrapper
+
+    pipeline = mock.Mock(side_effect=fake_pipeline)
+    monkeypatch.setattr("vemoizer.diarization._load_pipeline", lambda device: pipeline)
+    diarize(_AUDIO, device="cpu", num_speakers=speakers)
+    return received
+
+
+def test_exact_speaker_count_pins_num_speakers(monkeypatch):
+    assert _received_kwargs(monkeypatch, 4) == {"num_speakers": 4}
+
+
+def test_speaker_range_bounds_clustering(monkeypatch):
+    assert _received_kwargs(monkeypatch, (3, 5)) == {
+        "min_speakers": 3,
+        "max_speakers": 5,
+    }
+
+
+def test_no_speaker_count_leaves_clustering_free(monkeypatch):
+    assert _received_kwargs(monkeypatch, None) == {}

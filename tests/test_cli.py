@@ -245,3 +245,43 @@ def test_profile_flag_is_forwarded(tmp_path, monkeypatch) -> None:
     )
     assert result.exit_code == 0
     assert seen.get("profile") == "meeting"
+
+
+def _speakers_seen(tmp_path, monkeypatch, value: str):
+    import vemoizer.pipeline as pipeline_module
+
+    seen: dict = {}
+
+    def fake_transcribe_file(path, **kwargs):
+        seen.update(kwargs)
+        return {"text": "moikka", "segments": []}
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(
+        app, ["transcribe", "a.m4a", "--diarize", "--speakers", value, "--out", "-"]
+    )
+    return result, seen
+
+
+def test_speakers_exact_count(tmp_path, monkeypatch) -> None:
+    result, seen = _speakers_seen(tmp_path, monkeypatch, "4")
+    assert result.exit_code == 0
+    assert seen["speakers"] == 4
+
+
+def test_speakers_range_for_people_joining_and_leaving(tmp_path, monkeypatch) -> None:
+    """A meeting where people come and go has no single right count; a
+    pinned count too high splits one voice, too low merges two."""
+    result, seen = _speakers_seen(tmp_path, monkeypatch, "3-5")
+    assert result.exit_code == 0
+    assert seen["speakers"] == (3, 5)
+
+
+def test_speakers_invalid_value_is_rejected_before_transcription(
+    tmp_path, monkeypatch
+) -> None:
+    for bad in ("5-3", "0", "x", "2-"):
+        result, seen = _speakers_seen(tmp_path, monkeypatch, bad)
+        assert result.exit_code != 0, bad
+        assert "speakers" not in seen, bad

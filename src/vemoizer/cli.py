@@ -29,6 +29,7 @@ import typer
 from vemoizer.battery import on_battery
 from vemoizer.caffeinate import caffeinate_context
 from vemoizer.copy import copy_to_clipboard
+from vemoizer.diarization import SpeakerCount
 from vemoizer.eval_cli import register_eval
 from vemoizer.low_memory import apply_low_memory_mode, default_low_memory
 
@@ -78,6 +79,25 @@ def _resolve_low_memory(
     if low_memory is not None:
         return low_memory
     return default_low_memory()
+
+
+def _parse_speakers(value: str | None) -> SpeakerCount | None:
+    """``--speakers`` as an exact count ("4") or bounds ("3-5").
+
+    Validated before any transcription, like --format: a typo must fail in
+    milliseconds, not after minutes of decoding.
+    """
+    if value is None:
+        return None
+    lo, sep, hi = value.partition("-")
+    try:
+        bounds = (int(lo), int(hi)) if sep else (int(lo), int(lo))
+    except ValueError:
+        bounds = (0, 0)
+    if bounds[0] < 1 or bounds[1] < bounds[0]:
+        typer.echo(f"error: --speakers expects N or MIN-MAX (got {value!r})", err=True)
+        raise typer.Exit(code=2)
+    return bounds if sep else bounds[0]
 
 
 @app.command()
@@ -146,11 +166,12 @@ def transcribe(
         help="LLM repair pass over the final paragraphs (fixes phonetic "
         "ASR garble; guarded against invention; needs an LLM config).",
     ),
-    speakers: int | None = typer.Option(  # noqa: B008
+    speakers: str | None = typer.Option(  # noqa: B008
         None,
         "--speakers",
-        help="Number of people in the recording (pins diarization "
-        "clustering; only used with --diarize).",
+        help="People in the recording: N pins diarization clustering, "
+        "MIN-MAX bounds it when people join and leave (e.g. 3-5); only "
+        "used with --diarize.",
     ),
     diarize: bool = typer.Option(  # noqa: B008
         False,
@@ -189,6 +210,7 @@ def transcribe(
             err=True,
         )
         raise typer.Exit(code=2)
+    speaker_count = _parse_speakers(speakers)
     if out is not None and len(formats) > 1:
         typer.echo(
             "warning: --out takes a single file; only the first format "
@@ -206,7 +228,7 @@ def transcribe(
                 profile=profile,
                 repair=repair,
                 glossary_path=str(glossary) if glossary is not None else None,
-                speakers=speakers,
+                speakers=speaker_count,
             )
             for warning in result.pop("warnings", []):
                 typer.echo(warning, err=True)
