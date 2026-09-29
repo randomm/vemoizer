@@ -884,15 +884,90 @@ def test_meeting_no_glossary_layers_no_temp_file(
     assert seen["glossary_path"] is None
 
 
-def test_memo_with_explicit_glossary_passes_path_through(
+def test_memo_explicit_glossary_filters_to_corrections(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """--glossary replaces the layers: the exact path is passed through."""
+    """memo --glossary: the whisper prompt stays empty (issue #82).
+
+    The explicit file replaces both layers, but prompt terms (bare and
+    @-lines) must not seed the whisper initial_prompt — only that
+    file's correction pairs pass through, via a temp file that is
+    deleted after the run (the issue's test-surface note: for memo
+    with --glossary, glossary_prompt(...) must be None).
+    """
+    import vemoizer.pipeline as pipeline_module
+    from vemoizer.glossary import glossary_prompt, load_glossary
+
+    seen: dict = {}
+    g = tmp_path / "override.txt"
+    g.write_text("Nordea\n@Jukka\nBlacksit => Flagship\n", encoding="utf-8")
+
+    def fake_transcribe(path, **kwargs):
+        # The real transcribe_file reads the glossary file; the fake
+        # captures it too, while the temp file still exists (it is
+        # deleted only after the run, in the batch runner's finally).
+        gp = kwargs.get("glossary_path")
+        seen["terms"] = load_glossary(gp)
+        seen["prompt"] = glossary_prompt(seen["terms"])
+        seen["glossary_text"] = Path(gp).read_text(encoding="utf-8") if gp else None
+        seen.update(kwargs)
+        return {
+            "text": "moikka",
+            "segments": [],
+            "notes": {"title": "T"},
+        }
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["memo", "a.m4a", "--glossary", str(g)])
+    assert result.exit_code == 0
+    gp = seen["glossary_path"]
+    # A temp file (not the explicit path itself) carried the corrections.
+    assert gp is not None
+    assert gp != str(g)
+    # The temp file held only the correction pairs: load_glossary sees
+    # nothing (=> lines are excluded from prompt terms) and the whisper
+    # prompt is therefore None (the issue's test-surface note).
+    assert seen["terms"] == []
+    assert seen["prompt"] is None
+    # Corrections survive: the pair the file defined is in the temp file.
+    assert seen["glossary_text"] == "Blacksit => Flagship\n"
+
+
+def test_meeting_explicit_glossary_passes_path_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """meeting --glossary: the file replaces both layers and is passed as-is."""
     import vemoizer.pipeline as pipeline_module
 
     seen: dict = {}
     g = tmp_path / "override.txt"
-    g.write_text("Nordea\nBlacksit => Flagship\n", encoding="utf-8")
+    g.write_text("Nordea\n@Jukka\nBlacksit => Flagship\n", encoding="utf-8")
+
+    def fake_transcribe(path, **kwargs):
+        seen.update(kwargs)
+        return {
+            "text": "moikka",
+            "segments": [],
+            "notes": {"title": "T"},
+        }
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["meeting", "a.m4a", "--glossary", str(g)])
+    assert result.exit_code == 0
+    assert seen["glossary_path"] == str(g)
+
+
+def test_memo_explicit_glossary_without_pairs_yields_none_glossary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """memo --glossary with only prompt terms: glossary_path is None."""
+    import vemoizer.pipeline as pipeline_module
+
+    seen: dict = {}
+    g = tmp_path / "terms-only.txt"
+    g.write_text("Nordea\n@Jukka\n", encoding="utf-8")
 
     def fake_transcribe(path, **kwargs):
         seen.update(kwargs)
@@ -906,4 +981,75 @@ def test_memo_with_explicit_glossary_passes_path_through(
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["memo", "a.m4a", "--glossary", str(g)])
     assert result.exit_code == 0
-    assert seen["glossary_path"] == str(g)
+    assert seen["glossary_path"] is None
+
+
+def test_meeting_quiet_suppresses_wrote_lines(tmp_path, monkeypatch) -> None:
+    """--quiet suppresses the `wrote <path>` summary lines (issue #82)."""
+    import vemoizer.pipeline as pipeline_module
+
+    def fake_transcribe(path, **kwargs):
+        return {
+            "text": "moikka",
+            "segments": [],
+            "notes": {"title": "T"},
+        }
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["meeting", "a.m4a", "--quiet"])
+    assert result.exit_code == 0
+    assert "wrote" not in result.stdout
+
+
+def test_memo_quiet_suppresses_wrote_lines(tmp_path, monkeypatch) -> None:
+    """memo --quiet suppresses the `wrote <path>` summary lines."""
+    import vemoizer.pipeline as pipeline_module
+
+    def fake_transcribe(path, **kwargs):
+        return {
+            "text": "moikka",
+            "segments": [],
+            "notes": {"title": "T"},
+        }
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["memo", "a.m4a", "--quiet"])
+    assert result.exit_code == 0
+    assert "wrote" not in result.stdout
+
+
+def test_preset_malformed_layer_config_fails_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed .vemoizer/config.toml in the search path fails loud.
+
+    The layered search is strict (issue #82): a malformed file in the
+    search path raises ``ConfigError`` (naming the key). The preset
+    runner must convert it to a clean ``error:`` line and exit 1 — not
+    a raw traceback (issue #78 fail-loud).
+    """
+    import vemoizer.pipeline as pipeline_module
+
+    vemoizer_dir = tmp_path / ".vemoizer"
+    vemoizer_dir.mkdir()
+    (vemoizer_dir / "config.toml").write_text("[llm\n  broken", encoding="utf-8")
+    clean = tmp_path / "clean"
+    clean.mkdir()
+
+    def fake_transcribe(path, **kwargs):
+        # The real transcribe_file does the config search inside; the
+        # fake mirrors that by running the same strict search here so
+        # the ConfigError propagates out of the transcribe_file seam.
+        from vemoizer.llm import load_default_config
+
+        load_default_config(None)
+        return {"text": "moikka", "segments": [], "notes": {"title": "T"}}
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
+    monkeypatch.chdir(clean)
+    result = runner.invoke(app, ["meeting", "a.m4a"])
+    assert result.exit_code == 1
+    assert "error:" in result.stderr
+    assert "Traceback" not in result.stderr

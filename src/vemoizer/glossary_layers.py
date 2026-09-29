@@ -184,8 +184,13 @@ def merge(
         Parsed from the home (``~/.vemozer``) layer.
     tokenizer:
         The mlx-whisper tokenizer; ``None`` disables budgeting (fail-open).
+        When ``None`` the ``budget`` parameter has no effect: all terms are
+        kept unchanged and no drop notices are produced. The presets call
+        ``merge`` without a tokenizer (budgeting happens downstream in
+        ``glossary_prompt``, which owns the whisper tokenizer).
     budget:
-        Token budget for the merged whisper prompt (default: M0 budget).
+        Token budget for the merged whisper prompt (default: M0 budget);
+        only enforced when *tokenizer* is not ``None``.
 
     Returns
     -------

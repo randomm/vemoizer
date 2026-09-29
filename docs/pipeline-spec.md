@@ -331,12 +331,14 @@ CWD with dated title and NFC collision suffix).
 The memo seam (issue #82, DESIGN DECISION): the whisper
 `initial_prompt` stays empty for a memo (a 30-minute memo should not
 seed recognition with hundreds of prompt terms). The batch runner
-therefore writes a temporary glossary file containing ONLY the project
-layer's correction pairs and passes it through the existing
+therefore writes a temporary glossary file containing ONLY the merged
+correction pairs (home + project layers, project right-side winning on
+the same wrong-side key) and passes it through the existing
 glossary_path argument — so `glossary_prompt` yields `None` (empty
 prompt) while `apply_corrections` still fires on the deterministic
-pairs. `--glossary` replaces the layers entirely; in that case only
-that file's correction pairs are used for memo (prompt terms ignored).
+pairs. `--glossary` replaces the layers entirely; in that case the file
+is filtered to its own correction pairs via a second temp file, keeping
+the same empty-prompt invariant (prompt terms ignored).
 
 | Flag | Default | Meaning |
 |---|---|---|

@@ -23,9 +23,10 @@ correction pairs; for memo it carries the merged correction pairs only,
 so the whisper ``initial_prompt`` stays empty while
 ``apply_corrections`` still fires on the deterministic pairs (issue #82,
 DESIGN DECISION "memo seam").  An explicit ``--glossary`` replaces the
-layers entirely (no temp file); for memo that file's correction pairs
-are used and its prompt terms ignored.  The temp file is deleted after
-the run.
+layers entirely for meeting (the file is passed straight through); for
+memo it is filtered to that file's correction pairs via a second temp
+file (the whisper prompt stays empty, mirroring the layered memo seam).
+Temp files are deleted after the run.
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ import typer
 
 from vemoizer.caffeinate import caffeinate_context
 from vemoizer.diarization import SpeakerCount
+from vemoizer.llm import ConfigError
 from vemoizer.output.naming import (
     collision_free_path,
     dated_basename,
@@ -205,6 +207,7 @@ def run_preset(
     repair: bool | None = None,
     diarize: bool | None = None,
     speakers: SpeakerCount | None = None,
+    quiet: bool = False,
 ) -> int:
     """Run the *meeting* or *memo* preset over *files*.
 
@@ -216,8 +219,12 @@ def run_preset(
     glossary is written to a temp file passed as ``glossary_path`` —
     meeting: merged terms (bare + ``@`` lines) and merged correction
     pairs; memo: merged correction pairs ONLY (whisper prompt stays
-    empty, ``apply_corrections`` still fires) — and the temp file is
-    deleted after the run.
+    empty, ``apply_corrections`` still fires).  An explicit
+    ``--glossary`` is passed through as-is for meeting; for memo it is
+    filtered to that file's correction pairs via a temp file (same
+    empty-whisper-prompt invariant).  ``quiet`` suppresses the final
+    ``wrote <path>`` summary lines.  Temp files are deleted after the
+    run.
 
     Both presets:
 
@@ -299,6 +306,24 @@ def run_preset(
             effective_glossary = None
     else:
         effective_glossary = options.glossary_path
+        # Memo seam with an explicit --glossary (issue #82): the file
+        # replaces both layers, but the whisper initial_prompt must stay
+        # empty — so filter it to correction pairs only (same invariant
+        # as the layered memo path) via a temp file.
+        if command == "memo":
+            from vemoizer.glossary import load_corrections
+
+            lines = [
+                f"{w} => {r}" for w, r in load_corrections(effective_glossary).items()
+            ]
+            if lines:
+                fd, name = tempfile.mkstemp(prefix="vemoizer-glossary-", suffix=".txt")
+                os.close(fd)
+                temp_path = Path(name)
+                temp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                effective_glossary = str(temp_path)
+            else:
+                effective_glossary = None
 
     exit_code = 0
     written: list[str] = []
@@ -306,15 +331,22 @@ def run_preset(
     try:
         with caffeinate_context():
             for file in files:
-                result = transcribe_file(
-                    file,
-                    diarize=options.diarize,
-                    config_path=options.config_path,
-                    profile=options.profile,
-                    repair=options.repair,
-                    glossary_path=effective_glossary,
-                    speakers=options.speakers,
-                )
+                try:
+                    result = transcribe_file(
+                        file,
+                        diarize=options.diarize,
+                        config_path=options.config_path,
+                        profile=options.profile,
+                        repair=options.repair,
+                        glossary_path=effective_glossary,
+                        speakers=options.speakers,
+                    )
+                except ConfigError as e:
+                    # A malformed .vemoizer/config.toml must fail loud
+                    # with a clean error line, not a traceback (issue #78).
+                    typer.echo(f"error: {e}", err=True)
+                    exit_code = 1
+                    continue
                 for warning in result.pop("warnings", []):
                     typer.echo(warning, err=True)
                 if "error" in result:
@@ -355,8 +387,10 @@ def run_preset(
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
 
-    # Print one "wrote <relative path>" line per written file at the end.
+    # Print one "wrote <relative path>" line per written file at the end
+    # (--quiet suppresses them).
     for name in written:
-        typer.echo(f"wrote {name}")
+        if not quiet:
+            typer.echo(f"wrote {name}")
 
     return exit_code

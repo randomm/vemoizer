@@ -148,7 +148,10 @@ def transcribe(
     config: Path | None = typer.Option(  # noqa: B008
         None,
         "--config",
-        help="LLM config file (default: ~/.config/vemoizer/config.toml).",
+        help=(
+            "LLM config file (default: layered .vemoizer/config.toml "
+            "search — see `vemoizer meeting --help`)."
+        ),
     ),
     profile: str = typer.Option(  # noqa: B008
         "dictation",
@@ -310,6 +313,7 @@ def meeting(
         repair=repair,
         diarize=False if no_diarize else None,
         speakers=speaker_count,
+        quiet=quiet,
     )
     if exit_code:
         raise typer.Exit(code=exit_code)
@@ -376,6 +380,7 @@ def memo(
         config_path=str(config) if config is not None else None,
         glossary_path=str(glossary) if glossary is not None else None,
         repair=repair,
+        quiet=quiet,
     )
     if exit_code:
         raise typer.Exit(code=exit_code)
