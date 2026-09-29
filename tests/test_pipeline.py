@@ -64,7 +64,16 @@ def _transcriber(
     return _T()
 
 
-def _patch_decoders(monkeypatch, a: dict | None, b: dict | None) -> None:
+def _patch_decoders(
+    monkeypatch, a: dict | None, b: dict | None, *, latched_a: bool = False
+) -> None:
+    """Patch the decode A/B transcriber classes.
+
+    ``a``/``b`` are the per-slice decode results; ``None`` makes the
+    constructor raise (model unavailable at construction time).
+    ``latched_a=True`` mirrors the real Parakeet latch shape (issue #73):
+    the constructor succeeds but every ``transcribe()`` call raises
+    ``RuntimeError``, which is how a failed lazy model load surfaces."""
     ta = _transcriber(
         (a or {}).get("text", ""), (a or {}).get("words"), (a or {}).get("segments")
     )
@@ -81,6 +90,10 @@ def _patch_decoders(monkeypatch, a: dict | None, b: dict | None) -> None:
             self._t = ta
 
         def transcribe(self, audio, **kw):
+            if latched_a:
+                # Real latch shape: ctor succeeded, the failed lazy
+                # model load raises on first use (issue #73).
+                raise RuntimeError("Parakeet model failed to load")
             assert ta is not None
             return ta.transcribe(audio)
 
@@ -201,6 +214,10 @@ def test_fail_open_when_decode_b_missing(tmp_path, monkeypatch) -> None:
 
 
 def test_fail_open_when_both_decodes_fail(tmp_path, monkeypatch) -> None:
+    """Constructors raising (model unavailable at construction time) still
+    fail open with an empty result — the latched-load total-failure case
+    (ctor succeeds, ``transcribe`` raises) is the one that must FAIL LOUD
+    and is covered in ``tests/test_fail_loud.py``."""
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     _patch_decoders(monkeypatch, None, None)
@@ -333,6 +350,9 @@ def test_diarize_failure_fails_open(tmp_path, monkeypatch) -> None:
     assert len(result["segments"]) == 1
     assert "speaker" not in result["segments"][0]
     assert "error" not in result
+    # Fail loud (issue #78): a failed diarization stage must be announced
+    # through the warnings channel, not look like a clean run.
+    assert "diarization failed; continuing without speaker labels" in result["warnings"]
 
 
 def test_diarize_on_empty_diarization_segments_no_speaker_keys(
@@ -360,6 +380,11 @@ def test_diarize_on_empty_diarization_segments_no_speaker_keys(
 
     assert len(result["segments"]) == 1
     assert "speaker" not in result["segments"][0]
+    # Diarization RAN (and found no speakers): no failure warning, no
+    # attribution — the failure warning is for the stage itself failing.
+    assert "diarization failed; continuing without speaker labels" not in result.get(
+        "warnings", []
+    )
 
 
 def test_diarize_on_multiple_speakers_picks_max_overlap(tmp_path, monkeypatch) -> None:

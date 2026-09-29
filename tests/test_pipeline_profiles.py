@@ -156,6 +156,9 @@ def test_meeting_profile_is_whisper_only_no_consensus(tmp_path, monkeypatch) -> 
     )
     assert result["text"] == "hei maailma"  # whisper's read, unrewritten
     assert result["segments"][0]["text"] == "hei maailma"
+    # A successful meeting decode adds NOTHING to the warnings channel
+    # (issue #78: catches an unconditional warnings-append regression).
+    assert "warnings" not in result
 
 
 def test_meeting_profile_whisper_failure_fails_open_to_empty(
@@ -180,6 +183,10 @@ def test_meeting_profile_whisper_failure_fails_open_to_empty(
     )
     # whisper failed: the run falls open INTO the dictation pipeline
     assert result["text"] == "parakeet varalla"
+    # Fail loud (issue #78): the user must be told the fallback happened.
+    assert "meeting decode failed; fell back to dictation path" in result.get(
+        "warnings", []
+    )
 
 
 def test_unknown_profile_raises() -> None:

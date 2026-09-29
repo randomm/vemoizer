@@ -7,14 +7,10 @@ Chains every stage into one end-to-end run:
            -> LLM adjudication -> assembled transcript
 
 Fail-open at every stage: a stage failure degrades to the best available
-result (a failed decode B skips alignment and the output falls back to
-decode A's text; an unconfigured or failing LLM keeps the best non-LLM
-candidate) rather than aborting the run.
-
-VAD splits long recordings so decodes stay bounded (fail-open: the whole
-recording as one slice); per-slice timestamps are shifted onto the full
-timeline. Models load lazily and are released via ``cleanup()`` on every
-exit path.
+result rather than aborting the run. VAD splits long recordings so decodes
+stay bounded (fail-open: the whole recording as one slice); per-slice
+timestamps are shifted onto the full timeline. Models load lazily and are
+released via ``cleanup()`` on every exit path.
 """
 
 from __future__ import annotations
@@ -36,19 +32,19 @@ from .diarization import ATTRIBUTION as DIARIZATION_ATTRIBUTION
 from .diarization import SpeakerCount, diarize, speaker_for_span
 from .glossary import (
     apply_corrections,
-    apply_corrections_to_notes,
     glossary_prompt,
     load_corrections,
     load_glossary,
 )
 from .ingest import IngestError, ingest_audio
 from .llm import LLMClient, LLMConfig, load_default_config
-from .notes import generate_notes
+from .llm_tail import apply_llm_tail
+from .notes import generate_notes  # noqa: F401
 from .parakeet_transcriber import ParakeetTranscriber
 from .progress import StageProgress, format_duration
 from .readability import paragraphs, splice_verdicts, tidy_paragraphs
 from .redecode import WhisperReDecodeTranscriber
-from .repair import repair_paragraphs
+from .repair import repair_paragraphs  # noqa: F401
 from .slice_align import find_disputed_slices
 from .spans import Span, apply_span_guardrails, span_context, words_in_span
 from .speaker_align import assign_word_speakers, split_segments_at_speaker_changes
@@ -363,6 +359,7 @@ def transcribe_file(
     parakeet: Any = None
     canary: Any = None
     run_consensus = True
+    meeting_fallback = False
     glossary = load_glossary(glossary_path)
     corrections = load_corrections(glossary_path)
     if profile == "meeting":
@@ -378,8 +375,10 @@ def transcribe_file(
             # adjudication entirely (invariant #2 allows skip-by-flag).
             run_consensus = False
         else:
-            # Whisper failed: fail open INTO the dictation pipeline.
+            # Whisper failed: dictation is the fallback; the warning is
+            # appended after it succeeds (a total failure is an error, #73).
             logger.warning("meeting decode failed; falling back to dictation path")
+            meeting_fallback = True
     if result_a is None:
         try:
             parakeet = ParakeetTranscriber()
@@ -419,6 +418,22 @@ def transcribe_file(
             format_duration(time.monotonic() - diarize_start),
         )
 
+    # Fail loud (issue #73/#78): decode A's total failure (None) must not
+    # look like a successful empty transcript — an "error" key is the only
+    # thing the CLI and callers key on. Partial failures (some slices dead)
+    # still ship the merged slices.
+    if result_a is None:
+        logger.error("decode A produced no output for any of %d slices", len(slices))
+        return {
+            "text": "",
+            "segments": [],
+            "error": (
+                "decode A produced no output for any of "
+                + str(len(slices))
+                + " slices (model may have failed to load)"
+            ),
+        }
+
     logger.info("assemble: adjudicating spans")
     result = _assemble(
         result_a, result_b, redecoded, llm_config, speaker_segments, spans=spans
@@ -431,46 +446,31 @@ def transcribe_file(
         # CC-BY-4.0: the gated pyannote weights require attribution whenever
         # they actually ran; the CLI prints the warnings channel.
         result.setdefault("warnings", []).append(DIARIZATION_ATTRIBUTION)
+    if diarize and not diarization_ran:
+        # Fail-open: the transcript still ships, but the user must be
+        # told the labels are missing (issue #78).
+        result.setdefault("warnings", []).append(
+            "diarization failed; continuing without speaker labels"
+        )
+    if meeting_fallback:
+        # The dictation decode above succeeded (a total failure already
+        # returned an error), so tell the user they got the fallback
+        # transcript, not the meeting-profile read (issue #78).
+        result.setdefault("warnings", []).append(
+            "meeting decode failed; fell back to dictation path"
+        )
 
-    if repair and llm_config is not None and result.get("paragraphs"):
-        # Presentation-layer repair: paragraphs only (txt/md read well),
-        # while segments and the raw text stay the verbatim record for
-        # srt/vtt/json. Guarded against invention inside repair_paragraphs.
-        repair_client = LLMClient(llm_config)
-        try:
-            result["paragraphs"] = repair_paragraphs(
-                repair_client, result["paragraphs"], glossary=glossary or None
-            )
-        finally:
-            repair_client.close()
-
-    if llm_config is not None and result.get("text"):
-        notes_start = time.monotonic()
-        client = LLMClient(llm_config)
-        try:
-            notes = generate_notes(
-                client,
-                result["text"],
-                paragraphs=result.get("paragraphs"),
-                glossary=glossary or None,
-            )
-        finally:
-            client.close()
-        if notes is not None:
-            if corrections:
-                notes = apply_corrections_to_notes(notes, corrections)
-            result["notes"] = notes
-            logger.info(
-                "notes: generated in %s",
-                format_duration(time.monotonic() - notes_start),
-            )
-        else:
-            # The .md file still renders as a clean transcript document;
-            # the warning tells the user why it has no summary.
-            result.setdefault("warnings", []).append(
-                "notes generation failed; the Markdown output has no summary"
-            )
-            logger.warning("notes: generation failed (transcript unaffected)")
+    # LLM tail; fn/cls args use this module's names for test monkeypatching
+    apply_llm_tail(
+        result,
+        llm_config,
+        repair=repair,
+        corrections=corrections,
+        glossary=glossary,
+        generate_notes_fn=generate_notes,
+        repair_paragraphs_fn=repair_paragraphs,
+        llm_client_cls=LLMClient,
+    )
 
     logger.info(
         "transcribe: done in %s — %d chars, %d segments",

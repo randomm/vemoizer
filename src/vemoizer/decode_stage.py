@@ -44,7 +44,12 @@ def decode_all(
     downstream alignment and re-decode stages work on one time base.
     """
     if not slices:
-        return {"text": "", "words": [], "segments": []}
+        # The empty-input contract keeps its four keys so callers can
+        # read the fields unconditionally; a TOTAL failure of a
+        # non-empty input instead returns None (issue #73) so the
+        # orchestrator can fail loud instead of shipping an empty
+        # dict that looks like a successful empty transcript.
+        return {"text": "", "words": [], "segments": [], "slices": []}
     merged_words: list[dict[str, Any]] = []
     merged_segments: list[dict[str, Any]] = []
     texts: list[str] = []
@@ -97,6 +102,12 @@ def decode_all(
         "segments": merged_segments,
         "slices": slice_records,
     }
+    if not slice_records:
+        # Every slice failed (or decoded to nothing): a truthy empty
+        # dict here would look like a successful empty transcript
+        # downstream. None is the total-failure contract (issue #73).
+        logger.warning("%s: no successful slices", label)
+        return None
     logger.info(
         "%s: %d chars, %d words, %d segments",
         label,

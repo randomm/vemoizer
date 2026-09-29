@@ -285,3 +285,167 @@ def test_speakers_invalid_value_is_rejected_before_transcription(
         result, seen = _speakers_seen(tmp_path, monkeypatch, bad)
         assert result.exit_code != 0, bad
         assert "speakers" not in seen, bad
+
+
+# -- fail-loud exit rules (issue #78) ------------------------------------
+#
+# A total decode failure must not look like success. The CLI checks result
+# for "error" and exits 1, but an empty transcript (no "error" key, no text,
+# no segments) used to fall through to file writing and exit 0. The two
+# rules below must fire before any output file is written, and they must not
+# double-report on a single result.
+
+
+def _invoke_transcribe(tmp_path, monkeypatch, fake, *args: str):
+    import vemoizer.pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake)
+    monkeypatch.chdir(tmp_path)
+    return runner.invoke(app, ["transcribe", *args])
+
+
+def test_empty_transcript_exits_nonzero_and_writes_no_files(
+    tmp_path, monkeypatch
+) -> None:
+    """An empty result (no text, no segments, no error key) is a failure.
+
+    The check must run before _write_output so no output files are produced
+    and the success line is never printed.
+    """
+    result = _invoke_transcribe(
+        tmp_path,
+        monkeypatch,
+        lambda path, **kw: {"text": "", "segments": []},
+        "memo.m4a",
+    )
+    assert result.exit_code == 1
+    # No output files of any default format were written.
+    for ext in (".txt", ".json", ".srt", ".vtt", ".md"):
+        assert not (tmp_path / f"memo{ext}").exists(), f"unexpected memo{ext}"
+    # The success line must not appear.
+    assert "wrote transcript" not in result.stdout
+    # The failure is reported on stderr.
+    assert "no transcript" in result.stderr
+
+
+def test_silent_audio_no_error_key_still_exits_nonzero(tmp_path, monkeypatch) -> None:
+    """Legitimately-empty (silent) audio produces {text:'', segments:[]} with
+    no "error" key. The committed simple rule treats that as a failure — it
+    is not given a pass, since the pipeline has no silence marker."""
+    result = _invoke_transcribe(
+        tmp_path,
+        monkeypatch,
+        # No "error" key: this is the silent-audio shape, not an ingest error.
+        lambda path, **kw: {"text": "", "segments": []},
+        "silent.m4a",
+    )
+    assert result.exit_code == 1
+    assert not (tmp_path / "silent.txt").exists()
+
+
+def test_explicit_error_key_still_exits_nonzero_and_no_double_report(
+    tmp_path, monkeypatch
+) -> None:
+    """A result with an "error" key is handled by the existing error branch;
+    the empty-transcript rule must not also fire (single error path)."""
+    result = _invoke_transcribe(
+        tmp_path,
+        monkeypatch,
+        lambda path, **kw: {"text": "", "segments": [], "error": "boom"},
+        "memo.m4a",
+    )
+    assert result.exit_code == 1
+    assert "boom" in result.stderr
+    # Exactly one error line: the empty-transcript rule is guarded by the
+    # "error"-in-result check and does not double-report.
+    assert "no transcript" not in result.stderr
+
+
+def test_diarize_without_labels_exits_nonzero(tmp_path, monkeypatch) -> None:
+    """--diarize requested, segments present, but no "speaker" key on any
+    segment -> non-zero exit (labels were promised but never came back)."""
+    result = _invoke_transcribe(
+        tmp_path,
+        monkeypatch,
+        lambda path, **kw: {
+            "text": "moikka",
+            "segments": [{"start": 0.0, "end": 1.0, "text": "moikka"}],
+        },
+        "memo.m4a",
+        "--diarize",
+    )
+    assert result.exit_code == 1
+    assert "no speaker labels" in result.stderr
+    # No files written — the check fires before _write_output.
+    assert not (tmp_path / "memo.txt").exists()
+
+
+def test_diarize_with_labels_exits_zero(tmp_path, monkeypatch) -> None:
+    """Control: --diarize with a "speaker" key on a segment exits 0 — the
+    no-labels rule does not fire when labels are actually present."""
+    result = _invoke_transcribe(
+        tmp_path,
+        monkeypatch,
+        lambda path, **kw: {
+            "text": "moikka",
+            "segments": [
+                {"start": 0.0, "end": 1.0, "text": "moikka", "speaker": "SPEAKER_0"}
+            ],
+        },
+        "memo.m4a",
+        "--diarize",
+    )
+    assert result.exit_code == 0
+    assert (tmp_path / "memo.txt").is_file()
+
+
+def test_diarize_without_labels_does_not_double_report_with_empty(
+    tmp_path, monkeypatch
+) -> None:
+    """A result that is BOTH empty AND has no speaker labels must report
+    once, not twice. Empty (no segments) means the empty-transcript rule
+    fires; the diarize rule requires segments to be present, so it cannot
+    also fire."""
+    result = _invoke_transcribe(
+        tmp_path,
+        monkeypatch,
+        lambda path, **kw: {"text": "", "segments": []},
+        "memo.m4a",
+        "--diarize",
+    )
+    assert result.exit_code == 1
+    # The empty-transcript message fires; the no-labels message does not.
+    assert "no transcript" in result.stderr
+    assert "no speaker labels" not in result.stderr
+
+
+def test_empty_then_healthy_batch_continues_and_exits_nonzero(
+    tmp_path, monkeypatch
+) -> None:
+    """Batch continuation: the first file yields an empty result (exit_code
+    set to 1 + continue), the second yields real text and IS written. The
+    final exit code is 1, matching the existing exit_code=1 + continue
+    pattern used for the "error" and write-failure paths."""
+    calls: list = []
+
+    def fake(path, **kw):
+        calls.append(path.name)
+        if path.name == "a.m4a":
+            return {"text": "", "segments": []}
+        return {"text": "moikka", "segments": []}
+
+    result = _invoke_transcribe(
+        tmp_path,
+        monkeypatch,
+        fake,
+        "a.m4a",
+        "b.m4a",
+    )
+    assert result.exit_code == 1
+    # Both files were attempted (the loop continued past the first failure).
+    assert calls == ["a.m4a", "b.m4a"]
+    # The empty first file wrote nothing.
+    assert not (tmp_path / "a.txt").exists()
+    # The healthy second file WAS written and its success line printed.
+    assert (tmp_path / "b.txt").is_file()
+    assert "wrote transcript for b.m4a" in result.stdout

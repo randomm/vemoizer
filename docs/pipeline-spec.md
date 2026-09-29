@@ -204,6 +204,39 @@ decode A's sentence segments (full coverage — with zero disputes the
 output text is byte-identical to decode A's), and consecutive segments
 group into paragraphs at silence gaps ≥ 1.5 s or speaker changes.
 
+### 10a. Fail-loud contract (issue #73 / #78)
+
+A total decode failure (``decode_all`` returns ``None`` when ``len(slices) > 0``
+and no slice succeeded) must not look like a successful empty transcript.
+The pipeline sets ``result["error"]`` to
+``"decode A produced no output for any of {N} slices (model may have failed to load)"``
+and the CLI exits non-zero via the existing ``"error"`` branch.
+
+Warnings (``result["warnings"]``, printed to stderr by the CLI):
+- **Meeting fallback:** when ``decode_meeting`` returns ``None`` and the
+dictation decode succeeds, the warning is exactly
+``"meeting decode failed; fell back to dictation path"``. If the dictation
+decode also totally fails, the result is the ``#73`` error (no warning).
+- **Diarization failure:** when ``diarize=True`` and the diarization stage
+raises, the warning is exactly
+``"diarization failed; continuing without speaker labels"``. The transcript
+still ships (fail-open); no ``"error"`` key.
+
+The CLI exit rules run after the ``"error"`` branch and before the
+file-writing loop (issue #78):
+
+- **Empty-transcript:** when ``not result.get("text") and not
+  result.get("segments") and "error" not in result``, the CLI exits non-zero
+  and writes no output files. Legitimately silent audio (empty decode, no
+  error) is treated as a failure under this simple rule; there is no
+  pipeline marker that distinguishes silence from failure.
+- **Diarize no labels:** when ``diarize`` and ``result.get("segments")``
+  and no segment carries a ``"speaker"`` key, the CLI exits non-zero. The
+  two rules are mutually exclusive by construction (one requires empty
+  output, the other requires non-empty segments), so a run never
+  double-reports; a result with an ``"error"`` key exits via the error
+  branch and neither rule runs.
+
 ### 11. LLM notes (optional, fails open)
 
 `src/vemoizer/notes.py`. The configured LLM turns the assembled
