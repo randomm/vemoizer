@@ -38,6 +38,7 @@ from .decode_stage import decode_all
 from .diarization import diarize, speaker_for_span
 from .ingest import IngestError, ingest_audio
 from .llm import LLMClient, LLMConfig, load_config
+from .notes import generate_notes
 from .parakeet_transcriber import ParakeetTranscriber
 from .progress import StageProgress, format_duration
 from .readability import paragraphs, splice_verdicts
@@ -420,6 +421,28 @@ def transcribe_file(
     result = _assemble(
         result_a, result_b, redecoded, llm_config, speaker_segments, spans=spans
     )
+
+    if llm_config is not None and result.get("text"):
+        notes_start = time.monotonic()
+        client = LLMClient(llm_config)
+        try:
+            notes = generate_notes(client, result["text"])
+        finally:
+            client.close()
+        if notes is not None:
+            result["notes"] = notes
+            logger.info(
+                "notes: generated in %s",
+                format_duration(time.monotonic() - notes_start),
+            )
+        else:
+            # The .md file still renders as a clean transcript document;
+            # the warning tells the user why it has no summary.
+            result.setdefault("warnings", []).append(
+                "notes generation failed; the Markdown output has no summary"
+            )
+            logger.warning("notes: generation failed (transcript unaffected)")
+
     logger.info(
         "transcribe: done in %s — %d chars, %d segments",
         format_duration(time.monotonic() - run_start),

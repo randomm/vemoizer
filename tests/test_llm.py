@@ -641,3 +641,12 @@ class TestPromptShape:
         # Candidate text is fenced so decoded speech that *looks like* an
         # instruction stays data.
         assert "<candidate" in prompt or "```" in prompt
+
+
+def test_complete_uses_a_larger_answer_budget_than_adjudication() -> None:
+    """A truncated notes JSON parses as no notes at all; complete() must
+    not inherit adjudication's span-sized 512-token cap."""
+    client = LLMClient(DEFAULT_CONFIG)
+    _url, adj_body, _h = client._build_request("s", "u")
+    _url, notes_body, _h = client._build_request("s", "u", max_tokens=2048)
+    assert notes_body["max_tokens"] > adj_body["max_tokens"]

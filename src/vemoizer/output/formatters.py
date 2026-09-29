@@ -36,7 +36,7 @@ import json
 from typing import Any
 
 #: Every output format the CLI accepts, in canonical order.
-OUTPUT_FORMATS: tuple[str, ...] = ("txt", "json", "srt", "vtt")
+OUTPUT_FORMATS: tuple[str, ...] = ("txt", "json", "srt", "vtt", "md")
 
 #: File extension per format (no leading dot required; the CLI appends it
 #: to the output base path).
@@ -45,6 +45,7 @@ FORMAT_EXTENSIONS: dict[str, str] = {
     "json": ".json",
     "srt": ".srt",
     "vtt": ".vtt",
+    "md": ".md",
 }
 
 
@@ -235,16 +236,21 @@ def format_transcript(transcript: dict[str, Any], format: str) -> str:
 
     Args:
         transcript: A ``TranscriptionResult`` dict.
-        format: One of ``txt`` / ``json`` / ``srt`` / ``vtt``.
+        format: One of ``txt`` / ``json`` / ``srt`` / ``vtt`` / ``md``.
 
     Raises:
         ValueError: when ``format`` is not a known output format.
     """
+    # Imported here, not at module top: markdown.py imports nothing back,
+    # but keeping the registry the single place formats appear.
+    from .markdown import format_md
+
     dispatch = {
         "txt": format_txt,
         "json": format_json,
         "srt": format_srt,
         "vtt": format_vtt,
+        "md": format_md,
     }
     if format not in dispatch:
         known = ", ".join(OUTPUT_FORMATS)
