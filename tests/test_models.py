@@ -33,8 +33,8 @@ EXPECTED = {
         "0b6b32ee10f30c89e3ead7249bb636445e3019ee",
     ),
     "whisper-finnish": (
-        "Finnish-NLP/whisper-large-finnish-v3",
-        "b23deb0b3855c829ffe04cb1c6709757ff16d49c",
+        "FredrikKarlssonSpeech/whisper-large-finnish-v3-mlx",
+        "f51f0310c1b2a3e5acb16905c1a7245bb9476846",
     ),
 }
 
@@ -173,7 +173,9 @@ def test_pull_all_warms_all_three_in_pipeline_order() -> None:
         snap.side_effect = lambda repo_id, **kw: {
             "mlx-community/parakeet-tdt-0.6b-v3": paths["parakeet"],
             "Mediform/canary-1b-v2-mlx-q8": paths["canary"],
-            "Finnish-NLP/whisper-large-finnish-v3": paths["whisper-finnish"],
+            "FredrikKarlssonSpeech/whisper-large-finnish-v3-mlx": paths[
+                "whisper-finnish"
+            ],
         }[repo_id]
         result = pull_all()
 

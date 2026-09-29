@@ -85,8 +85,8 @@ MODELS: tuple[ModelSpec, ...] = (
     ),
     ModelSpec(
         name="whisper-finnish",
-        repo_id="Finnish-NLP/whisper-large-finnish-v3",
-        revision="b23deb0b3855c829ffe04cb1c6709757ff16d49c",
+        repo_id="FredrikKarlssonSpeech/whisper-large-finnish-v3-mlx",
+        revision="f51f0310c1b2a3e5acb16905c1a7245bb9476846",
     ),
 )
 

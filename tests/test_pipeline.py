@@ -135,7 +135,7 @@ def _patch_redecode(monkeypatch, text: str = "moottori") -> None:
         def _ensure_loaded(self) -> None:
             self._loaded = True
 
-        def transcribe_span(self, audio, span):
+        def transcribe_span(self, audio, span, language=None):
             from vemoizer.redecode import ReDecodeResult
 
             return ReDecodeResult(span=span, text=text, words=[], ok=True)
@@ -162,12 +162,15 @@ def _llm_config(tmp_path: Path) -> Path:
 def test_full_pipeline_assembles_text_and_spans(tmp_path, monkeypatch) -> None:
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
-    words_a = [{"word": "hei", "start": 0.0, "end": 0.4}]
-    words_b = [{"word": "moi", "start": 0.1, "end": 0.5}]  # disputed vs "hei"
+    words_a = [
+        {"word": "hei", "start": 0.0, "end": 0.4},
+        {"word": "maailma", "start": 0.5, "end": 1.0},
+    ]
+    words_b: list[dict] = []  # decode B has no word timestamps
     _patch_decoders(
         monkeypatch,
         {"text": "hei maailma", "words": words_a},
-        {"text": "moi maailma", "words": words_b},
+        {"text": "nyt puhutaan aivan muusta", "words": words_b},
     )
     _patch_redecode(monkeypatch, "moikka")
 
@@ -247,19 +250,22 @@ def test_diarize_on_overlaps_speaker_labels(tmp_path, monkeypatch) -> None:
     speaker segments and attaches the speaker with the most overlap."""
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
-    words_a = [{"word": "hei", "start": 0.0, "end": 0.4}]
-    words_b = [{"word": "moi", "start": 0.1, "end": 0.5}]  # disputed vs "hei"
+    words_a = [
+        {"word": "hei", "start": 0.0, "end": 0.4},
+        {"word": "maailma", "start": 0.5, "end": 1.0},
+    ]
+    words_b: list[dict] = []  # decode B has no word timestamps
     _patch_decoders(
         monkeypatch,
         {"text": "hei maailma", "words": words_a},
-        {"text": "moi maailma", "words": words_b},
+        {"text": "nyt puhutaan aivan muusta", "words": words_b},
     )
     _patch_redecode(monkeypatch, "moikka")
     _patch_diarize(
         monkeypatch,
         segments=[
-            (0.0, 0.5, "SPEAKER_00"),
-            (0.5, 1.2, "SPEAKER_01"),  # no overlap with the 0.0-0.4 span
+            (0.0, 1.5, "SPEAKER_00"),  # dominates the [0, 2.0) disputed slice
+            (1.5, 2.0, "SPEAKER_01"),
         ],
     )
 
@@ -276,18 +282,21 @@ def test_diarize_on_no_overlap_no_speaker_key(tmp_path, monkeypatch) -> None:
     """A segment with no overlapping speaker segment gets no ``speaker`` key."""
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
-    words_a = [{"word": "hei", "start": 0.0, "end": 0.4}]
-    words_b = [{"word": "moi", "start": 0.1, "end": 0.5}]
+    words_a = [
+        {"word": "hei", "start": 0.0, "end": 0.4},
+        {"word": "maailma", "start": 0.5, "end": 1.0},
+    ]
+    words_b: list[dict] = []  # decode B has no word timestamps
     _patch_decoders(
         monkeypatch,
         {"text": "hei maailma", "words": words_a},
-        {"text": "moi maailma", "words": words_b},
+        {"text": "nyt puhutaan aivan muusta", "words": words_b},
     )
     _patch_redecode(monkeypatch, "moikka")
     _patch_diarize(
         monkeypatch,
         segments=[
-            (1.0, 1.5, "SPEAKER_00"),  # entirely outside the disputed span
+            (3.0, 3.5, "SPEAKER_00"),  # entirely outside the [0, 2.0) span
         ],
     )
 
@@ -303,12 +312,15 @@ def test_diarize_failure_fails_open(tmp_path, monkeypatch) -> None:
     produced, just without speaker labels (fail-open)."""
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
-    words_a = [{"word": "hei", "start": 0.0, "end": 0.4}]
-    words_b = [{"word": "moi", "start": 0.1, "end": 0.5}]
+    words_a = [
+        {"word": "hei", "start": 0.0, "end": 0.4},
+        {"word": "maailma", "start": 0.5, "end": 1.0},
+    ]
+    words_b: list[dict] = []  # decode B has no word timestamps
     _patch_decoders(
         monkeypatch,
         {"text": "hei maailma", "words": words_a},
-        {"text": "moi maailma", "words": words_b},
+        {"text": "nyt puhutaan aivan muusta", "words": words_b},
     )
     _patch_redecode(monkeypatch, "moikka")
     _patch_diarize(monkeypatch, segments=RuntimeError("pyannote crashed"))
@@ -329,12 +341,15 @@ def test_diarize_on_empty_diarization_segments_no_speaker_keys(
     without a speaker key."""
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
-    words_a = [{"word": "hei", "start": 0.0, "end": 0.4}]
-    words_b = [{"word": "moi", "start": 0.1, "end": 0.5}]
+    words_a = [
+        {"word": "hei", "start": 0.0, "end": 0.4},
+        {"word": "maailma", "start": 0.5, "end": 1.0},
+    ]
+    words_b: list[dict] = []  # decode B has no word timestamps
     _patch_decoders(
         monkeypatch,
         {"text": "hei maailma", "words": words_a},
-        {"text": "moi maailma", "words": words_b},
+        {"text": "nyt puhutaan aivan muusta", "words": words_b},
     )
     _patch_redecode(monkeypatch, "moikka")
     _patch_diarize(monkeypatch, segments=[])
@@ -351,12 +366,15 @@ def test_diarize_on_multiple_speakers_picks_max_overlap(tmp_path, monkeypatch) -
     the largest overlap length wins."""
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
-    words_a = [{"word": "hei", "start": 0.0, "end": 0.4}]
-    words_b = [{"word": "moi", "start": 0.1, "end": 0.5}]
+    words_a = [
+        {"word": "hei", "start": 0.0, "end": 0.4},
+        {"word": "maailma", "start": 0.5, "end": 1.0},
+    ]
+    words_b: list[dict] = []  # decode B has no word timestamps
     _patch_decoders(
         monkeypatch,
         {"text": "hei maailma", "words": words_a},
-        {"text": "moi maailma", "words": words_b},
+        {"text": "nyt puhutaan aivan muusta", "words": words_b},
     )
     _patch_redecode(monkeypatch, "moikka")
     _patch_diarize(
@@ -440,8 +458,14 @@ def test_pipeline_logs_every_stage(tmp_path, monkeypatch, caplog) -> None:
     _patch_vad(monkeypatch)
     _patch_decoders(
         monkeypatch,
-        {"text": "hei maailma", "words": [{"word": "hei", "start": 0.0, "end": 0.4}]},
-        {"text": "moi maailma", "words": [{"word": "moi", "start": 0.1, "end": 0.5}]},
+        {
+            "text": "hei maailma",
+            "words": [
+                {"word": "hei", "start": 0.0, "end": 0.4},
+                {"word": "maailma", "start": 0.5, "end": 1.0},
+            ],
+        },
+        {"text": "nyt puhutaan aivan muusta", "words": []},
     )
     _patch_redecode(monkeypatch, "moikka")
     transcribe_file("/nonexistent.m4a", config_path=str(tmp_path / "none.toml"))
@@ -455,7 +479,7 @@ def test_pipeline_logs_every_stage(tmp_path, monkeypatch, caplog) -> None:
         "decode A: starting over 1 slices",
         "decode A: finished 1/1 slices",
         "decode B: starting over 1 slices",
-        "alignment: DTW over 1 x 1 words",
+        "slice dispute: 1/1 slices disputed",
         "disputed spans: 1",
         "re-decode: starting over 1 spans",
         "adjudicate: starting over 1 spans",
@@ -464,32 +488,39 @@ def test_pipeline_logs_every_stage(tmp_path, monkeypatch, caplog) -> None:
         assert expected in log, f"missing progress line: {expected!r}\n---\n{log}"
 
 
-def test_alignment_skip_is_logged_not_silent(monkeypatch, caplog) -> None:
-    """Decode B with text but no word timestamps disables the consensus path.
+def test_wordless_decode_b_still_aligns_via_slices(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """Decode B has no word timestamps — the per-slice alignment is what
+    makes consensus possible anyway (issue #55).
 
-    The run still succeeds, so without this warning the only symptom is a
-    silently missing stage.
+    B's words are synthesized from its slice text over the slice bounds;
+    disputes anchor to decode A's real times. This is the whole activation
+    in miniature: a text-only decode B produces a real disputed span.
     """
     caplog.set_level("INFO", logger="vemoizer")
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     _patch_decoders(
         monkeypatch,
-        {"text": "hei", "words": [{"word": "hei", "start": 0.0, "end": 0.4}]},
-        {"text": "moi", "words": []},  # text, but no word timestamps
+        {
+            "text": "hei maailma",
+            "words": [
+                {"word": "hei", "start": 0.0, "end": 0.4},
+                {"word": "maailma", "start": 0.5, "end": 1.0},
+            ],
+        },
+        {"text": "nyt puhutaan aivan muusta", "words": []},  # text-only decode B
     )
-    result = transcribe_file("/nonexistent.m4a")
+    _patch_redecode(monkeypatch, "moikka")
+    result = transcribe_file(
+        "/nonexistent.m4a", config_path=str(tmp_path / "none.toml")
+    )
 
     log = "\n".join(r.getMessage() for r in caplog.records)
-    assert "alignment skipped: decode A has 1 words, decode B has 0" in log
-    assert "disputed spans: 0 (no alignment, re-decode skipped)" in log
-    assert result["segments"] == []  # consensus path produced nothing
-
-
-# -- transcribe_decode_only (issue #51) ----------------------------------
-#
-# The eval harness needs each decode backend's raw output as its own
-# number, so the consensus gain is measurable instead of asserted.
+    assert "disputed spans: 1" in log
+    assert len(result["segments"]) == 1
+    assert result["segments"][0]["text"] == "moikka"  # re-decode won the span
 
 
 def test_decode_only_parakeet_returns_single_decode(tmp_path, monkeypatch) -> None:
@@ -557,13 +588,8 @@ def _consensus_setup(monkeypatch, *, b_words=None):
         "segments": [{"start": 0.0, "end": 1.0, "text": "hei maailma"}],
     }
     b = {
-        "text": "moi maailma",
-        "words": b_words
-        if b_words is not None
-        else [
-            {"word": "moi", "start": 0.0, "end": 0.4},
-            {"word": "maailma", "start": 0.5, "end": 1.0},
-        ],
+        "text": "nyt puhutaan aivan muusta",
+        "words": b_words if b_words is not None else [],
     }
     _patch_decoders(monkeypatch, a, b)
 
@@ -589,8 +615,8 @@ def test_decode_b_candidate_is_span_scoped_not_whole_text(
     b_cands = [c for cands in seen for c in cands if c["source"] == "decode B"]
     assert b_cands, "decode B candidate missing"
     for cand in b_cands:
-        # span-scoped: only the disputed word, never the full transcript
-        assert cand["text"] == "moi"
+        # span-scoped: the disputed slice's text, never the full transcript
+        assert cand["text"] == "nyt puhutaan aivan muusta"
 
 
 def test_failed_redecode_result_is_not_a_candidate(tmp_path, monkeypatch) -> None:
@@ -600,7 +626,7 @@ def test_failed_redecode_result_is_not_a_candidate(tmp_path, monkeypatch) -> Non
         def __init__(self) -> None:
             self.model = "fake"
 
-        def transcribe_span(self, audio, span):
+        def transcribe_span(self, audio, span, language=None):
             from vemoizer.redecode import ReDecodeResult as SpanResult
 
             return SpanResult(span=span, text="roskaa", words=[], ok=False)
@@ -626,6 +652,10 @@ def test_failed_redecode_result_is_not_a_candidate(tmp_path, monkeypatch) -> Non
 def test_adjudicator_receives_surrounding_context(tmp_path, monkeypatch) -> None:
     _consensus_setup(monkeypatch)
     _patch_redecode(monkeypatch, "moikka")
+    # Pin the span to the first word only, so "maailma" is context.
+    from vemoizer.spans import Span
+
+    monkeypatch.setattr(pipeline, "_find_spans", lambda a, b: [Span(0.0, 0.45)])
     contexts: list[str] = []
 
     class _SpyClient:
@@ -656,11 +686,9 @@ def test_assembled_output_is_full_coverage_with_paragraphs(
         "/nonexistent.m4a", config_path=str(tmp_path / "none.toml")
     )
 
-    # The verdict is spliced INTO the sentence, not emitted as the only
-    # segment: full coverage.
+    # The whole disputed slice is replaced by the verdict, spliced into the
+    # sentence segment: full coverage, sentence bounds preserved.
     assert len(result["segments"]) == 1
-    assert result["segments"][0]["text"] == "moikka maailma"
-    assert result["text"] == "moikka maailma"
-    assert result["paragraphs"] == [
-        {"start": 0.0, "end": 1.0, "text": "moikka maailma"}
-    ]
+    assert result["segments"][0]["text"] == "moikka"
+    assert result["text"] == "moikka"
+    assert result["paragraphs"] == [{"start": 0.0, "end": 1.0, "text": "moikka"}]

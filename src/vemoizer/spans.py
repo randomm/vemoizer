@@ -41,9 +41,12 @@ lands):
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 #: A pair of aligned words; ``None`` on either side marks an insertion or
 #: deletion (the other decode didn't produce a word there).
@@ -62,10 +65,16 @@ _PUNCTUATION = frozenset(" \t\n\r,.!?;:()[]{}<>\"'`@#$%^&*+=/\\|~_-—–‘’�
 
 @dataclass(frozen=True)
 class Span:
-    """A disputed time range to re-decode: ``[start, end)`` seconds."""
+    """A disputed time range to re-decode: ``[start, end)`` seconds.
+
+    ``language`` is the span's reported language when the pairing carried
+    one (invariant #3: language is a span property); ``None`` when neither
+    side reported.
+    """
 
     start: float
     end: float
+    language: str | None = None
 
     def __post_init__(self) -> None:
         if self.start > self.end:
@@ -142,14 +151,24 @@ def _is_disputed(pair: AlignedPair) -> bool:
 
 
 def _word_span(a: dict[str, Any] | None, b: dict[str, Any] | None) -> Span | None:
-    """The time span covering whichever side of the pair is present."""
+    """The time span covering whichever side of the pair is present.
+
+    The span's language is the first *reported* language on either side —
+    a per-word/-slice detection, never a file-level assumption
+    (invariant #3).
+    """
+    language = None
+    for w in (a, b):
+        if w is not None and w.get("language") is not None:
+            language = str(w["language"])
+            break
     for w in (a, b):
         if w is None:
             continue
         start = float(w.get("start", 0.0))
         end = w.get("end", w.get("start", 0.0))
         end = float(end) if end is not None else start
-        return Span(start, max(start, end))
+        return Span(start, max(start, end), language)
     return None
 
 
@@ -165,7 +184,9 @@ def merge_spans(spans: Sequence[Span]) -> list[Span]:
     for s in ordered:
         if merged and s.start <= merged[-1].end + SPAN_MERGE_GAP_S:
             last = merged.pop()
-            merged.append(Span(last.start, max(last.end, s.end)))
+            # Language survives a merge only when unambiguous.
+            language = last.language if last.language == s.language else None
+            merged.append(Span(last.start, max(last.end, s.end), language))
         else:
             merged.append(s)
     return merged
@@ -225,3 +246,70 @@ def span_context(words: list[dict[str, Any]], span: Span) -> str:
         if lo <= float(w.get("start", 0.0)) < hi
         and not (span.start <= float(w.get("start", 0.0)) < span.end)
     ).strip()
+
+
+# ---------------------------------------------------------------------------
+# Guardrails (issue #55)
+# ---------------------------------------------------------------------------
+
+#: Longest slice the re-decode stage accepts; a longer "dispute" is an
+#: alignment artefact, and Whisper conditions poorly past ~15 s anyway.
+MAX_SPAN_S = 15.0
+
+#: Hard cap on spans per run: each costs one Whisper decode plus one LLM
+#: round-trip, so 300 bounds the stage at minutes, not hours.
+MAX_SPANS = 300
+
+#: Above this fraction of the speech disputed, the comparison itself looks
+#: broken — consensus aborts and the run ships decode A (fail-open).
+MAX_DISPUTED_FRACTION = 0.25
+
+#: The fraction abort only applies to recordings with at least this much
+#: speech. A 3-second clip disputing wholly is normal, and re-decoding all
+#: of it is affordable; the fraction guard exists to bound cost at scale.
+MIN_SPEECH_FOR_FRACTION_GUARD_S = 60.0
+
+
+def apply_span_guardrails(
+    spans: list[Span], *, speech_seconds: float
+) -> list[Span] | None:
+    """Bound *spans* to a sane re-decode workload; ``None`` = abort consensus.
+
+    Overlong spans are clipped to :data:`MAX_SPAN_S`; the earliest
+    :data:`MAX_SPANS` survive a count overflow (keeping the timeline
+    prefix is predictable, and an overflow already means the alignment is
+    noisy); and when the disputed fraction of *speech_seconds* exceeds
+    :data:`MAX_DISPUTED_FRACTION` — or there is no measured speech to
+    compare against — the whole set is rejected so the caller falls back
+    to decode A alone.
+    """
+    if not spans:
+        return []
+    if speech_seconds <= 0:
+        return None
+    disputed = sum(s.end - s.start for s in spans)
+    if (
+        speech_seconds >= MIN_SPEECH_FOR_FRACTION_GUARD_S
+        and disputed / speech_seconds > MAX_DISPUTED_FRACTION
+    ):
+        logger.warning(
+            "disputed fraction %.0f%% exceeds %.0f%%: alignment looks broken, "
+            "aborting consensus (decode A ships as-is)",
+            100.0 * disputed / speech_seconds,
+            100.0 * MAX_DISPUTED_FRACTION,
+        )
+        return None
+    out: list[Span] = []
+    for span in spans:
+        if span.end - span.start > MAX_SPAN_S:
+            span = Span(span.start, span.start + MAX_SPAN_S, span.language)
+        out.append(span)
+    if len(out) > MAX_SPANS:
+        logger.warning(
+            "span count %d exceeds cap %d; keeping the earliest %d",
+            len(out),
+            MAX_SPANS,
+            MAX_SPANS,
+        )
+        out = out[:MAX_SPANS]
+    return out

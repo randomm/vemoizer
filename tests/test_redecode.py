@@ -51,11 +51,11 @@ def _audio(seconds: float, value: float = 0.1) -> np.ndarray:
 
 
 def test_model_id_is_finnish_whisper_large() -> None:
-    assert MODEL_ID == "Finnish-NLP/whisper-large-finnish-v3"
+    assert MODEL_ID == "FredrikKarlssonSpeech/whisper-large-finnish-v3-mlx"
 
 
 def test_model_revision_is_the_pinned_sha() -> None:
-    assert MODEL_REVISION == "b23deb0b3855c829ffe04cb1c6709757ff16d49c"
+    assert MODEL_REVISION == "f51f0310c1b2a3e5acb16905c1a7245bb9476846"
 
 
 # ---------------------------------------------------------------------------
@@ -281,46 +281,35 @@ def test_load_failure_fails_open() -> None:
     assert result.text == ""
 
 
-def test_load_failure_does_not_permanently_disable_redecode() -> None:
-    """A transient download failure must not set ``_loaded``.
+def test_load_failure_latches_instead_of_retrying_per_span() -> None:
+    """A failed model resolve fails open once and latches.
 
-    ``_ensure_loaded`` only marks the model as loaded *after* a
-    successful load. A failure on the first call must allow a retry on
-    the next call, so a transient network blip does not silently disable
-    re-decode for the rest of the run.
+    A run can carry hundreds of disputed spans; retrying a broken
+    download for every one of them turns a single failure into hundreds
+    of network waits (the pathology PR #46 fixed for the decode stages).
+    The latch makes the first failure permanent for the run — every
+    subsequent span fails open immediately, with exactly one
+    snapshot_download attempt.
     """
     mock_whisper = MagicMock()
-    mock_whisper.load_models.load_model.return_value = object()
-    mock_whisper.transcribe.return_value = {"text": "x", "words": []}
+    mock_whisper.transcribe.return_value = {"text": "x", "segments": []}
 
     with (
         patch(
             "huggingface_hub.snapshot_download",
-            side_effect=[
-                RuntimeError("DNS blip"),
-                "/tmp/pinned/path",
-            ],
-        ),
+            side_effect=RuntimeError("DNS blip"),
+        ) as download,
         patch.dict("sys.modules", {"mlx_whisper": mock_whisper}),
     ):
         transcriber = WhisperReDecodeTranscriber()
         audio = _audio(1.0)
-        # First call: load fails; _loaded must stay False so a retry is
-        # possible.
-        result = transcriber.transcribe_span(audio, Span(0.0, 1.0))
-        assert result.ok is False
-        assert transcriber._loaded is False
+        first = transcriber.transcribe_span(audio, Span(0.0, 1.0))
+        second = transcriber.transcribe_span(audio, Span(0.0, 1.0))
 
-        # Second call: a fresh snapshot_download succeeds; the model
-        # loads and the span re-decodes.
-        result = transcriber.transcribe_span(audio, Span(0.0, 1.0))
-        assert result.ok is True
-        assert transcriber._loaded is True
-
-
-# ---------------------------------------------------------------------------
-# Lazy loading: nothing at construction, revision-pinned at first use
-# ---------------------------------------------------------------------------
+    assert first.ok is False
+    assert second.ok is False
+    assert transcriber._load_failed is True
+    assert download.call_count == 1  # latched: no per-span retry
 
 
 def test_construction_does_not_download() -> None:
@@ -368,8 +357,14 @@ def test_first_use_triggers_revision_pinned_download() -> None:
         mock_whisper.transcribe.return_value = {"text": "x", "words": []}
         transcriber.transcribe_span(audio, Span(0.0, 1.0))
         mock_snapshot.assert_called_once_with(MODEL_ID, revision=MODEL_REVISION)
-        # The model was loaded from the local path, not the repo ID.
-        mock_whisper.load_models.load_model.assert_called_once_with("/tmp/pinned/path")
+        # The model is loaded (and cached) by mlx_whisper.transcribe from the
+        # resolved local path — never the bare repo ID, and never a second
+        # copy via load_models.load_model (a dead ~3 GB allocation).
+        mock_whisper.load_models.load_model.assert_not_called()
+        assert (
+            mock_whisper.transcribe.call_args.kwargs["path_or_hf_repo"]
+            == "/tmp/pinned/path"
+        )
 
 
 def test_transcribe_protocol_surface_concatenates_ok_results(

@@ -180,14 +180,7 @@ def _extract_words_segments(
                 for sentence in sentences
                 for token in (getattr(sentence, "tokens", None) or [])
             ]
-        for token in tokens:
-            words.append(
-                {
-                    "word": getattr(token, "text", ""),
-                    "start": float(getattr(token, "start", 0.0)),
-                    "end": float(getattr(token, "end", 0.0)),
-                }
-            )
+        words.extend(_group_tokens_into_words(tokens))
 
         sentences = getattr(aligned, "sentences", None) or []
         for sentence in sentences:
@@ -200,3 +193,37 @@ def _extract_words_segments(
             )
 
     return words, segments
+
+
+def _group_tokens_into_words(tokens: list[Any]) -> list[dict[str, Any]]:
+    """Merge subword tokens into whole words on the leading-space convention.
+
+    ``AlignedResult.tokens`` are SentencePiece-style pieces — ``" B"``,
+    ``"is"``, ``"nestä"`` spell ``"Bisnestä"`` — where a leading space
+    marks a word boundary. Alignment and disputed-span text must see whole
+    words: piece-level DTW flags half-word "disputes" on every tokenizer
+    disagreement between backends.
+    """
+    words: list[dict[str, Any]] = []
+    current_text = ""
+    current_start = 0.0
+    current_end = 0.0
+
+    def _flush() -> None:
+        nonlocal current_text
+        text = current_text.strip()
+        if text:
+            words.append({"word": text, "start": current_start, "end": current_end})
+        current_text = ""
+
+    for token in tokens:
+        text = getattr(token, "text", "")
+        start = float(getattr(token, "start", 0.0))
+        end = float(getattr(token, "end", 0.0))
+        if text.startswith(" ") or not current_text:
+            _flush()
+            current_start = start
+        current_text += text
+        current_end = end
+    _flush()
+    return words

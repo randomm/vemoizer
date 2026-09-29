@@ -261,7 +261,7 @@ class TestParakeetTranscriber:
         t = self._make_transcriber_with_mock()
         words = [
             make_mock_word("hello", 0.0, 0.5),
-            make_mock_word("world", 0.5, 1.0),
+            make_mock_word(" world", 0.5, 1.0),
         ]
         # Real AlignedResult: tokens live on the sentences.
         sentence = make_mock_sentence(text="hello world", start=0.0, end=1.0)
@@ -282,7 +282,7 @@ class TestParakeetTranscriber:
         s1 = make_mock_sentence(text="a b", start=0.0, end=0.1)
         s1.tokens = [make_mock_word("a", 0.0, 0.1)]
         s2 = make_mock_sentence(text="c d", start=1.0, end=1.1)
-        s2.tokens = [make_mock_word("c", 1.0, 1.1)]
+        s2.tokens = [make_mock_word(" c", 1.0, 1.1)]
         t.model.generate.return_value = [
             make_mock_alignment(text="a b c d", sentences=[s1, s2]),
         ]
@@ -322,7 +322,7 @@ class TestParakeetTranscriber:
 class TestExtractWordsSegments:
     def test_flattens_words_and_segments(self):
         w1 = make_mock_word("a", 0.0, 0.1)
-        w2 = make_mock_word("b", 0.1, 0.2)
+        w2 = make_mock_word(" b", 0.1, 0.2)
         s1 = make_mock_sentence(text="a b", start=0.0, end=0.2)
         s1.tokens = [w1, w2]
         aligned = make_mock_alignment(text="a b", sentences=[s1])
@@ -373,3 +373,53 @@ def test_no_sys_modules_pollution_after_import():
 
     assert not isinstance(parakeet_mlx, MagicMock)
     assert getattr(parakeet_mlx, "__file__", None) is not None
+
+
+class TestTokenToWordGrouping:
+    """Subword tokens group into words on the leading-space convention.
+
+    The real AlignedResult tokens are SentencePiece-style pieces
+    (' B', 'is', 'n', 'estä' -> 'Bisnestä'); alignment and span text
+    must see whole words, not pieces (issue #55).
+    """
+
+    def test_pieces_merge_into_words(self):
+        tokens = [
+            make_mock_word(" B", 0.4, 0.48),
+            make_mock_word("is", 0.48, 0.72),
+            make_mock_word("nestä", 0.72, 1.0),
+            make_mock_word(" ja", 1.12, 1.3),
+        ]
+        aligned = MagicMock(spec=["text", "sentences", "tokens"])
+        aligned.text = "Bisnestä ja"
+        aligned.tokens = tokens
+        aligned.sentences = []
+        words, _segments = _extract_words_segments([aligned])
+        assert words == [
+            {"word": "Bisnestä", "start": 0.4, "end": 1.0},
+            {"word": "ja", "start": 1.12, "end": 1.3},
+        ]
+
+    def test_first_token_without_space_starts_a_word(self):
+        tokens = [
+            make_mock_word("Moi", 0.0, 0.3),
+            make_mock_word(" vaan", 0.4, 0.7),
+        ]
+        aligned = MagicMock(spec=["text", "sentences", "tokens"])
+        aligned.text = "Moi vaan"
+        aligned.tokens = tokens
+        aligned.sentences = []
+        words, _segments = _extract_words_segments([aligned])
+        assert [w["word"] for w in words] == ["Moi", "vaan"]
+
+    def test_whitespace_only_tokens_are_dropped(self):
+        tokens = [
+            make_mock_word(" ", 0.0, 0.1),
+            make_mock_word(" ok", 0.2, 0.4),
+        ]
+        aligned = MagicMock(spec=["text", "sentences", "tokens"])
+        aligned.text = "ok"
+        aligned.tokens = tokens
+        aligned.sentences = []
+        words, _segments = _extract_words_segments([aligned])
+        assert words == [{"word": "ok", "start": 0.2, "end": 0.4}]
