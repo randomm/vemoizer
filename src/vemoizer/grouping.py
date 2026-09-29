@@ -259,9 +259,12 @@ def _decode_edge_window(path: Path, start: float, end: float) -> np.ndarray:
 
     ffmpeg seeks (``-ss`` / ``-t``), so a 1-hour file costs a 20 s decode
     instead of a full-file decode (~2.4 GB of transient float32 PCM).
-    The slice is still the truth: ``end`` is clamped to the decoded length
-    (a trailing ffprobe overestimate never over-reads), and the tail start
-    is clamped on the DECODED duration, never container metadata.
+    ffmpeg itself is the clamp: ``-t`` never decodes past the actual media
+    end (a trailing ffprobe overestimate never over-reads) and a negative
+    ``-ss`` (a tail start past the end) seeks to the start — so the
+    requested window is a request, and the decoded bytes are the truth.
+    The tail start is bounded on the probed duration, never container
+    metadata beyond that.
     """
     argv = [
         "ffmpeg",
@@ -348,8 +351,19 @@ def decode_boundaries(
             path = ordered[i]
             dur = probe_duration_seconds(path)
             # No probe evidence (``0.0``): skip the tail rather than
-            # requesting an unbounded decode window (ffprobe failure).
-            tail = _edge_text(path, dur - BOUNDARY_SECONDS, dur) if dur > 0.0 else ""
+            # requesting an unbounded decode window (ffprobe failure) —
+            # say so, since the boundary then degrades to a break with no
+            # tail evidence.
+            if dur > 0.0:
+                tail = _edge_text(path, dur - BOUNDARY_SECONDS, dur)
+            else:
+                logger.warning(
+                    "no duration evidence for %s (ffprobe failed or "
+                    "unreadable); tail probe skipped, boundary will "
+                    "degrade to a break",
+                    path,
+                )
+                tail = ""
             tail_texts.append(tail)
             # The head is the first 20 s of the NEXT file (the one the
             # boundary leads into), not of the current file.

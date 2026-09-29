@@ -326,6 +326,11 @@ def run_batch(
     carry the ``— osa N (äänitys X) —`` markers. Single-part groups
     carry no ``part_markers`` key at all.
 
+    ``--out`` with 2+ files is only honored when the run is a single
+    group (one combined transcript) — otherwise every group would
+    overwrite the same target, so the call fails up front (2) before
+    any decode (``--out -`` for stdout is always fine).
+
     Returns 0 on success, 1 if any group failed, 2 on a bad
     combination of group flags.
     """
@@ -391,6 +396,17 @@ def run_batch(
         return 1
 
     exit_code = 0
+    if out is not None and str(out) != "-" and len(groups) > 1:
+        # Multi-group, explicit --out target: every group would overwrite
+        # the same file (only the last group would survive). Fail up front
+        # rather than silently losing a transcript — one --out per run.
+        typer.echo(
+            f"error: --out {out} with {len(groups)} groups would overwrite "
+            "itself; drop --out (one file per group) or use --out - (stdout) "
+            "or --no-group",
+            err=True,
+        )
+        return 2
     with caffeinate_context():
         for group in groups:
             if len(group) == 1:
@@ -500,8 +516,13 @@ def _write_group_outputs(
     formats: list[str],
     out: Path | None,
 ) -> bool:
-    """Write one group's outputs; True on success (the --out override
-    still applies, as in the plain loop)."""
+    """Write one group's outputs; True on success.
+
+    The ``--out`` override applies only for single-group runs (or stdout,
+    where each group streams in order) — a multi-group run with an explicit
+    file target is rejected up front in :func:`run_batch` before any
+    decode, so it never reaches this loop.
+    """
     if out is not None:
         return _write_output(out, result, formats[0] if formats else "txt")
     stem, _ = nfc_stem_and_suffix(group[0])

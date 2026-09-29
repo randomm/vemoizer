@@ -737,3 +737,169 @@ def test_confirm_groups_interactive_edit_malformed_propagates() -> None:
     inputs = iter(["e", "999 | 998"])
     with pytest.raises(GroupingError, match="unknown part"):
         confirm_groups(files, proposals, input_fn=lambda _: next(inputs))
+
+
+# ---------------------------------------------------------------------------
+# run_batch — multi-group --out must not silently overwrite
+# ---------------------------------------------------------------------------
+
+
+def test_run_batch_out_file_with_multiple_groups_fails_loud(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """`--out file` + 2+ files that confirm as 2 groups: exit 2 up front.
+
+    Without the guard every group would write to the same `--out` path and
+    only the last group's transcript would survive (round-1 adversarial
+    finding, HIGH). Fail up front, before any decode, with a clear message
+    and a non-zero exit — never a silently-lost transcript.
+    """
+    import vemoizer.batch as batch
+    import vemoizer.grouping as grouping
+    import vemoizer.pipeline as pipeline_module
+
+    decode_calls: list[int] = []
+
+    def fake_transcribe_file(path, **kwargs):
+        decode_calls.append(1)
+        return {"text": "hei", "segments": []}
+
+    def fake_decode_boundaries(files, transcribe_fn=None):
+        # Both boundaries break (closing cue in each tail) -> 3 singleton
+        # groups -> 3 writes to the same --out target would be an
+        # overwrite.
+        return ["t1 kiitos", "t2 moi"], ["h1", "h2"]
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.setattr(grouping, "decode_boundaries", fake_decode_boundaries)
+    out = tmp_path / "merged.txt"
+    files = [
+        tmp_path / "Uusi äänitys 425.m4a",
+        tmp_path / "Uusi äänitys 426.m4a",
+        tmp_path / "Uusi äänitys 427.m4a",
+    ]
+    for f in files:
+        f.touch()
+    code = batch.run_batch(
+        files,
+        batch.RunOptions.expert_transcribe(
+            profile="dictation",
+            diarize=False,
+            repair=False,
+            speakers=None,
+            glossary_path=None,
+            config_path=None,
+        ),
+        out=out,
+        yes=True,
+    )
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "--out" in err
+    assert "groups" in err
+    # Up front: no decode ran, nothing written.
+    assert decode_calls == []
+    assert not out.exists()
+
+
+def test_run_batch_out_stdout_with_multiple_groups_is_fine(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """`--out -` (stdout) is always fine — groups stream in order."""
+    import vemoizer.batch as batch
+    import vemoizer.grouping as grouping
+    import vemoizer.pipeline as pipeline_module
+
+    def fake_transcribe_file(path, **kwargs):
+        return {"text": "hei", "segments": []}
+
+    def _two_group_boundaries(files, transcribe_fn=None):
+        # Both boundaries break -> 2 singleton groups -> 2 streams to stdout.
+        return ["t1 kiitos", "t2 moi"], ["h1", "h2"]
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.setattr(grouping, "decode_boundaries", _two_group_boundaries)
+    files = [
+        tmp_path / "Uusi äänitys 425.m4a",
+        tmp_path / "Uusi äänitys 426.m4a",
+        tmp_path / "Uusi äänitys 427.m4a",
+    ]
+    for f in files:
+        f.touch()
+    code = batch.run_batch(
+        files,
+        batch.RunOptions.expert_transcribe(
+            profile="dictation",
+            diarize=False,
+            repair=False,
+            speakers=None,
+            glossary_path=None,
+            config_path=None,
+        ),
+        out=Path("-"),
+        yes=True,
+    )
+    out_text = capsys.readouterr().out
+    assert code == 0
+    # All three groups stream to stdout in order — no overwrite possible.
+    assert out_text.count("hei") == 3
+
+
+def test_run_batch_out_file_with_single_group_is_fine(tmp_path, monkeypatch) -> None:
+    """`--out file` + 2+ files confirming as ONE group: one combined
+    transcript to that path (the intended use)."""
+    import vemoizer.batch as batch
+    import vemoizer.grouping as grouping
+
+    def fake_transcribe_file(path, **kwargs):
+        return {"text": "yksi ja kaksi", "segments": []}
+
+    monkeypatch.setattr("vemoizer.pipeline.transcribe_file", fake_transcribe_file)
+    monkeypatch.setattr(
+        grouping,
+        "decode_boundaries",
+        lambda files, transcribe_fn=None: (["t jatkumossa"], ["h jatkuu"]),
+    )
+    monkeypatch.setattr(grouping, "concat_groups", lambda files: files[0])
+    monkeypatch.setattr(grouping, "part_offsets", lambda files: [])
+    out = tmp_path / "merged.txt"
+    files = [tmp_path / "Uusi äänitys 425.m4a", tmp_path / "Uusi äänitys 426.m4a"]
+    for f in files:
+        f.touch()
+    code = batch.run_batch(
+        files,
+        batch.RunOptions.expert_transcribe(
+            profile="dictation",
+            diarize=False,
+            repair=False,
+            speakers=None,
+            glossary_path=None,
+            config_path=None,
+        ),
+        out=out,
+        yes=True,
+    )
+    assert code == 0
+    assert out.read_text(encoding="utf-8").strip() == "yksi ja kaksi"
+
+
+def test_probe_failure_logs_a_warning(tmp_path, monkeypatch, caplog) -> None:
+    """A file with no ffprobe duration evidence logs a clear warning (the
+    tail probe is skipped, not silently absent) — round-1 finding 3."""
+    import vemoizer.grouping as grouping
+
+    monkeypatch.setattr(grouping, "probe_duration_seconds", lambda p: 0.0)
+    monkeypatch.setattr(
+        grouping,
+        "_decode_edge_window",
+        lambda path, start, end: np.zeros(16000, dtype=np.float32),
+    )
+    files = [tmp_path / "Uusi äänitys 425.m4a", tmp_path / "Uusi äänitys 426.m4a"]
+    for f in files:
+        f.touch()
+    with caplog.at_level("WARNING", logger="vemoizer.grouping"):
+        tails, heads = decode_boundaries(files, transcribe_fn=lambda a: {"text": "x"})
+    assert tails == [""]  # tail skipped (no evidence), head still decoded
+    assert heads == ["x"]
+    assert any("no duration evidence" in m for m in caplog.messages)
+    assert any("tail probe skipped" in m for m in caplog.messages)

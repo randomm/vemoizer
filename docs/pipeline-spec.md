@@ -389,6 +389,12 @@ ffprobe) are written to the result as `part_markers` (`{"offset",
 `— osa N (äänitys X) —` marker per part. Single-part groups carry no
 `part_markers` key at all. A single file skips grouping entirely.
 
+`--out` with 2+ files is honored only when the run ends up as a single
+group (one combined transcript to that path); `--out -` (stdout) is
+always fine (groups stream in order). An explicit `--out` file path with
+2+ files that would produce more than one group fails up front (exit 2,
+before any decode) instead of later groups overwriting the earlier ones.
+
 Streams: progress bars and warnings go to **stderr**; transcripts and
 summaries go to **stdout** (pipeable). On battery power a warning is
 emitted to stderr before long transcription.
