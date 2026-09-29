@@ -236,6 +236,36 @@ def transcribe(
                 typer.echo(f"error: {result['error']}", err=True)
                 exit_code = 1
                 continue
+            # Fail loud (issue #78): an empty transcript — no text and no
+            # segments, no "error" key — must not look like success. This
+            # intentionally catches legitimately-empty (silent) audio too;
+            # there is no pipeline marker distinguishing silence, so the
+            # simple rule is to treat any empty result as a failure. Checked
+            # before file writing so no output files are produced on failure.
+            if (
+                not result.get("text")
+                and not result.get("segments")
+                and "error" not in result
+            ):
+                typer.echo(f"error: no transcript produced for {file.name}", err=True)
+                exit_code = 1
+                continue
+            # Fail loud (issue #78): the user asked for speaker labels but
+            # none came back. Distinct from the empty-transcript rule above:
+            # that fires only when there are NO segments, so these two never
+            # double-report on a single result. if/elif keeps them exclusive.
+            elif (
+                diarize
+                and result.get("segments")
+                and not any("speaker" in seg for seg in result["segments"])
+            ):
+                typer.echo(
+                    f"error: --diarize requested but no speaker labels "
+                    f"returned for {file.name}",
+                    err=True,
+                )
+                exit_code = 1
+                continue
             stem, _suffix = nfc_stem_and_suffix(file)
             if out is not None:
                 ok = _write_output(out, result, formats[0] if formats else "txt")
