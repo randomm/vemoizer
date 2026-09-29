@@ -164,6 +164,14 @@ def run_meeting_eval(
     scales to a future multi-sample meeting set). A crashing backend scores
     the sample as an empty hypothesis (WER 1.0 against a non-empty
     reference, term-hit 0.0).
+
+    This function walks and decodes its own samples — it does not reuse
+    the per-sample hypotheses from :func:`run_eval` — deliberately, so
+    the WER gate stays independent of the informational term-hit metric
+    (a corpus without a ``.terms`` pair scores WER as before, and the
+    meeting metric can be dropped or changed without touching the gate).
+    The cost is one extra decode pass per meeting sample (informational
+    CI-gate path, not the hot path).
     """
     if not corpus_dir.is_dir():
         raise FileNotFoundError(f"corpus directory not found: {corpus_dir}")

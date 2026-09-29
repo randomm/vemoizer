@@ -96,6 +96,29 @@ def test_transcribe_decodes_each_window_separately() -> None:
     assert result["segments"][0]["text"] == "moro vaan"
 
 
+def test_window_returning_none_raises_with_window_index() -> None:
+    """A None result from mlx_whisper.transcribe (transient GPU / MLX
+    memory fault) must not die mid-loop on an AttributeError; the failing
+    window index must be named."""
+    raw = _raw(
+        [
+            _seg(
+                "moro",
+                [{"word": " moro", "start": 0.0, "end": 0.5}],
+            )
+        ]
+    )
+    mock = _mock_whisper(None)
+    mock.transcribe.side_effect = [raw, None]
+    with (
+        patch.dict("sys.modules", {"mlx_whisper": mock}),
+        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
+    ):
+        t = WhisperTranscriber()
+        with pytest.raises(RuntimeError, match="window 1"):
+            t.transcribe(_audio(60.0))
+
+
 def test_transcribe_empty_audio_short_circuits() -> None:
     mock = _mock_whisper({})
     with (

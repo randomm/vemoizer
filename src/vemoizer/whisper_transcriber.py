@@ -144,7 +144,7 @@ class WhisperTranscriber:
 
         window_frames = int(WINDOW_SECONDS * SAMPLE_RATE)
         raws: list[dict[str, Any]] = []
-        for offset in range(0, len(audio), window_frames):
+        for index, offset in enumerate(range(0, len(audio), window_frames)):
             raw = self._mlx_whisper.transcribe(
                 audio[offset : offset + window_frames],
                 path_or_hf_repo=self._model_path,
@@ -153,6 +153,15 @@ class WhisperTranscriber:
                 task="transcribe",
                 **options,
             )
+            if raw is None:
+                # A transient GPU fault / MLX memory pressure can make
+                # mlx_whisper.transcribe return None instead of raising;
+                # name the failing window instead of dying mid-loop on
+                # an opaque AttributeError in raw.get below.
+                raise RuntimeError(
+                    f"whisper window {index} (offset {offset / SAMPLE_RATE:.0f}s) "
+                    "returned None"
+                )
             raws.append(raw)
         transcribe_time = time.time() - start
         audio_duration = len(audio) / SAMPLE_RATE

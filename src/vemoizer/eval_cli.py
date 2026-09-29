@@ -209,6 +209,13 @@ def _emit_meeting_term_hits(corpus: Path, transcribe: Callable[[Path], str]) -> 
     only if term hits rise and WER does not regress). Absent meeting
     fixtures (a corpus without a ``.terms`` pair) nothing is emitted:
     the WER gate above is unaffected.
+
+    A 0.0 term-hit here can reflect a failed decode on this second pass
+    rather than a true 0% survival rate: the harness catches the exception
+    and scores the sample as empty (the WER number above, computed on the
+    first pass, already says the decode succeeded). The failure is logged
+    at WARNING level ("transcription failed for ...; scoring as empty")
+    by the harness.
     """
     meeting = run_meeting_eval(corpus, transcribe)
     samples = [s for s in meeting if s != AGGREGATE_KEY]

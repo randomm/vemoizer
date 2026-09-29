@@ -22,13 +22,14 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # mlx-whisper keeps only the LAST 223 prompt tokens per decode window
-# (n_text_ctx=448 in decoding.py: prompt_tokens[-(n_ctx // 2 - 1):]), and
-# those 223 must hold the previous-text tail plus the glossary. The
-# glossary gets 150 of them — the rest is previous text, because
-# whisper's rolling context (condition_on_previous_text) is what carries
-# the recording forward.
+# (n_text_ctx=448 in decoding.py: prompt_tokens[-(n_ctx // 2 - 1):]).
+# The glossary prompt is capped at 150 tokens so the glossary itself can
+# always fit in that 223-token keep-window; nothing here reserves tokens
+# for the previous-text tail (the decoded text may occupy the rest). The
+# glossary actually reaching every window is the per-window re-seeding in
+# whisper_transcriber (each 30 s window is its own transcribe() call that
+# re-applies the initial_prompt), not a tail reservation.
 GLOSSARY_PROMPT_TOKEN_BUDGET = 150
-PREVIOUS_TEXT_TOKEN_BUDGET = 223 - GLOSSARY_PROMPT_TOKEN_BUDGET
 
 _PROMPT_PREFIX = "Sanasto: "
 _SEPARATOR = ", "
@@ -204,9 +205,11 @@ def glossary_prompt(terms: list[str], tokenizer: Any | None = None) -> str | Non
 
     Budgeted in WHISPER TOKENS, not characters (issue #76): the string must
     fit in ``GLOSSARY_PROMPT_TOKEN_BUDGET`` tokens INCLUDING the
-    ``"Sanasto: "`` prefix and the trailing period, leaving
-    ``PREVIOUS_TEXT_TOKEN_BUDGET`` tokens for the previous-text tail so the
-    combined prompt stays under the 223-token window mlx-whisper keeps.
+    ``"Sanasto: "`` prefix and the trailing period, so the glossary itself
+    can always fit in the 223-token keep-window mlx-whisper retains. The
+    previous text is not budgeted here; the per-window re-seeding in
+    whisper_transcriber is what guarantees the glossary reaches every
+    decoding window.
 
     Priority is inverted from file order: the LAST-listed term is the
     highest-priority and sits at the TAIL of the prompt string (the part
@@ -260,9 +263,12 @@ def glossary_prompt(terms: list[str], tokenizer: Any | None = None) -> str | Non
     kept.reverse()  # prompt order = file order, highest-priority last
 
     if dropped:
+        # The dropped list is in reverse file order: it leads with the
+        # LOWEST-priority (earliest-listed) casualties, not the most
+        # important ones, so say so explicitly.
         logger.warning(
             "glossary: %d terms dropped (prompt budget %d tokens exceeded); "
-            "dropped: %s",
+            "dropped, lowest priority first: %s",
             len(dropped),
             GLOSSARY_PROMPT_TOKEN_BUDGET,
             ", ".join(dropped[:10]) + ("…" if len(dropped) > 10 else ""),
