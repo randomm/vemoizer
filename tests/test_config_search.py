@@ -4,9 +4,9 @@ Covers the search run by ``vemoizer.llm.load_default_config`` with no
 explicit path (via the injectable ``_default_search`` so the dev machine's
 live ``~/.config/vemoizer/config.toml`` never leaks in):
 
-- Precedence: ``~/.vemoizer/config.toml`` beats the nearest
-  ``./.vemoizer/config.toml``; the project walk-up (CWD upward, nearest
-  wins) beats the legacy locations.
+- Precedence: the nearest ``./.vemoizer/config.toml`` (walk-up from CWD,
+  nearest wins) beats ``~/.vemoizer/config.toml``; the project walk-up
+  beats the legacy locations.
 - ``os.devnull`` and a missing explicit path short-circuit the search.
 - Strict validation on the new paths: unknown top-level keys/sections and
   unknown ``[llm]`` keys raise ``ConfigError`` naming the key; other
@@ -83,11 +83,20 @@ def _write_section(path: Path, section: str) -> Path:
 
 
 class TestPrecedence:
-    def test_home_vemoizer_wins(self, tmp_path: Path) -> None:
+    def test_home_config_loads_when_no_project_layer(self, tmp_path: Path) -> None:
         _write_valid(tmp_path / "home" / ".vemoizer" / "config.toml", "h", "home-model")
         cfg = _search_in(tmp_path)
         assert cfg is not None
         assert cfg.model == "home-model"
+
+    def test_project_layer_beats_home_layer(self, tmp_path: Path) -> None:
+        # Precedence (issue #82): the nearest ./.vemoizer/config.toml
+        # (walk up from CWD) beats ~/.vemoizer/config.toml.
+        _write_valid(tmp_path / "home" / ".vemoizer" / "config.toml", "x", "home-model")
+        _write_valid(tmp_path / "proj" / ".vemoizer" / "config.toml", "x", "proj-model")
+        cfg = _search_in(tmp_path)
+        assert cfg is not None
+        assert cfg.model == "proj-model"
 
     def test_project_config_beats_legacy(self, tmp_path: Path) -> None:
         _write_valid(
@@ -111,10 +120,23 @@ class TestPrecedence:
         assert cfg is not None
         assert cfg.model == "nested-model"
 
-    def test_walk_up_stops_at_root_not_crossing_into_home(self, tmp_path: Path) -> None:
-        # A home-level config exists; the walk-up must not reach it (the
-        # home check is a separate layer, the walk-up stays in the tree).
+    def test_project_layer_wins_when_no_walk_up_hit(self, tmp_path: Path) -> None:
+        # No project layer on the walk-up: the search falls through to
+        # the home layer (project-first precedence, issue #82).
         _write_valid(tmp_path / "home" / ".vemoizer" / "config.toml", "x", "home-model")
+        cfg = _search_in(tmp_path)
+        assert cfg is not None
+        assert cfg.model == "home-model"
+
+    def test_home_config_used_when_no_project_layer(self, tmp_path: Path) -> None:
+        # Walk-up finds nothing; the home .vemoizer config is the one
+        # actually used (and the legacy file, if present, is not).
+        _write_valid(tmp_path / "home" / ".vemoizer" / "config.toml", "x", "home-model")
+        _write_valid(
+            tmp_path / "home" / ".config" / "vemoizer" / "config.toml",
+            "x",
+            "legacy-model",
+        )
         cfg = _search_in(tmp_path)
         assert cfg is not None
         assert cfg.model == "home-model"

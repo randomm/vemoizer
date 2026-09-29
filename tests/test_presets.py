@@ -12,7 +12,6 @@ override precedence (CLI > layers > preset defaults).
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
@@ -55,13 +54,15 @@ class TestMeetingPreset:
         assert opts.llm_terms == []
         assert opts.corrections == {}
 
-    def test_config_path_is_devnull_sentinel(
+    def test_config_path_is_none_so_the_layered_search_runs(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # The presets short-circuit the config search: os.devnull, not
-        # None (None = "probe the defaults").
+        # Without --config the presets must NOT short-circuit the search:
+        # config_path=None so llm.load_default_config runs the layered
+        # search (~/.vemoizer + nearest ./.vemoizer + legacy). Only an
+        # explicit caller (e.g. eval) passes "os.devnull".
         opts = _opts("meeting", None, None, capsys)
-        assert opts.config_path == os.devnull
+        assert opts.config_path is None
 
     def test_meeting_terms_seed_whisper_prompt_and_llm(
         self, capsys: pytest.CaptureFixture[str]
@@ -139,11 +140,12 @@ class TestMemoPreset:
         opts = _opts("memo", layers, None, capsys)
         assert opts.corrections == {"Blacksit": "Flagship"}
 
-    def test_config_path_is_devnull_sentinel(
+    def test_config_path_is_none_so_the_layered_search_runs(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        # Same as meeting: None means the layered config search runs.
         opts = _opts("memo", None, None, capsys)
-        assert opts.config_path == os.devnull
+        assert opts.config_path is None
 
 
 class TestCliOverrides:
@@ -166,7 +168,7 @@ class TestCliOverrides:
         assert opts.whisper_prompt == []
         assert opts.corrections == {}
 
-    def test_explicit_config_wins_over_devnull(
+    def test_explicit_config_wins_over_the_default_search(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         cfg = Path("/tmp/some/config.toml")

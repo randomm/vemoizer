@@ -3,8 +3,9 @@
 The LLM is optional, configured, and OpenAI-compatible (AGENTS.md
 invariant #5). The client never raises: on any failure it returns the
 un-adjudicated transcript (fail-open). Config search is layered (M2):
-``~/.vemoizer/config.toml`` → nearest ``./.vemoizer/config.toml`` →
-legacy ``~/.config/vemoizer/config.toml`` + ``~/.vemoizer.toml``.
+nearest ``./.vemoizer/config.toml`` (walk up from CWD) →
+``~/.vemoizer/config.toml`` → legacy
+``~/.config/vemoizer/config.toml`` + ``~/.vemoizer.toml``.
 An explicit path (or ``"os.devnull"``) short-circuits the search.
 """
 
@@ -401,7 +402,8 @@ def _default_search(
     cwd: Callable[[], Path] | None = None,
     legacy_paths: tuple[Path, ...] | None = None,
 ) -> LLMConfig | None:
-    """Run the layered search; injectable hooks for tests only."""
+    """Run the layered search (project walk-up → home → legacy); injectable
+    hooks for tests only."""
     if home is None:
         home = Path.home
     if cwd is None:
@@ -409,13 +411,15 @@ def _default_search(
     if legacy_paths is None:
         legacy_paths = _LEGACY_CONFIG_PATHS
 
-    home_config = home() / ".vemoizer" / "config.toml"
-    if home_config.is_file():
-        return _strict_load(home_config)
-
+    # Project layer first: the nearest ./.vemoizer/config.toml walking
+    # up from CWD wins over the home layer (issue #82 precedence).
     project_config = _find_nearest_vemoizer_config(cwd())
     if project_config is not None:
         return _strict_load(project_config)
+
+    home_config = home() / ".vemoizer" / "config.toml"
+    if home_config.is_file():
+        return _strict_load(home_config)
 
     return _legacy_search(legacy_paths)
 
@@ -425,8 +429,9 @@ def load_default_config(path: str | None = None) -> LLMConfig | None:
 
     Explicit path short-circuit: ``"os.devnull"`` or a missing path →
     ``None``; a real path loads under legacy fail-open rules. With no
-    path, the search runs: ``~/.vemoizer`` → nearest ``./.vemoizer`` →
-    legacy (fail-open, deprecation notice on ``~/.config`` only).
+    path, the search runs: nearest ``./.vemoizer`` (walk up from CWD) →
+    ``~/.vemoizer`` → legacy (fail-open, deprecation notice on
+    ``~/.config`` only).
     """
     if path is not None:
         if path == DEVNULL_SENTINEL:

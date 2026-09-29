@@ -305,9 +305,10 @@ with a dated, sanitized title and NFC collision suffix; one `wrote
 
 The glossary is the merged result of `~/.vemoizer/glossary.txt` and
 the nearest `./.vemoizer/glossary.txt` (project layer winning, M0
-token budget applied, `@`-prefixed terms LLM-only — see Glossary
-layers below). `--glossary` replaces both layers entirely (no merge).
-`--config` replaces the layered config search entirely.
+token budget applied when the prompt is built — see Glossary layers
+below), with `@`-prefixed terms LLM-only. `--glossary` replaces both
+layers entirely (no merge). `--config` replaces the layered config
+search entirely.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -404,18 +405,21 @@ the un-adjudicated transcript is returned.
 level — there is no per-key merging):
 
 1. **`--config` flag** (explicit path): short-circuits the search
-   entirely. The special value `"os.devnull"` (the `os.devnull` string
-   as documented in `presets.RunOptions.config_path`) loads nothing and
-   returns `None`.
-2. **`~/.vemoizer/config.toml`** (home layer): strict validation — an
-   unknown key under `[llm]` or an unknown top-level key/section raises
-   `ConfigError` naming the offending key. Missing file: silently
-   skipped (fail-open) to the next layer.
-3. **Nearest `./.vemoizer/config.toml`** walking up from CWD to the
-   filesystem root (project layer): same strict rules. Nearest wins —
-   the walk stops at the first directory that has a `.vemoizer` folder.
-   Symlink loops are prevented by tracking the resolved real path of
-   each directory visited.
+   entirely; the path is passed straight through to
+   `load_default_config(path)` (missing/unreadable files fail open to
+   no LLM). The special value `"os.devnull"` loads nothing and returns
+   `None`. The presets (`meeting` / `memo`) pass `None` when no
+   `--config` is given, so the layered search runs — they never emit the
+   sentinel themselves (only explicit callers such as the eval harness
+   do).
+2. **Nearest `./.vemoizer/config.toml`** (project layer): strict
+   validation — an unknown key under `[llm]` or an unknown top-level
+   key/section raises `ConfigError` naming the offending key. The
+   walk-up starts at the CWD and stops at the filesystem root; nearest
+   wins. Symlink loops are prevented by tracking the resolved real path
+   of each directory visited.
+3. **`~/.vemoizer/config.toml`** (home layer): same strict rules. Used
+   only when the project walk-up finds nothing.
 4. **Legacy paths** (fail-open, pre-M2 semantics, unchanged):
    `~/.config/vemoizer/config.toml` then `~/.vemoizer.toml`. When the
    `~/.config/…` file is the one actually used, a one-line deprecation
@@ -444,8 +448,9 @@ glossary for the `meeting` and `memo` presets:
   (no I/O, no printing). Returns `(merged_terms, merged_corrections,
   notices)`:  
   - Prompt terms: project first, case-insensitive dedupe keeping the
-    project spelling. The M0 token budget is applied after merge and
-    the lowest-priority (earliest-listed) terms are dropped first; each
+    project spelling. The M0 token budget is applied when the prompt is
+    built (by `glossary_prompt`, after the merge) and the
+    lowest-priority (earliest-listed) terms are dropped first; each
     dropped term is named in `notices`. `@`-prefixed LLM-only terms
     are excluded from the budget entirely (they never enter the whisper
     prompt).

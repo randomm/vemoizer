@@ -32,7 +32,6 @@ project value wins.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, replace
 
 from vemoizer.diarization import SpeakerCount
@@ -62,11 +61,14 @@ class RunOptions:
     (repair / notes) at no budget — they are spelling references, not
     recognition seeds.
 
-    ``config_path`` is the explicit ``--config`` path when given,
-    otherwise ``os.devnull``: the "no LLM config" sentinel the pipeline
-    already honours, which short-circuits the config search entirely
-    (the presets' config resolution happens in ``llm.load_default_config``'
-    M2 successor, not per-file here).
+    ``config_path`` is the explicit ``--config`` path when given, otherwise
+    ``None``: the layered config search runs (``llm.load_default_config`` —
+    nearest ``./.vemoizer/config.toml`` (walk-up, project wins) →
+    ``~/.vemoizer/config.toml`` → legacy ``~/.config/vemoizer/config.toml``
+    and other legacy paths). ``"os.devnull"`` remains a valid *explicit*
+    value (e.g. for the eval harness); the presets themselves never emit
+    it, because short-circuiting the search would bypass the LLM/notes/repair
+    configuration in the user's ``.vemoizer`` config files.
     """
 
     profile: str
@@ -153,7 +155,8 @@ def resolve_options(
             repair=True,
             speakers=MEETING_SPEAKERS,
             glossary_path=None,
-            config_path=os.devnull,
+            # None: the layered config search runs (see class docstring).
+            config_path=None,
             whisper_prompt=[],
             llm_terms=[],
             corrections={},
@@ -167,7 +170,8 @@ def resolve_options(
             repair=False,
             speakers=None,
             glossary_path=None,
-            config_path=os.devnull,
+            # None: the layered config search runs (see class docstring).
+            config_path=None,
             whisper_prompt=[],
             llm_terms=[],
             corrections={},
