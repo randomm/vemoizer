@@ -35,13 +35,14 @@ import numpy as np
 from .alignment import WordPairs, align_pairs_safe
 from .audio_contract import SAMPLE_RATE
 from .canary_transcriber import CanaryTranscriber
-from .diarization import diarize
+from .diarization import diarize, speaker_for_span
 from .ingest import IngestError, ingest_audio
 from .llm import LLMClient, LLMConfig, load_config
 from .parakeet_transcriber import ParakeetTranscriber
 from .progress import StageProgress, format_duration
+from .readability import paragraphs, splice_verdicts
 from .redecode import WhisperReDecodeTranscriber
-from .spans import Span, find_disputed_spans
+from .spans import Span, find_disputed_spans, span_context, words_in_span
 from .vad import SpeechSegment, vad_segments
 from .vad import load_model as load_vad_model
 
@@ -185,25 +186,17 @@ def _redecode_spans(
         redecoder.cleanup()
 
 
-def _words_in_span(words: list[dict[str, Any]], span: Span) -> str:
-    """The *words* falling inside *span*, joined (A-side span text)."""
-    return " ".join(
-        str(w.get("word", ""))
-        for w in words
-        if span.start <= float(w.get("start", 0.0)) < span.end
-    ).strip()
-
-
 def _adjudicate(
     span: Span,
     a_text: str,
     candidates: list[Candidate],
     client: LLMClient | None,
+    context: str = "",
 ) -> str:
     """Final text for one disputed span, fail-open down the candidate list."""
     if client is not None:
         try:
-            verdict = client.adjudicate(a_text, candidates)
+            verdict = client.adjudicate(a_text, candidates, context)
             if verdict.strip():
                 return verdict
         except Exception as e:  # noqa: BLE001 - fail-open stage boundary
@@ -217,26 +210,6 @@ def _adjudicate(
         if candidate["text"].strip():
             return candidate["text"]
     return a_text
-
-
-def _speaker_for_segment(
-    seg_start: float,
-    seg_end: float,
-    speaker_segments: list[tuple[float, float, str]],
-) -> str | None:
-    """Pick the speaker whose segment overlaps ``[seg_start, seg_end)`` the most.
-
-    ``None`` when no speaker segment overlaps the disputed span (fail-open,
-    so callers can omit the ``speaker`` key rather than guessing).
-    """
-    best: str | None = None
-    best_overlap = 0.0
-    for s_start, s_end, speaker in speaker_segments:
-        overlap = min(seg_end, s_end) - max(seg_start, s_start)
-        if overlap > best_overlap:
-            best_overlap = overlap
-            best = speaker
-    return best
 
 
 def _assemble(
@@ -259,45 +232,72 @@ def _assemble(
     with the speaker whose segment overlaps the disputed span the most. The
     ``speaker`` key is omitted when no speaker segment overlaps, so downstream
     formatters can render the label only when it is actually known.
+
+    The adjudicated verdicts are spliced INTO decode A's sentence segments
+    (full coverage), so the transcript files stay whole instead of
+    collapsing to the disputed fragments. With zero disputed spans the
+    output text is byte-identical to decode A's.
     """
     base = result_a or result_b
     if base is None:
         return {"text": "", "segments": []}
 
     words = list(base.get("words") or [])
+    words_b = list((result_b or {}).get("words") or [])
     spans = find_disputed_spans(pairs) if pairs else []
     redecoded = redecoded or []
 
     client = LLMClient(llm_config) if llm_config is not None else None
-    segments: list[dict[str, Any]] = []
+    verdicts: list[dict[str, Any]] = []
     # One LLM round-trip per span when adjudication is configured; without a
     # heartbeat this loop is the pipeline's second silent multi-minute stage.
     progress = StageProgress("adjudicate", len(spans), unit="spans")
-    for i, span in enumerate(spans):
-        rd = redecoded[i] if i < len(redecoded) else None
-        candidates: list[Candidate] = [
-            {"source": "decode A", "text": _words_in_span(words, span)},
-        ]
-        if result_b is not None:
-            b_text = str(result_b.get("text", ""))
-            candidates.append({"source": "decode B", "text": b_text})
-        candidates.append({"source": "re-decode", "text": rd["text"] if rd else ""})
-        verdict = _adjudicate(span, candidates[0]["text"], candidates, client)
-        segment: dict[str, Any] = {
-            "start": span.start,
-            "end": span.end,
-            "text": verdict,
-        }
-        if speaker_segments is not None:
-            speaker = _speaker_for_segment(span.start, span.end, speaker_segments)
-            if speaker is not None:
-                segment["speaker"] = speaker
-        segments.append(segment)
-        progress.advance()
+    try:
+        for i, span in enumerate(spans):
+            rd = redecoded[i] if i < len(redecoded) else None
+            a_text = words_in_span(words, span)
+            candidates: list[Candidate] = [
+                {"source": "decode A", "text": a_text},
+            ]
+            if words_b:
+                # Span-scoped: only decode B's words inside the span. The
+                # whole decode-B text as a candidate (the old behaviour) fed
+                # the adjudicator the entire transcript for every span.
+                candidates.append(
+                    {"source": "decode B", "text": words_in_span(words_b, span)}
+                )
+            if rd is not None and rd.get("ok"):
+                candidates.append({"source": "re-decode", "text": rd["text"]})
+            context = span_context(words, span)
+            verdict = _adjudicate(span, a_text, candidates, client, context)
+            entry: dict[str, Any] = {
+                "start": span.start,
+                "end": span.end,
+                "text": verdict,
+            }
+            if speaker_segments is not None:
+                speaker = speaker_for_span(span.start, span.end, speaker_segments)
+                if speaker is not None:
+                    entry["speaker"] = speaker
+            verdicts.append(entry)
+            progress.advance()
+    finally:
+        progress.done()
+        if client is not None:
+            client.close()
 
-    progress.done()
-    segments.sort(key=lambda s: s["start"])
-    return {"text": str(base.get("text", "")).strip(), "segments": segments}
+    verdicts.sort(key=lambda s: s["start"])
+    base_text = str(base.get("text", "")).strip()
+    sentences = list(base.get("segments") or [])
+    if verdicts and not sentences:
+        # A backend without sentence segments cannot be spliced; keep the
+        # verdict list as the segments (the pre-splice contract).
+        return {"text": base_text, "segments": verdicts}
+    text, segments = splice_verdicts(base_text, words, sentences, verdicts)
+    result: dict[str, Any] = {"text": text, "segments": segments}
+    if verdicts:
+        result["paragraphs"] = paragraphs(segments)
+    return result
 
 
 def transcribe_decode_only(path: str | Path, *, backend: str) -> dict[str, Any]:

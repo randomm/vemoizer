@@ -494,3 +494,45 @@ def test_format_transcript_rejects_unknown_format() -> None:
 
     with pytest.raises(ValueError, match="Unknown output format"):
         format_transcript(TRANSCRIPT, "csv")
+
+
+# -- paragraphs (issue #53) ----------------------------------------------
+
+
+def test_txt_prefers_paragraphs_when_present() -> None:
+    transcript = {
+        "text": "eka lause toka lause",
+        "segments": [
+            {"start": 0.0, "end": 1.0, "text": "eka lause"},
+            {"start": 4.0, "end": 5.0, "text": "toka lause"},
+        ],
+        "paragraphs": [
+            {"start": 0.0, "end": 1.0, "text": "eka lause"},
+            {"start": 4.0, "end": 5.0, "text": "toka lause", "speaker": "S1"},
+        ],
+    }
+    rendered = format_txt(transcript)
+    # Blank-line separated paragraph blocks, speaker prefix when known.
+    assert rendered == "eka lause\n\n[S1] toka lause\n"
+
+
+def test_txt_without_paragraphs_falls_back_to_segments() -> None:
+    transcript = {
+        "text": "x",
+        "segments": [{"start": 0.0, "end": 1.0, "text": "vain segmentti"}],
+    }
+    assert format_txt(transcript) == "vain segmentti\n"
+
+
+def test_json_carries_paragraphs_when_present() -> None:
+    transcript = {
+        "text": "x",
+        "paragraphs": [{"start": 0.0, "end": 1.0, "text": "kappale"}],
+    }
+    data = json.loads(format_json(transcript))
+    assert data["paragraphs"] == [{"start": 0.0, "end": 1.0, "text": "kappale"}]
+
+
+def test_json_omits_empty_paragraphs() -> None:
+    data = json.loads(format_json({"text": "x", "paragraphs": []}))
+    assert "paragraphs" not in data

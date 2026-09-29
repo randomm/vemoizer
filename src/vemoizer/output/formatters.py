@@ -128,7 +128,22 @@ def _caption_entries(
 
 
 def format_txt(transcript: dict[str, Any]) -> str:
-    """Plain text: segments joined by newlines, or the ``text`` field."""
+    """Plain text: paragraphs, else segments, else the ``text`` field.
+
+    Paragraph blocks (from the readability stage) are blank-line separated
+    and carry a speaker prefix when known — the shape a human actually
+    reads. Without paragraphs the pre-existing renderings are unchanged.
+    """
+    paragraphs = transcript.get("paragraphs")
+    if isinstance(paragraphs, list) and paragraphs:
+        blocks: list[str] = []
+        for para in paragraphs:
+            body = str(para.get("text", "")).strip()
+            if not body:
+                continue
+            blocks.append(_speaker_label(para) + body)
+        if blocks:
+            return "\n\n".join(blocks) + "\n"
     segments = _segments(transcript)
     if segments:
         lines: list[str] = []
@@ -156,6 +171,8 @@ def format_json(transcript: dict[str, Any]) -> str:
         out["language"] = transcript["language"]
     if "speakers" in transcript and transcript["speakers"]:
         out["speakers"] = transcript["speakers"]
+    if "paragraphs" in transcript and transcript["paragraphs"]:
+        out["paragraphs"] = transcript["paragraphs"]
     if "segments" in transcript and transcript["segments"]:
         out["segments"] = transcript["segments"]
     if "words" in transcript and transcript["words"]:

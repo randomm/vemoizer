@@ -97,3 +97,23 @@ def diarize(audio: np.ndarray, *, device: str = "auto") -> DiarizationResult:
         for turn in diarization.itertracks(yield_label=True)
     ]
     return DiarizationResult(segments=segments)
+
+
+def speaker_for_span(
+    seg_start: float,
+    seg_end: float,
+    speaker_segments: list[tuple[float, float, str]],
+) -> str | None:
+    """Pick the speaker whose segment overlaps ``[seg_start, seg_end)`` the most.
+
+    ``None`` when no speaker segment overlaps the disputed span (fail-open,
+    so callers can omit the ``speaker`` key rather than guessing).
+    """
+    best: str | None = None
+    best_overlap = 0.0
+    for s_start, s_end, speaker in speaker_segments:
+        overlap = min(seg_end, s_end) - max(seg_start, s_start)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best = speaker
+    return best
