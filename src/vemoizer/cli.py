@@ -251,16 +251,22 @@ def transcribe(
         from vemoizer.batch import run_batch
         from vemoizer.presets import RunOptions
 
-        batch_options = RunOptions(
+        if copy:
+            # The plain loop honors --copy; the batch loop does not (one
+            # clipboard per group is not a sensible multi-file contract),
+            # so the narrowing is made explicit rather than silent.
+            typer.echo(
+                "warning: --copy is only honored for a single file; "
+                "skipped for multi-file runs",
+                err=True,
+            )
+        batch_options = RunOptions.expert_transcribe(
             profile=profile,
             diarize=diarize,
             repair=repair,
             speakers=speaker_count,
             glossary_path=str(glossary) if glossary is not None else None,
             config_path=str(config) if config is not None else None,
-            whisper_prompt=[],
-            llm_terms=[],
-            corrections={},
         )
         exit_code = run_batch(
             files,

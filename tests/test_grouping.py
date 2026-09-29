@@ -306,7 +306,12 @@ def test_propose_groups_parts_are_sorted_names() -> None:
 def test_decode_boundaries_calls_transcribe_once_per_edge(
     tmp_path, monkeypatch
 ) -> None:
-    """Each file's tail and its next file's head are decoded once each."""
+    """Each file's tail and its next file's head are decoded once each.
+
+    The decode is bounded to the 20 s edge (``-ss``/``-t``): the fake
+    edge decoder returns exactly the requested window, and ffprobe
+    supplies the (advisory) full duration for the tail's start bound.
+    """
     import vemoizer.grouping as grouping
 
     durations = {
@@ -314,11 +319,11 @@ def test_decode_boundaries_calls_transcribe_once_per_edge(
         "Uusi äänitys 426.m4a": 45.0,
     }
 
-    def fake_ingest(path):
-        name = Path(path).name
-        if name not in durations:
-            raise AssertionError(f"unexpected file {name}")
-        return np.zeros(int(durations[name] * 16000), dtype=np.float32)
+    def fake_probe(path):
+        return durations[Path(path).name]
+
+    def fake_edge_window(path, start, end):
+        return np.zeros(int((end - start) * 16000), dtype=np.float32)
 
     transcribe_calls: list[float] = []
 
@@ -326,7 +331,8 @@ def test_decode_boundaries_calls_transcribe_once_per_edge(
         transcribe_calls.append(len(audio) / 16000)
         return {"text": "hei"}
 
-    monkeypatch.setattr(grouping, "ingest_audio", fake_ingest)
+    monkeypatch.setattr(grouping, "probe_duration_seconds", fake_probe)
+    monkeypatch.setattr(grouping, "_decode_edge_window", fake_edge_window)
     files = [tmp_path / name for name in durations]
     for f in files:
         f.touch()
@@ -347,10 +353,11 @@ def test_decode_boundaries_short_file_tail_clips(tmp_path, monkeypatch) -> None:
     """A 5 s file: the tail slice is 5 s (clipped), not 20 s."""
     import vemoizer.grouping as grouping
 
+    monkeypatch.setattr(grouping, "probe_duration_seconds", lambda p: 5.0)
     monkeypatch.setattr(
         grouping,
-        "ingest_audio",
-        lambda path: np.zeros(int(5 * 16000), dtype=np.float32),
+        "_decode_edge_window",
+        lambda path, start, end: np.zeros(int((end - start) * 16000), dtype=np.float32),
     )
     transcribe_calls: list[float] = []
 
@@ -394,8 +401,11 @@ def test_decode_boundaries_decode_failure_degrades_to_empty(
 def test_decode_boundaries_empty_audio_is_empty_text(tmp_path, monkeypatch) -> None:
     import vemoizer.grouping as grouping
 
+    monkeypatch.setattr(grouping, "probe_duration_seconds", lambda p: 0.0)
     monkeypatch.setattr(
-        grouping, "ingest_audio", lambda path: np.zeros(0, dtype=np.float32)
+        grouping,
+        "_decode_edge_window",
+        lambda path, start, end: np.zeros(0, dtype=np.float32),
     )
     files = [tmp_path / "Uusi äänitys 425.m4a"]
     files[0].touch()

@@ -81,6 +81,38 @@ class RunOptions:
     llm_terms: list[str]
     corrections: dict[str, str]
 
+    @classmethod
+    def expert_transcribe(
+        cls,
+        *,
+        profile: str,
+        diarize: bool,
+        repair: bool,
+        speakers: SpeakerCount | None,
+        glossary_path: str | None,
+        config_path: str | None,
+    ) -> RunOptions:
+        """The ``vemoizer transcribe`` (expert) command's options.
+
+        Encapsulates the CLI seam: the expert command exposes every
+        pipeline flag explicitly but never seeds the whisper prompt or
+        LLM terms from layers (those are preset-layer concerns) — so
+        ``whisper_prompt`` / ``llm_terms`` / ``corrections`` are always
+        empty here, and the knowledge of which fields are "empty for
+        transcribe" lives in ONE place, not in the CLI's kwarg spell-out.
+        """
+        return cls(
+            profile=profile,
+            diarize=diarize,
+            repair=repair,
+            speakers=speakers,
+            glossary_path=glossary_path,
+            config_path=config_path,
+            whisper_prompt=[],
+            llm_terms=[],
+            corrections={},
+        )
+
 
 def _split_terms(terms: list[str]) -> tuple[list[str], list[str]]:
     """Split merged terms into (whisper prompt terms, LLM-only terms).

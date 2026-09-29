@@ -19,9 +19,19 @@ from typing import Any
 
 
 def _part_markers(transcript: dict[str, Any]) -> list[dict[str, Any]]:
-    """``transcript["part_markers"]`` when present, else ``[]``."""
+    """``transcript["part_markers"]`` when present, else ``[]``.
+
+    The sole producer is ``run_batch``, which always builds
+    ``{"offset": float, "label": str}`` dicts from the typed
+    ``PartOffset`` dataclass — non-dict entries (``None``, a stray
+    string) cannot be rendered as markers and are dropped rather than
+    crashing the render path with an ``AttributeError`` (``m.get`` on a
+    non-dict).
+    """
     markers = transcript.get("part_markers")
-    return markers if isinstance(markers, list) else []
+    if not isinstance(markers, list):
+        return []
+    return [m for m in markers if isinstance(m, dict)]
 
 
 def _render_blocks(

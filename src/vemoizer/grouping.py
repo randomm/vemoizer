@@ -32,7 +32,6 @@ The heuristic is advisory: an explicit user partition always wins.
 from __future__ import annotations
 
 import logging
-import os
 import re
 import subprocess
 import tempfile
@@ -44,11 +43,8 @@ from typing import Any
 
 import numpy as np
 
-from vemoizer.audio_contract import SAMPLE_RATE
-from vemoizer.ingest import duration_seconds, ingest_audio
+from vemoizer.ingest import IngestError, duration_seconds, ingest_audio
 from vemoizer.output.naming import nfc_stem_and_suffix
-from vemoizer.redecode import extract_slice
-from vemoizer.spans import Span
 from vemoizer.textnorm import textnorm
 
 logger = logging.getLogger(__name__)
@@ -257,6 +253,46 @@ def propose_groups(
 # ---------------------------------------------------------------------------
 
 
+def _decode_edge_window(path: Path, start: float, end: float) -> np.ndarray:
+    """Decode ``[start, end)`` seconds of *path* — just that window.
+
+    ffmpeg seeks (``-ss`` / ``-t``), so a 1-hour file costs a 20 s decode
+    instead of a full-file decode (~2.4 GB of transient float32 PCM).
+    The slice is still the truth: ``end`` is clamped to the decoded length
+    (a trailing ffprobe overestimate never over-reads), and the tail start
+    is clamped on the DECODED duration, never container metadata.
+    """
+    argv = [
+        "ffmpeg",
+        "-nostdin",
+        "-v",
+        "error",
+        "-ss",
+        f"{start:.6f}",
+        "-t",
+        f"{end - start:.6f}",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_f32le",
+        "-f",
+        "f32le",
+        "-",
+        "-i",
+        str(path),
+    ]
+    proc = subprocess.run(argv, capture_output=True, check=False)
+    if proc.returncode != 0:
+        raise IngestError(f"ffmpeg edge decode failed for {path}: {proc.stderr!r}")
+    raw = proc.stdout
+    n = len(raw) // 4
+    if n == 0:
+        return np.zeros(0, dtype=np.float32)
+    return np.frombuffer(raw, dtype=np.float32, count=n).copy()
+
+
 def decode_boundaries(
     files: Sequence[Path | str],
     transcribe_fn: Callable[[np.ndarray], dict[str, Any]] | None = None,
@@ -269,6 +305,11 @@ def decode_boundaries(
     or English, so no language pinning) is loaded once and cleaned up
     after the last boundary. Any per-slice decode failure degrades that
     edge to ``""`` (no evidence) — never a raise.
+
+    Only the 20 s edge windows are decoded (ffmpeg ``-ss`` / ``-t``); the
+    file's full duration is probed with ffprobe for bounds only (the
+    decoded PCM still defines every offset — ffprobe never measures
+    transcribed audio).
     """
     ordered = natural_sort(files)
 
@@ -285,20 +326,10 @@ def decode_boundaries(
         def _edge_text(path: Path, start: float, end: float) -> str:
             """Decode ``[start, end)`` seconds of *path*; ``""`` on failure."""
             try:
-                audio = ingest_audio(path)
+                audio = _decode_edge_window(path, start, end)
                 if len(audio) == 0:
                     return ""
-                dur = duration_seconds(audio)
-                if start >= dur:
-                    return ""
-                sliced = extract_slice(
-                    audio,
-                    Span(start=start, end=min(end, dur)),
-                    sample_rate=SAMPLE_RATE,
-                )
-                if len(sliced) == 0:
-                    return ""
-                return str(fn(sliced).get("text", "")).strip()
+                return str(fn(audio).get("text", "")).strip()
             except Exception as e:  # noqa: BLE001 - fail-open boundary edge
                 logger.warning("boundary decode failed for %s: %s", path, e)
                 return ""
@@ -306,8 +337,10 @@ def decode_boundaries(
         tail_texts: list[str] = []
         head_texts: list[str] = []
         for i, path in enumerate(ordered):
-            dur = duration_seconds(ingest_audio(path))
-            tail_texts.append(_edge_text(path, max(0.0, dur - BOUNDARY_SECONDS), dur))
+            dur = max(probe_duration_seconds(path), 0.0)
+            tail_texts.append(
+                _edge_text(path, max(0.0, dur - BOUNDARY_SECONDS), max(dur, 0.0))
+            )
             if i + 1 < len(ordered):
                 # The head is the first 20 s of the NEXT file (the one the
                 # boundary leads into), not of the current file.
@@ -366,6 +399,41 @@ def _probe_stream(part: Path) -> str:
     return proc.stdout.decode("utf-8", errors="replace").strip()
 
 
+def probe_duration_seconds(path: Path) -> float:
+    """Container duration via ffprobe — advisory only, never load-bearing.
+
+    Used to BOUND a probe decode (how many seconds to request from
+    ffmpeg) — not the duration of any transcribed audio. Part offsets
+    and boundary positions come from decoded PCM, never container
+    metadata (edit lists in iOS Voice Memos make ffprobe duration lie).
+    An unreadable or corrupt file yields ``0.0`` ("no probe evidence").
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "csv=p=0",
+                str(path),
+            ],
+            capture_output=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return 0.0
+    if proc.returncode != 0:
+        return 0.0
+    value = proc.stdout.decode("utf-8", errors="replace").strip()
+    try:
+        return float(value)
+    except ValueError:
+        return 0.0
+
+
 def concat_groups(group: Sequence[Path | str]) -> Path:
     """Join *group* into one temp .m4a with the ffmpeg concat demuxer.
 
@@ -396,11 +464,13 @@ def concat_groups(group: Sequence[Path | str]) -> Path:
             f"{mismatched[0][1]!r}"
         )
 
+    # The merged group holds every second of the split recording — a
+    # world-readable temp file would expose hours of private audio in a
+    # shared temp dir, so the concat output lives in a 0o700 directory.
+    tmp_dir = Path(tempfile.mkdtemp(prefix="vemoizer-concat-"))
     suffix = parts[0].suffix or ".m4a"
-    fd, name = tempfile.mkstemp(prefix="vemoizer-concat-", suffix=suffix)
-    os.close(fd)
-    out_path = Path(name)
-    list_path = Path(name + ".txt")
+    out_path = tmp_dir / ("group" + suffix)
+    list_path = tmp_dir / "concat.txt"
     try:
         list_path.write_text(
             "".join(_escape_concat_path(p) + "\n" for p in parts),
@@ -434,7 +504,24 @@ def concat_groups(group: Sequence[Path | str]) -> Path:
             )
         return out_path
     finally:
+        # The temp dir must outlive the call: the caller owns the merged
+        # file and deletes it after transcription (the list file always
+        # goes).
         list_path.unlink(missing_ok=True)
+
+
+def remove_concat_output(merged: Path) -> None:
+    """Delete a :func:`concat_groups` temp file AND its 0o700 temp dir.
+
+    The caller (``run_batch``) owns the merged file — delete it on every
+    path after transcription, including the error/exit paths, so no
+    merged private audio is left behind in the temp dir.
+    """
+    merged.unlink(missing_ok=True)
+    # A non-empty or vanished dir cannot be unlinked either way — the
+    # file itself is already gone, so nothing more to clean.
+    with suppress(OSError):
+        merged.parent.rmdir()
 
 
 def part_offsets(group: Sequence[Path | str]) -> list[PartOffset]:
@@ -499,10 +586,7 @@ def parse_partition(s: str, stems: Sequence[str]) -> list[list[Path]]:
             if (m := _STEM_TAIL_RE.search(st)) is not None and m.group(1) == tok
         ]
         if len(matches) > 1:
-            # Ambiguity check BEFORE the duplicate check: a trailing
-            # integer matching two different stems is "ambiguous", not a
-            # duplicate (the duplicate check only fires when the SAME
-            # stem is referenced twice).
+            # Ambiguity beats the duplicate check; see parse_partition.
             raise GroupingError(
                 f"ambiguous part: {tok!r} matches {', '.join(matches)!r}; "
                 "type the full stem"

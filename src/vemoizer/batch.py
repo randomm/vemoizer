@@ -261,33 +261,30 @@ def transcribe_batch(
     return exit_code
 
 
-def _transcribe_one(
-    file: Path,
-    *,
-    config_path: str | None,
-    profile: str,
-    repair: bool,
-    glossary_path: str | None,
-    speakers: SpeakerCount | None,
-    diarize: bool,
-) -> dict:
-    """One ``transcribe_file`` call with the fail-loud config check."""
+def _transcribe_one(file: Path, options: RunOptions) -> dict[str, Any]:
+    """One ``transcribe_file`` call with the fail-loud config check.
+
+    The return is ``TranscriptionResult``-shaped (``text`` required;
+    ``segments`` / ``part_markers`` / ``notes`` optional) — or the
+    ``{"text", "segments", "error"}`` triple when the project config
+    check fails (a clean error line downstream, never a traceback).
+    """
     from vemoizer.pipeline import transcribe_file
 
     try:
         # Fail loud on a malformed project config (issue #78): clean error
         # line, never a traceback (issue #78).
-        _resolve_llm_config(config_path)
+        _resolve_llm_config(options.config_path)
     except ConfigError as e:
         return {"text": "", "segments": [], "error": str(e)}
     return transcribe_file(
         file,
-        diarize=diarize,
-        config_path=config_path,
-        profile=profile,
-        repair=repair,
-        glossary_path=glossary_path,
-        speakers=speakers,
+        diarize=options.diarize,
+        config_path=options.config_path,
+        profile=options.profile,
+        repair=options.repair,
+        glossary_path=options.glossary_path,
+        speakers=options.speakers,
     )
 
 
@@ -368,55 +365,43 @@ def run_batch(
             quiet=quiet,
         )
 
-    if not no_group:
-        # The TTY guard is BEFORE any boundary decode or model load, so a
-        # piped/CI invocation fails in milliseconds instead of hanging on
-        # input() — and --yes never pays the prompt cost it skips.
-        isatty = tty_isatty if tty_isatty is not None else sys.stdin.isatty
-        if not yes and input_fn is None and not isatty():
-            typer.echo(
-                "error: group confirmation requires a TTY; use --yes or --no-group",
-                err=True,
-            )
-            return 2
-        # --yes still runs the boundary decodes (they feed the proposal);
-        # --no-group is the flag that skips them.
-        tail_texts, head_texts = decode_boundaries(ordered, transcribe_fn)
-        proposals = propose_groups(ordered, tail_texts, head_texts)
-        try:
-            groups = confirm_groups(
-                ordered,
-                proposals,
-                yes=yes,
-                no_group=False,
-                input_fn=input_fn or input,
-                print_fn=(
-                    print_fn
-                    if print_fn is not None
-                    else (lambda s: typer.echo(s, err=True))
-                ),
-            )
-        except GroupingError as e:
-            typer.echo(f"error: {e}", err=True)
-            return 1
-    else:
-        groups = [[p] for p in ordered]
+    # The TTY guard is BEFORE any boundary decode or model load, so a
+    # piped/CI invocation fails in milliseconds instead of hanging on
+    # input() — and --yes never pays the prompt cost it skips.
+    isatty = tty_isatty if tty_isatty is not None else sys.stdin.isatty
+    if not yes and input_fn is None and not isatty():
+        typer.echo(
+            "error: group confirmation requires a TTY; use --yes or --no-group",
+            err=True,
+        )
+        return 2
+    # --yes still runs the boundary decodes (they feed the proposal);
+    # --no-group is the flag that skips them (it already returned above).
+    tail_texts, head_texts = decode_boundaries(ordered, transcribe_fn)
+    proposals = propose_groups(ordered, tail_texts, head_texts)
+    try:
+        groups = confirm_groups(
+            ordered,
+            proposals,
+            yes=yes,
+            no_group=False,
+            input_fn=input_fn or input,
+            print_fn=(
+                print_fn
+                if print_fn is not None
+                else (lambda s: typer.echo(s, err=True))
+            ),
+        )
+    except GroupingError as e:
+        typer.echo(f"error: {e}", err=True)
+        return 1
 
     exit_code = 0
     with caffeinate_context():
         for group in groups:
             if len(group) == 1:
-                result = _transcribe_one(
-                    group[0],
-                    config_path=options.config_path,
-                    profile=options.profile,
-                    repair=options.repair,
-                    glossary_path=options.glossary_path,
-                    speakers=options.speakers,
-                    diarize=options.diarize,
-                )
+                result = _transcribe_one(group[0], options)
                 label = group[0].name
-                stem, _ = nfc_stem_and_suffix(group[0])
             else:
                 try:
                     merged = concat_groups(group)
@@ -426,18 +411,12 @@ def run_batch(
                 merged_is_temp = merged != group[0]
                 try:
                     offsets = part_offsets(group)
-                    result = _transcribe_one(
-                        merged,
-                        config_path=options.config_path,
-                        profile=options.profile,
-                        repair=options.repair,
-                        glossary_path=options.glossary_path,
-                        speakers=options.speakers,
-                        diarize=options.diarize,
-                    )
+                    result = _transcribe_one(merged, options)
                 finally:
                     if merged_is_temp:
-                        merged.unlink(missing_ok=True)
+                        from vemoizer.grouping import remove_concat_output
+
+                        remove_concat_output(merged)
                 if "error" not in result:
                     # Multi-part groups only: single-part groups get no
                     # part_markers key at all (issue #77).
@@ -450,7 +429,6 @@ def run_batch(
                         for off in offsets
                     ]
                 label = "+".join(p.name for p in group)
-                stem, _ = nfc_stem_and_suffix(group[0])
 
             if _check_result(Path(label), result, diarize=options.diarize):
                 exit_code = 1
@@ -477,19 +455,19 @@ def _run_plain(
     out: Path | None,
     quiet: bool,
 ) -> int:
-    """The plain per-file loop (single-file runs and --no-group groups)."""
+    """The plain per-file loop (single-file runs and --no-group groups).
+
+    Note: intentionally diverges from ``transcribe_batch`` — no ``--copy``
+    support and per-file config-error continue (the batch loop honors
+    ``--copy`` and aborts the run on a malformed project config). The
+    divergence is deliberate: the plain loop feeds the grouping path
+    where ``--copy`` is a single-file-only concern and a broken config
+    should fail that file, not the whole multi-file run.
+    """
     exit_code = 0
     with caffeinate_context():
         for file in ordered:
-            result = _transcribe_one(
-                file,
-                config_path=options.config_path,
-                profile=options.profile,
-                repair=options.repair,
-                glossary_path=options.glossary_path,
-                speakers=options.speakers,
-                diarize=options.diarize,
-            )
+            result = _transcribe_one(file, options)
             if _check_result(file, result, diarize=options.diarize):
                 exit_code = 1
                 continue
