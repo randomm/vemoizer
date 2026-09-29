@@ -98,10 +98,22 @@ def apply_llm_tail(
     to the notes (never to the verbatim segments). Both stages are skipped
     without an LLM config (fail-open).
 
+    ``glossary`` is the list ``load_glossary`` returns (bare prompt terms
+    plus ``@``-prefixed LLM-only terms, one list for both consumers). The
+    ``@`` is stripped at this boundary — the LLM stages — before it reaches
+    the model (a leading ``@`` would read as a mention marker). ``@``-terms
+    never enter the whisper prompt: ``glossary_prompt`` is the single
+    enforcement point for that, so they reach repair and notes here, at no
+    budget.
+
     The ``*_fn`` / ``llm_client_cls`` parameters let the caller (pipeline)
     pass its own namespace references so that test monkeypatching of the
     pipeline namespace propagates through to the tail stages.
     """
+    # LLM-only glossary terms arrive ``@``-prefixed (issue #82); strip it
+    # here, at the LLM boundary — the recognizer never sees them.
+    if glossary is not None:
+        glossary = [t[1:].lstrip() if t.startswith("@") else t for t in glossary]
     if repair and llm_config is not None and result.get("paragraphs"):
         _run_repair(result, llm_config, glossary, repair_paragraphs_fn, llm_client_cls)
     if llm_config is not None and result.get("text"):

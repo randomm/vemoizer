@@ -18,7 +18,14 @@ from pathlib import Path
 
 import pytest
 
-from vemoizer.output.naming import nfc, nfc_path, nfc_stem_and_suffix
+from vemoizer.output.naming import (
+    collision_free_path,
+    dated_basename,
+    nfc,
+    nfc_path,
+    nfc_stem_and_suffix,
+    sanitize_title,
+)
 
 
 def _nfd(name: str) -> str:
@@ -185,3 +192,208 @@ def test_apfs_nfd_disk_name_vs_nfc_user_string():
 def test_nfc_is_the_fixed_point(raw):
     """Once composed, further normalization is a no-op (NFC stability)."""
     assert nfc(nfc(raw)) == nfc(raw)
+
+
+# ---------------------------------------------------------------------------
+# sanitize_title() — LLM title -> dated output filename (issue #82)
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_title_plain_unchanged():
+    assert sanitize_title("Q4 planning review") == "Q4 planning review"
+
+
+def test_sanitize_title_removes_path_separators():
+    assert sanitize_title("a/b\\c") == "abc"
+
+
+def test_sanitize_title_removes_control_characters():
+    assert sanitize_title("tab\there\nnewline\x00nul\x7fdel") == "tabherenewlinenuldel"
+
+
+def test_sanitize_title_removes_zero_width_and_bom():
+    assert sanitize_title("a\u200bb\u200ec\ufeff") == "abc"
+
+
+def test_sanitize_title_strips_leading_trailing_dots_and_spaces():
+    assert sanitize_title("  ..title...  ") == "title"
+
+
+def test_sanitize_title_collapses_internal_whitespace_runs():
+    assert sanitize_title("a\n  b\t\t c") == "a b c"
+
+
+def test_sanitize_title_caps_at_80_chars():
+    long = "x" * 120
+    assert len(sanitize_title(long)) == 80
+    assert sanitize_title(long) == "x" * 80
+
+
+def test_sanitize_title_empty_for_blank_input():
+    assert sanitize_title("") == ""
+    assert sanitize_title("   ") == ""
+    # A title made only of stripped dots and spaces.
+    assert sanitize_title(". . .") == ""
+
+
+def test_sanitize_title_empty_for_separators_only():
+    assert sanitize_title("/\\//") == ""
+
+
+def test_sanitize_title_keeps_colon_in_title():
+    # Colons are legal in POSIX filenames and fine in LLM titles.
+    assert sanitize_title("Q3: review") == "Q3: review"
+
+
+def test_sanitize_title_nfc_output():
+    # An NFD title comes back composed.
+    assert sanitize_title(NFD_MEMO + " review") == "mó review"
+
+
+# ---------------------------------------------------------------------------
+# dated_basename() — YYYY-MM-DD <title> base
+# ---------------------------------------------------------------------------
+
+
+def test_dated_basename_formats_date_and_title():
+    assert dated_basename("Board sync", date_str="2026-01-15") == (
+        "2026-01-15 Board sync"
+    )
+
+
+def test_dated_basename_sanitises_the_title():
+    # Separators are dropped, so "/bad/../title" -> "bad.title".
+    assert dated_basename("/bad/../title", date_str="2026-01-15") == (
+        "2026-01-15 bad.title"
+    )
+
+
+def test_dated_basename_falls_back_to_first_source_stem():
+    # Blank LLM title -> deterministic fallback to the first source stem.
+    assert dated_basename("   ", date_str="2026-01-15", fallback_stem="memo-001") == (
+        "2026-01-15 memo-001"
+    )
+    assert dated_basename("", date_str="2026-01-15", fallback_stem="mó") == (
+        "2026-01-15 mó"
+    )
+
+
+def test_dated_basename_fallback_stem_also_sanitised():
+    # Separators dropped, trailing space stripped.
+    assert dated_basename("", date_str="2026-01-15", fallback_stem="a/b") == (
+        "2026-01-15 ab"
+    )
+
+
+def test_dated_basename_title_beats_fallback():
+    assert dated_basename("Real title", date_str="d", fallback_stem="ignored") == (
+        "d Real title"
+    )
+
+
+def test_dated_basename_uses_today_without_explicit_date():
+    # No date_str given: today's date is used in ISO format.
+    base = dated_basename("x")
+    import re as _re
+
+    assert _re.fullmatch(r"\d{4}-\d{2}-\d{2} x", base) is not None
+
+
+def test_dated_basename_raises_when_both_empty():
+    import pytest
+
+    with pytest.raises(ValueError):
+        dated_basename("", date_str="2026-01-15", fallback_stem="")
+
+
+# ---------------------------------------------------------------------------
+# collision_free_path() — " (2)" suffix, NFC, never overwrites
+# ---------------------------------------------------------------------------
+
+
+def test_collision_free_path_returns_plain_name_when_free(tmp_path):
+    p = collision_free_path(tmp_path, "2026-01-15 Title", ".md")
+    assert p == tmp_path / "2026-01-15 Title.md"
+    assert not p.exists()
+
+
+def test_collision_free_path_appends_suffix_2_then_3(tmp_path):
+    (tmp_path / "a.md").write_text("x")
+    (tmp_path / "a (2).md").write_text("y")
+    p = collision_free_path(tmp_path, "a", ".md")
+    assert p == tmp_path / "a (3).md"
+    assert not p.exists()
+
+
+def test_collision_free_path_does_not_overwrite(tmp_path):
+    existing = tmp_path / "a (2).md"
+    existing.write_text("keep me")
+    (tmp_path / "a.md").write_text("x")
+    p = collision_free_path(tmp_path, "a", ".md")
+    assert p != existing
+    p.write_text("new")
+    assert existing.read_text() == "keep me"
+
+
+def test_collision_free_path_json_suffix(tmp_path):
+    (tmp_path / "a.md").write_text("x")
+    (tmp_path / "a.json").write_text("y")
+    p = collision_free_path(tmp_path, "a", ".json")
+    assert p == tmp_path / "a (2).json"
+
+
+def test_collision_free_path_nfc_normalises_candidate(tmp_path):
+    # The candidate base arrives NFD (as if decoded from disk); the
+    # existing file is NFC. Both must be treated as one name.
+    (tmp_path / (NFC_MEMO + ".md")).write_text("x")
+    p = collision_free_path(tmp_path, NFD_MEMO, ".md")
+    assert p == tmp_path / "mó (2).md"
+
+
+def test_collision_free_path_nfc_normalises_existing(tmp_path):
+    # The existing file on disk is NFD-spelled; the candidate is NFC.
+    # Both must be treated as one name (APFS folds them to one file,
+    # but the probe must not miss the collision).
+    (tmp_path / (NFD_MEMO + ".md")).write_text("x")
+    p = collision_free_path(tmp_path, NFC_MEMO, ".md")
+    assert p == tmp_path / "mó (2).md"
+
+
+def test_collision_free_path_nfc_normalises_directory(tmp_path):
+    sub = nfc_path(tmp_path / NFD_MEMO)
+    sub.mkdir()
+    (sub / "a.md").write_text("x")
+    p = collision_free_path(sub, "a", ".md")
+    assert p.parent == sub
+    assert p.name == "a (2).md"
+
+
+def test_collision_free_path_md_json_pair_never_overwrites(tmp_path):
+    # The md + json pair: both colliding forces the suffix on both.
+    (tmp_path / "t.md").write_text("x")
+    (tmp_path / "t.json").write_text("y")
+    md = collision_free_path(tmp_path, "t", ".md")
+    js = collision_free_path(tmp_path, "t", ".json")
+    assert md == tmp_path / "t (2).md"
+    assert js == tmp_path / "t (2).json"
+
+
+def test_collision_free_path_existing_md_frees_json(tmp_path):
+    # Only the .md exists; the .json base is still free.
+    (tmp_path / "t.md").write_text("x")
+    assert collision_free_path(tmp_path, "t", ".md") == tmp_path / "t (2).md"
+    assert collision_free_path(tmp_path, "t", ".json") == tmp_path / "t.json"
+
+
+def test_collision_free_path_suffix_applied_before_extension(tmp_path):
+    # Regression: " (2)" goes before the suffix, not into the filename.
+    (tmp_path / "t.md").write_text("x")
+    p = collision_free_path(tmp_path, "t", ".md")
+    assert p.suffix == ".md"
+    assert p.name == "t (2).md"
+
+
+def test_collision_free_path_str_directory(tmp_path):
+    (tmp_path / "a.md").write_text("x")
+    p = collision_free_path(str(tmp_path), "a", ".md")
+    assert p == tmp_path / "a (2).md"

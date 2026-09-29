@@ -21,8 +21,10 @@ def test_help_exits_zero_and_shows_usage() -> None:
     # multi-command Typer app: --help shows the command list
     assert "Usage: vemoizer" in result.stdout
     assert "--help" in result.stdout
-    # both subcommands are listed
+    # all preset subcommands are listed
     assert "transcribe" in result.stdout
+    assert "meeting" in result.stdout
+    assert "memo" in result.stdout
     assert "models" in result.stdout
 
 

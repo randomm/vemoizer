@@ -253,6 +253,26 @@ absent) plus the paragraphed, speaker-labelled transcript. Subtitle cue timestam
 1-based), VTT uses `HH:MM:SS.mmm -->` (dot) under a `WEBVTT` header.
 Filenames are NFC-normalized (macOS APFS stores NFD).
 
+### 13. Dated output naming (issue #82)
+
+`src/vemoizer/output/naming.py` adds three exports on top of the
+existing NFC helpers:
+
+- `sanitize_title(raw: str) -> str` — NFC-normalizes the string, drops
+  path separators, control characters (including zero-width joiners and
+  BOM), collapses internal whitespace to single spaces, removes leading
+  and trailing dots/spaces, and caps the result at 80 characters. An
+  empty result signals the caller to fall back.
+- `dated_basename(title, *, date_str=None, fallback_stem=None) -> str`
+  — builds `YYYY-MM-DD <title>` (date defaults to today, ISO format).
+  The title is sanitized first; if sanitising leaves an empty string,
+  *fallback_stem* (the first source file's stem) is sanitized and used.
+  Raises `ValueError` if both are empty.
+- `collision_free_path(directory, base, suffix) -> Path` — probes the
+  real filesystem (via `Path.exists`) on the NFC-normalized name and
+  appends ` (2)`, ` (3)`, … before the suffix until a free name is
+  found. Never overwrites an existing file.
+
 ## Model manifest
 
 | Stage | Upstream model | Load repo (MLX) | Pinned revision | Notes |
@@ -270,11 +290,74 @@ bare repo ID (invariant #4). Omitting `revision` caches a moving ref;
 
 ## CLI spec
 
-`vemoizer` (Typer; entry point in `pyproject.toml`):
+`vemoizer` (Typer; entry point in `pyproject.toml`). Three commands are
+wired: `transcribe` (expert, unchanged), `meeting`, and `memo` (preset
+commands added in issue #82). `eval` is registered with `hidden=True`
+and does not appear in the main `--help`.
+
+### `vemoizer meeting FILES... [options]` (issue #82)
+
+Transcribe one or more meeting recordings: whisper decode (profile
+`meeting`, no consensus), diarization on by default (2–6 speakers),
+LLM repair pass on by default. Output is `.md` + `.json` to the CWD
+with a dated, sanitized title and NFC collision suffix; one `wrote
+<relative path>` line per file is printed at the end.
+
+The glossary is the merged result of `~/.vemoizer/glossary.txt` and
+the nearest `./.vemoizer/glossary.txt` (project layer winning, M0
+token budget applied when the prompt is built — see Glossary layers
+below), with `@`-prefixed terms LLM-only. `--glossary` replaces both
+layers entirely (no merge). `--config` replaces the layered config
+search entirely.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `files` (positional, 1+) | — | audio file paths |
+| `--quiet` / `-q` | off | suppress the `wrote <path>` summary lines |
+| `--verbose` / `-v` | off | per-stage progress logging to stderr |
+| `--config` | layered search | explicit LLM config path (replaces the search) |
+| `--glossary` | layered merge | explicit glossary file (replaces both `.vemoizer` layers) |
+| `--repair` / `--no-repair` | on | LLM repair pass over the final paragraphs |
+| `--speakers` | 2-6 | diarization bounds (`N` or `MIN-MAX`) |
+| `--no-diarize` | off (diarize on) | skip speaker diarization |
+| `--low-memory` / `--no-low-memory` | auto | low-memory model-loading mode |
+
+### `vemoizer memo FILES... [options]` (issue #82)
+
+Transcribe one or more solo memos: whisper meeting decode (profile
+`meeting`, no consensus), **no** diarization, LLM repair pass on by
+default. Output naming is identical to `meeting` (`.md` + `.json` to
+CWD with dated title and NFC collision suffix).
+
+The memo seam (issue #82, DESIGN DECISION): the whisper
+`initial_prompt` stays empty for a memo (a 30-minute memo should not
+seed recognition with hundreds of prompt terms). The batch runner
+therefore writes a temporary glossary file containing ONLY the merged
+correction pairs (home + project layers, project right-side winning on
+the same wrong-side key) and passes it through the existing
+glossary_path argument — so `glossary_prompt` yields `None` (empty
+prompt) while `apply_corrections` still fires on the deterministic
+pairs. `--glossary` replaces the layers entirely; in that case the file
+is filtered to its own correction pairs via a second temp file, keeping
+the same empty-prompt invariant (prompt terms ignored).
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `files` (positional, 1+) | — | audio file paths |
+| `--quiet` / `-q` | off | suppress the `wrote <path>` summary lines |
+| `--verbose` / `-v` | off | per-stage progress logging to stderr |
+| `--config` | layered search | explicit LLM config path (replaces the search) |
+| `--glossary` | layered merge | explicit glossary file (correction pairs only for memo) |
+| `--repair` / `--no-repair` | on | LLM repair pass over the final paragraphs |
+| `--low-memory` / `--no-low-memory` | auto | low-memory model-loading mode |
 
 ### `vemoizer transcribe FILE... [options]`
 
 Transcribe one or more audio files and write transcript files.
+Unchanged from before issue #82 — the expert command that exposes
+every pipeline flag explicitly. The per-file loop that used to live
+here moved to `src/vemoizer/batch.py` (new module) so the `meeting`
+and `memo` presets can reuse it.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -314,6 +397,68 @@ the API key. The key itself is never stored in the repo or the config file
 
 When no config exists or the endpoint fails, every LLM call fails open and
 the un-adjudicated transcript is returned.
+
+### Config search order (issue #82)
+
+`llm.load_default_config(path=None)` searches in this precedence order
+(lowest → highest, later layers override earlier ones at the whole-file
+level — there is no per-key merging):
+
+1. **`--config` flag** (explicit path): short-circuits the search
+   entirely; the path is passed straight through to
+   `load_default_config(path)` (missing/unreadable files fail open to
+   no LLM). The special value `"os.devnull"` loads nothing and returns
+   `None`. The presets (`meeting` / `memo`) pass `None` when no
+   `--config` is given, so the layered search runs — they never emit the
+   sentinel themselves (only explicit callers such as the eval harness
+   do).
+2. **Nearest `./.vemoizer/config.toml`** (project layer): strict
+   validation — an unknown key under `[llm]` or an unknown top-level
+   key/section raises `ConfigError` naming the offending key. The
+   walk-up starts at the CWD and stops at the filesystem root; nearest
+   wins. Symlink loops are prevented by tracking the resolved real path
+   of each directory visited.
+3. **`~/.vemoizer/config.toml`** (home layer): same strict rules. Used
+   only when the project walk-up finds nothing.
+4. **Legacy paths** (fail-open, pre-M2 semantics, unchanged):
+   `~/.config/vemoizer/config.toml` then `~/.vemoizer.toml`. When the
+   `~/.config/…` file is the one actually used, a one-line deprecation
+   notice is printed to stderr. No notice is printed when a newer
+   layer won or when the `~/.vemoizer.toml` legacy path is used.
+
+Strict validation applies only to layers 2 and 3 (the new `.vemoizer`
+files). Legacy layers keep the old fail-open contract so existing users
+are not broken.
+
+### Glossary layers (issue #82)
+
+`src/vemoizer/glossary_layers.py` (new module) provides the two-layer
+glossary for the `meeting` and `memo` presets:
+
+- `load_layers(home_path=None, project_path=None)` — file I/O only.
+  Reads `~/.vemoizer/glossary.txt` (home layer) and the nearest
+  `./.vemoizer/glossary.txt` (project layer, same walk-up as config
+  search). A missing or unreadable file contributes `([], {})`.
+  Returns `(home_terms, home_corrections, project_terms,
+  project_corrections)`, where `terms` preserves `@`-prefixed LLM-only
+  entries (no stripping here — `glossary_prompt` and the pipeline
+  handle that) and `corrections` maps wrong-side key → right-side value.
+- `merge(project_terms, project_corrections, home_terms, home_corrections,
+  tokenizer=None, budget=GLOSSARY_PROMPT_TOKEN_BUDGET)` — pure
+  (no I/O, no printing). Returns `(merged_terms, merged_corrections,
+  notices)`:  
+  - Prompt terms: project first, case-insensitive dedupe keeping the
+    project spelling. The M0 token budget is applied when the prompt is
+    built (by `glossary_prompt`, after the merge) and the
+    lowest-priority (earliest-listed) terms are dropped first; each
+    dropped term is named in `notices`. `@`-prefixed LLM-only terms
+    are excluded from the budget entirely (they never enter the whisper
+    prompt).
+  - Correction pairs: union of both layers; for the same wrong-side key
+    the project's right side wins. Correction lines never contribute
+    prompt terms.
+  - `notices`: one string per dropped term. `batch.py` prints these to
+    stderr; `merge` itself never prints.
 
 ## Runtime environment
 
