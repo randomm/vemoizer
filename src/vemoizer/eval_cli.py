@@ -181,7 +181,7 @@ def register_eval(app) -> None:
             transcribe = BACKENDS[name]
             if name == "consensus" and llm:
                 transcribe = _consensus_llm
-            results = run_eval(corpus, transcribe)
+            results, hyps = run_eval(corpus, transcribe)
             measured[name] = results
             typer.echo(f"[{name}]")
             for sample, value in results.items():
@@ -189,7 +189,7 @@ def register_eval(app) -> None:
                     continue
                 typer.echo(f"{sample}\t{value:.4f}")
             typer.echo(f"{AGGREGATE_KEY}\t{results[AGGREGATE_KEY]:.4f}")
-            _emit_meeting_term_hits(corpus, transcribe)
+            _emit_meeting_term_hits(corpus, transcribe, hyps)
 
         fingerprint = corpus_fingerprint(corpus)
         if update_baseline:
@@ -199,25 +199,29 @@ def register_eval(app) -> None:
             _check_baseline(baseline, fingerprint, measured)
 
 
-def _emit_meeting_term_hits(corpus: Path, transcribe: Callable[[Path], str]) -> None:
+def _emit_meeting_term_hits(
+    corpus: Path, transcribe: Callable[[Path], str], reuse: dict[str, str]
+) -> None:
     """Emit the meeting-fixture glossary term-hit rate (issue #76).
 
-    The meeting eval runs one additional decode pass of each meeting sample
-    through the same transcribe callable as the WER walk (the WER run
-    already decoded the sample separately). The metric is informational
-    here — it is the number the glossary prompt work is judged by (kept
-    only if term hits rise and WER does not regress). Absent meeting
-    fixtures (a corpus without a ``.terms`` pair) nothing is emitted:
-    the WER gate above is unaffected.
+    The meeting eval reuses the per-sample hypotheses already computed by
+    the WER walk (the *reuse* dict from :func:`run_eval`) for samples that
+    both walks score, so the WER walk and the term-hit walk share the
+    decode and a growing meeting set does not compound into one extra pass
+    per sample. Samples not covered by *reuse* (e.g. a meeting sample the
+    WER walk did not score) fall back to a fresh decode through *transcribe*.
 
-    A 0.0 term-hit here can reflect a failed decode on this second pass
-    rather than a true 0% survival rate: the harness catches the exception
-    and scores the sample as empty (the WER number above, computed on the
-    first pass, already says the decode succeeded). The failure is logged
-    at WARNING level ("transcription failed for ...; scoring as empty")
-    by the harness.
+    The metric is informational here — it is the number the glossary prompt
+    work is judged by (kept only if term hits rise and WER does not
+    regress). Absent meeting fixtures (a corpus without a ``.terms`` pair)
+    nothing is emitted: the WER gate above is unaffected.
+
+    A 0.0 term-hit on a reused hypothesis reflects the WER-walk decode
+    (not a fresh decode), and the harness catches any exception from the
+    fallback path and scores the sample as empty (the WER number above,
+    computed on the first pass, already says the decode succeeded).
     """
-    meeting = run_meeting_eval(corpus, transcribe)
+    meeting = run_meeting_eval(corpus, transcribe, reuse=reuse)
     samples = [s for s in meeting if s != AGGREGATE_KEY]
     if not samples:
         return

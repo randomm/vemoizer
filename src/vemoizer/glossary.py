@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,18 @@ GLOSSARY_PROMPT_TOKEN_BUDGET = 150
 
 _PROMPT_PREFIX = "Sanasto: "
 _SEPARATOR = ", "
+
+
+class Tokenizer(Protocol):
+    """The minimal interface the glossary budgeting needs from a tokenizer.
+
+    mlx-whisper's ``get_tokenizer(True)`` satisfies it (``encode`` returns
+    an iterable of token ids); a named protocol keeps mistyped tokenizers
+    (e.g. one without ``encode``) visible at the call site, not at the
+    first budgeting call deep in :func:`glossary_prompt`.
+    """
+
+    def encode(self, text: str) -> Sequence[int]: ...
 
 
 def _whisper_tokenizer() -> Any | None:
@@ -64,7 +77,7 @@ def _read_lines(path: str | Path | None) -> list[str]:
     ]
 
 
-def _as_token_ids(tokenizer: Any, text: str) -> list[int]:
+def _as_token_ids(tokenizer: Tokenizer, text: str) -> list[int]:
     """Tokenize *text* to plain ids (``encode`` returns an id list)."""
     ids = tokenizer.encode(text)
     if not isinstance(ids, list):
@@ -72,7 +85,7 @@ def _as_token_ids(tokenizer: Any, text: str) -> list[int]:
     return [int(i) for i in ids]
 
 
-def _token_cost(tokenizer: Any, text: str) -> int:
+def _token_cost(tokenizer: Tokenizer, text: str) -> int:
     """Tokens *text* occupies in the whisper tokenizer."""
     return len(_as_token_ids(tokenizer, text))
 
@@ -193,7 +206,7 @@ def apply_corrections_to_notes(
     return out
 
 
-def glossary_prompt(terms: list[str], tokenizer: Any | None = None) -> str | None:
+def glossary_prompt(terms: list[str], tokenizer: Tokenizer | None = None) -> str | None:
     """The whisper ``initial_prompt`` seeding recognition with *terms*.
 
     ``tokenizer`` is the mlx_whisper tokenizer (``get_tokenizer(True)``);
@@ -217,6 +230,12 @@ def glossary_prompt(terms: list[str], tokenizer: Any | None = None) -> str | Non
     Lowest-priority (earliest-listed) terms are dropped first — with a
     ``logger.warning`` naming them, never silently.
 
+    Budgeting is O(n) over the terms: each term is tokenized once in the
+    budgeting loop regardless of whether it survives, which is negligible
+    for the small glossaries this is built for (the default whisper
+    tokenizer is fast; a pathological 1000+ term glossary pays the full
+    O(n) tokenization cost with only a ~150-token tail surviving).
+
     ``@``-prefixed LLM-only terms (M2) are excluded at any budget: they
     must never enter the whisper prompt and cannot occupy the tail via
     the ``@`` path.
@@ -236,11 +255,17 @@ def glossary_prompt(terms: list[str], tokenizer: Any | None = None) -> str | Non
     overhead = prefix_cost + period_cost
     if overhead > GLOSSARY_PROMPT_TOKEN_BUDGET:
         # Degenerate: even an empty glossary overflows. Ship nothing.
+        # Unreachable with the default whisper tokenizer (the prefix +
+        # period fit with room to spare); a custom tokenizer that
+        # assigns more than ~150 tokens to "Sanasto: " would hit
+        # this, and the tokenizer type is logged so an operator can
+        # quickly identify the cause of the silently-dropped glossary.
         logger.warning(
             "glossary: prefix overhead %d tokens exceeds budget %d; "
-            "whisper prompt left empty",
+            "whisper prompt left empty (tokenizer: %s)",
             overhead,
             GLOSSARY_PROMPT_TOKEN_BUDGET,
+            type(tokenizer).__name__,
         )
         return None
 

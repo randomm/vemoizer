@@ -143,7 +143,10 @@ class WhisperTranscriber:
         options.update(kwargs)
 
         window_frames = int(WINDOW_SECONDS * SAMPLE_RATE)
-        raws: list[dict[str, Any]] = []
+        # mlx_whisper can return None on transient GPU/MLX faults; the
+        # guard below names the failing window, so the annotation matches
+        # the runtime contract.
+        raws: list[dict[str, Any] | None] = []
         for index, offset in enumerate(range(0, len(audio), window_frames)):
             raw = self._mlx_whisper.transcribe(
                 audio[offset : offset + window_frames],
@@ -169,7 +172,22 @@ class WhisperTranscriber:
         words: list[dict[str, Any]] = []
         segments: list[dict[str, Any]] = []
         for index, raw in enumerate(raws):
+            # The None guard above rejects None results, so every entry
+            # reaching the aggregation is a dict; the annotation is wider
+            # than the runtime only at this point.
+            assert raw is not None
             offset_s = index * WINDOW_SECONDS
+            # A non-empty window that decoded to zero segments (malformed
+            # payload, or the model hearing nothing) would otherwise flow
+            # into the fail-open path in decode_meeting indistinguishable
+            # from a model failure; make the degradation observable.
+            if not raw.get("segments"):
+                logger.warning(
+                    "whisper window %d (offset %.0fs) returned no segments; "
+                    "transcript may be incomplete",
+                    index,
+                    offset_s,
+                )
             for seg in raw.get("segments") or []:
                 text = str(seg.get("text", "")).strip()
                 if not text:
@@ -197,8 +215,12 @@ class WhisperTranscriber:
                             }
                         )
 
+        # The None guard above rejects None results, so every entry is a
+        # dict; build a narrowed view for the aggregation sites that don't
+        # go through the per-iteration guard.
+        non_none: list[dict[str, Any]] = [r for r in raws if r is not None]
         result: TranscriptionResult = {
-            "text": " ".join(str(r.get("text", "")).strip() for r in raws).strip(),
+            "text": " ".join(str(r.get("text", "")).strip() for r in non_none).strip(),
             "words": words,
             "segments": segments,
             "transcribe_time": transcribe_time,
@@ -207,7 +229,7 @@ class WhisperTranscriber:
         }
         # Language detection is redundant across windows (same model, same
         # audio); take the first non-empty one.
-        languages = {str(r["language"]) for r in raws if r.get("language")}
+        languages = {str(r["language"]) for r in non_none if r.get("language")}
         if len(languages) == 1:
             result["language"] = next(iter(languages))
         elif languages:
@@ -275,7 +297,7 @@ def decode_meeting(
     slices: list[tuple[int, np.ndarray]],
     initial_prompt: str | None = None,
 ) -> dict[str, Any] | None:
-    """Whole-file Whisper decode A for the meeting profile (fail-open).
+    """Per-window Whisper decode A for the meeting profile (fail-open).
 
     The recording is decoded in :data:`WINDOW_SECONDS` windows (each its
     own transcribe() call so the glossary re-seeds every window); the

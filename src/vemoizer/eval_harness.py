@@ -116,7 +116,9 @@ def _terms_present(words: list[str], terms: list[str]) -> set[str]:
     return present
 
 
-def run_eval(corpus_dir: Path, transcribe: Callable[[Path], str]) -> dict[str, float]:
+def run_eval(
+    corpus_dir: Path, transcribe: Callable[[Path], str]
+) -> tuple[dict[str, float], dict[str, str]]:
     """Walk *corpus_dir* and score *transcribe* against the references.
 
     Samples are stem pairs: ``<stem>.txt`` (reference transcript) with
@@ -126,12 +128,18 @@ def run_eval(corpus_dir: Path, transcribe: Callable[[Path], str]) -> dict[str, f
     module stays free of model imports). A crashing backend scores that
     sample as an empty hypothesis (WER 1.0 against a non-empty reference)
     instead of aborting the run: one bad sample must not hide the other
-    numbers. The result maps ``{stem: wer}`` plus one ``"aggregate"`` key
-    (macro average over samples).
+    numbers.
+
+    Returns the per-sample WER mapping (``{stem: wer}`` plus one
+    ``"aggregate"`` key, macro average over samples) alongside the
+    per-sample hypotheses (``{stem: hypothesis}``); the hypotheses are
+    what :func:`run_meeting_eval` reuses for the term-hit metric so the
+    meeting walk does not re-decode a sample the WER walk just scored.
     """
     if not corpus_dir.is_dir():
         raise FileNotFoundError(f"corpus directory not found: {corpus_dir}")
     results: dict[str, float] = {}
+    hyps: dict[str, str] = {}
     for wav in sorted(corpus_dir.glob("*.wav")):
         txt = wav.with_suffix(".txt")
         if not txt.is_file():
@@ -143,15 +151,17 @@ def run_eval(corpus_dir: Path, transcribe: Callable[[Path], str]) -> dict[str, f
             logger.warning("transcription failed for %s; scoring as empty", wav.name)
             hypothesis = ""
         results[wav.stem] = wer(reference, hypothesis)
+        hyps[wav.stem] = hypothesis
     if not results:
-        return {AGGREGATE_KEY: 0.0}
+        return {AGGREGATE_KEY: 0.0}, {}
     results[AGGREGATE_KEY] = sum(results.values()) / len(results)
-    return results
+    return results, hyps
 
 
 def run_meeting_eval(
     corpus_dir: Path,
     transcribe: Callable[[Path], str],
+    reuse: dict[str, str] | None = None,
 ) -> dict[str, dict[str, float]]:
     """Score the meeting eval fixture (issue #76).
 
@@ -165,13 +175,16 @@ def run_meeting_eval(
     the sample as an empty hypothesis (WER 1.0 against a non-empty
     reference, term-hit 0.0).
 
-    This function walks and decodes its own samples — it does not reuse
-    the per-sample hypotheses from :func:`run_eval` — deliberately, so
-    the WER gate stays independent of the informational term-hit metric
-    (a corpus without a ``.terms`` pair scores WER as before, and the
-    meeting metric can be dropped or changed without touching the gate).
-    The cost is one extra decode pass per meeting sample (informational
-    CI-gate path, not the hot path).
+    *reuse* maps stems to hypotheses already computed by :func:`run_eval`
+    for the same corpus (its second return value). Samples present in
+    *reuse* skip the decode and score the reused hypothesis, so the WER
+    walk and the term-hit walk share the decode and a growing meeting set
+    does not compound into one extra pass per sample. Samples absent from
+    *reuse* (or not scored by the WER walk) are decoded through
+    *transcribe* as before, keeping the WER gate independent of the
+    informational term-hit metric: a corpus without a ``.terms`` pair
+    scores WER as before, and the meeting metric can be dropped or changed
+    without touching the gate.
     """
     if not corpus_dir.is_dir():
         raise FileNotFoundError(f"corpus directory not found: {corpus_dir}")
@@ -187,11 +200,17 @@ def run_meeting_eval(
             for line in terms_path.read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.strip().startswith("#")
         ]
-        try:
-            hypothesis = transcribe(wav)
-        except Exception:  # noqa: BLE001 - one sample must not abort the run
-            logger.warning("transcription failed for %s; scoring as empty", wav.name)
-            hypothesis = ""
+        reused = reuse.get(wav.stem) if reuse else None
+        if reused is not None:
+            hypothesis = reused
+        else:
+            try:
+                hypothesis = transcribe(wav)
+            except Exception:  # noqa: BLE001 - one sample must not abort the run
+                logger.warning(
+                    "transcription failed for %s; scoring as empty", wav.name
+                )
+                hypothesis = ""
         results[wav.stem] = {
             "wer": wer(reference, hypothesis),
             "term_hit": glossary_term_hit_rate(reference, hypothesis, terms),
@@ -206,7 +225,8 @@ def run_meeting_eval(
 
 
 def corpus_fingerprint(corpus_dir: Path) -> str:
-    """SHA-256 over the corpus contents (paired ``.wav`` + ``.txt`` bytes).
+    """SHA-256 over the corpus contents (paired ``.wav`` + ``.txt`` bytes,
+    plus any optional ``.terms`` glossary bytes present for a stem).
 
     A committed WER baseline is only meaningful against the exact corpus it
     was measured on; the fingerprint lets the gate refuse to compare numbers

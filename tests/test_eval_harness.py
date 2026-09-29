@@ -81,13 +81,14 @@ def test_run_eval_scores_the_injected_transcriber(tmp_path: Path) -> None:
     def perfect(wav: Path) -> str:
         return (wav.with_suffix(".txt")).read_text(encoding="utf-8")
 
-    results = run_eval(corpus, perfect)
+    results, hyps = run_eval(corpus, perfect)
     assert results == {"one": 0.0, "two": 0.0, AGGREGATE_KEY: 0.0}
+    assert hyps == {"one": "moro aami", "two": "toista tallaista"}
 
 
 def test_run_eval_reports_real_errors(tmp_path: Path) -> None:
     corpus = _corpus(tmp_path, {"one": "a b c"})
-    results = run_eval(corpus, lambda wav: "a x c")
+    results, _ = run_eval(corpus, lambda wav: "a x c")
     assert results["one"] == pytest.approx(1 / 3)
     assert results[AGGREGATE_KEY] == pytest.approx(1 / 3)
 
@@ -101,9 +102,10 @@ def test_run_eval_transcriber_failure_scores_one_not_crash(tmp_path: Path) -> No
             raise RuntimeError("model exploded")
         return wav.with_suffix(".txt").read_text(encoding="utf-8")
 
-    results = run_eval(corpus, flaky)
+    results, hyps = run_eval(corpus, flaky)
     assert results["bad"] == 1.0  # empty hypothesis against a real reference
     assert results["good"] == 0.0
+    assert hyps == {"bad": "", "good": "c d"}
 
 
 def test_run_eval_ignores_unpaired_stems(tmp_path: Path) -> None:
@@ -111,11 +113,12 @@ def test_run_eval_ignores_unpaired_stems(tmp_path: Path) -> None:
     (tmp_path / "lone.wav").write_bytes(b"RIFF")
     _corpus(tmp_path, {"paired": "hello world"})
 
-    results = run_eval(tmp_path, lambda wav: "hello world")
+    results, hyps = run_eval(tmp_path, lambda wav: "hello world")
 
     assert "orphan" not in results
     assert "lone" not in results
     assert results["paired"] == 0.0
+    assert hyps == {"paired": "hello world"}
 
 
 def test_run_eval_missing_directory_raises(tmp_path: Path) -> None:
@@ -124,7 +127,9 @@ def test_run_eval_missing_directory_raises(tmp_path: Path) -> None:
 
 
 def test_run_eval_empty_corpus_gives_zero_aggregate(tmp_path: Path) -> None:
-    assert run_eval(tmp_path, lambda wav: "") == {AGGREGATE_KEY: 0.0}
+    results, hyps = run_eval(tmp_path, lambda wav: "")
+    assert results == {AGGREGATE_KEY: 0.0}
+    assert hyps == {}
 
 
 # --- glossary_term_hit_rate ------------------------------------------------
@@ -272,6 +277,45 @@ def test_run_meeting_eval_skips_samples_without_terms_file(tmp_path: Path) -> No
     _corpus(tmp_path, {"one": "moro aami"})
     results = run_meeting_eval(tmp_path, lambda wav: "moro aami")
     assert results == {AGGREGATE_KEY: {"wer": 0.0, "term_hit": 0.0}}
+
+
+def test_run_meeting_eval_reuses_hypotheses_from_run_eval(tmp_path: Path) -> None:
+    """run_meeting_eval reuses hypotheses passed via *reuse*, so the WER walk
+    and the term-hit walk share a single decode (issue #76 review finding:
+    the double-decode cost compounds as the meeting set grows)."""
+    corpus = _meeting_corpus(tmp_path)
+    decoded: list[str] = []
+
+    def counting_transcribe(wav: Path) -> str:
+        decoded.append(wav.stem)
+        return "backlog on täynnä"
+
+    # Without reuse: the meeting walk decodes the sample fresh.
+    run_meeting_eval(corpus, counting_transcribe)
+    assert decoded == ["meeting_sample"]
+
+    # With reuse: the meeting walk skips the decode entirely.
+    decoded.clear()
+    reuse = {"meeting_sample": "backlog on täynnä"}
+    results = run_meeting_eval(corpus, counting_transcribe, reuse=reuse)
+    assert decoded == []
+    sample = results["meeting_sample"]
+    assert sample["term_hit"] == pytest.approx(0.5)
+
+
+def test_run_meeting_eval_falls_back_when_stem_not_in_reuse(tmp_path: Path) -> None:
+    """A sample not in *reuse* (e.g. not scored by the WER walk) still gets
+    decoded through *transcribe*."""
+    corpus = _meeting_corpus(tmp_path)
+    decoded: list[str] = []
+
+    def counting_transcribe(wav: Path) -> str:
+        decoded.append(wav.stem)
+        return "backlog on täynnä"
+
+    # Reuse only has a different stem — the meeting sample is not in it.
+    run_meeting_eval(corpus, counting_transcribe, reuse={"other_sample": "something"})
+    assert decoded == ["meeting_sample"]
 
 
 def test_run_meeting_eval_transcriber_failure_scores_as_empty(tmp_path: Path) -> None:
