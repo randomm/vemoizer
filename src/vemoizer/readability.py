@@ -16,7 +16,11 @@ Both operate on plain word/segment dicts — no models, no I/O.
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+from .slice_align import slice_similarity
+from .textnorm import textnorm
 
 #: Silence between consecutive segments that starts a new paragraph.
 PARAGRAPH_GAP_S = 1.5
@@ -127,10 +131,13 @@ def paragraphs(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
             and current_speaker is not None
             and speaker != current_speaker
         )
+        suspect = seg.get("suspect")
         if current is None or gap_break or speaker_break:
             current = {"start": start, "end": end, "text": seg_text}
             if speaker is not None:
                 current["speaker"] = speaker
+            if suspect is not None:
+                current["suspect"] = suspect
             current_speaker = speaker
             paras.append(current)
         else:
@@ -139,4 +146,156 @@ def paragraphs(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if speaker is not None and current_speaker is None:
                 current["speaker"] = speaker
                 current_speaker = speaker
+            # worst suspect wins: garble outranks number
+            if suspect == "garble" or (
+                suspect == "number" and current.get("suspect") is None
+            ):
+                current["suspect"] = suspect
     return paras
+
+
+#: A word or phrase repeated at least this many times consecutively is a
+#: recognizer loop, not speech.
+LOOP_MIN_REPEATS = 3
+
+#: Paragraphs longer than this are unreadable walls and get split.
+MAX_PARAGRAPH_CHARS = 1200
+
+#: Preferred split point when breaking a wall.
+_SPLIT_TARGET_CHARS = 900
+
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?…])\s+")
+
+
+def _collapse_loops(text: str) -> str:
+    """Collapse consecutive word/n-gram repetitions (n=1..4) to one + ``…``.
+
+    Whisper's classic failure mode emits the same token dozens of times
+    ("Janni, " x74 was observed). Two repeats are normal speech ("joo joo");
+    :data:`LOOP_MIN_REPEATS`+ is a loop. The collapse is marked with an
+    ellipsis rather than hidden — the transcript should show something was
+    elided.
+    """
+    words = text.split()
+    out: list[str] = []
+    i = 0
+    while i < len(words):
+        collapsed = False
+        for n in range(1, 5):
+            gram = words[i : i + n]
+            if len(gram) < n:
+                continue
+            reps = 1
+            while words[i + reps * n : i + (reps + 1) * n] == gram:
+                reps += 1
+            if reps >= LOOP_MIN_REPEATS:
+                out.extend(gram)
+                out.append("…")
+                i += reps * n
+                collapsed = True
+                break
+        if not collapsed:
+            out.append(words[i])
+            i += 1
+    return " ".join(out)
+
+
+def _split_wall(para: dict[str, Any]) -> list[dict[str, Any]]:
+    """Split an over-long paragraph at sentence boundaries.
+
+    Piece times are interpolated by character proportion over the original
+    span — approximate, but monotonic and bounded by the paragraph's real
+    start/end.
+    """
+    text = str(para["text"])
+    if len(text) <= MAX_PARAGRAPH_CHARS:
+        return [para]
+    sentences = _SENTENCE_BOUNDARY.split(text)
+    chunks: list[str] = []
+    current = ""
+    for sentence in sentences:
+        candidate = f"{current} {sentence}".strip() if current else sentence
+        if current and len(candidate) > _SPLIT_TARGET_CHARS:
+            chunks.append(current)
+            current = sentence
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    start, end = float(para["start"]), float(para["end"])
+    duration = max(end - start, 0.0)
+    total = sum(len(c) for c in chunks) or 1
+    pieces: list[dict[str, Any]] = []
+    consumed = 0
+    for chunk in chunks:
+        piece_start = start + duration * consumed / total
+        consumed += len(chunk)
+        piece_end = start + duration * consumed / total
+        pieces.append({**para, "start": piece_start, "end": piece_end, "text": chunk})
+    if pieces:
+        pieces[-1]["end"] = end
+    return pieces
+
+
+#: Adjacent paragraphs no longer than this whose normalized similarity is
+#: at least :data:`FUZZY_DEDUPE_SIMILARITY` are the same utterance decoded
+#: twice across a diarization cut, label-blind. Longer paragraphs never
+#: fuzzy-dedupe: a long near-duplicate is real content.
+FUZZY_DEDUPE_MAX_CHARS = 60
+FUZZY_DEDUPE_SIMILARITY = 0.85
+
+#: A boundary echo repeats the previous paragraph's trailing words at the
+#: start of the next one; matches of 2..8 words are stripped.
+_ECHO_MIN_WORDS = 2
+_ECHO_MAX_WORDS = 8
+
+
+def _strip_boundary_echo(prev_text: str, text: str) -> str:
+    """Drop *text*'s leading words that echo *prev_text*'s trailing words."""
+    prev_norm = [textnorm(w) for w in prev_text.split()]
+    words = text.split()
+    norm = [textnorm(w) for w in words]
+    top = min(_ECHO_MAX_WORDS, len(prev_norm), len(words) - 1)
+    for k in range(top, _ECHO_MIN_WORDS - 1, -1):
+        if norm[:k] == prev_norm[-k:] and all(norm[:k]):
+            return " ".join(words[k:])
+    return text
+
+
+def tidy_paragraphs(paragraphs_in: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deterministic hygiene over assembled paragraphs.
+
+    Mechanical defects the LLM repair pass must not (and its no-invention
+    guard correctly will not) handle: recognizer repetition loops, adjacent
+    duplicate paragraphs — exact, or near-identical short fragments emitted
+    under two speaker labels across a diarization cut — boundary echoes,
+    paragraphs with no alphabetic content, and unreadable monologue walls.
+    Pure function; timing and speaker metadata preserved.
+    """
+    out: list[dict[str, Any]] = []
+    prev_norm: str | None = None
+    prev_text: str | None = None
+    for para in paragraphs_in:
+        text = _collapse_loops(str(para.get("text", "")).strip())
+        if not any(ch.isalpha() for ch in text):
+            continue
+        norm = textnorm(text)
+        if prev_norm is not None and norm == prev_norm:
+            continue
+        if (
+            prev_text is not None
+            and len(text) <= FUZZY_DEDUPE_MAX_CHARS
+            and len(prev_text) <= FUZZY_DEDUPE_MAX_CHARS
+            and slice_similarity(prev_text, text) >= FUZZY_DEDUPE_SIMILARITY
+        ):
+            continue
+        if prev_text is not None:
+            stripped = _strip_boundary_echo(prev_text, text)
+            if stripped != text:
+                text = stripped
+                norm = textnorm(text)
+                if not any(ch.isalpha() for ch in text):
+                    continue
+        prev_norm, prev_text = norm, text
+        out.extend(_split_wall({**para, "text": text}))
+    return out

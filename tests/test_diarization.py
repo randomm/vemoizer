@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
+import pytest
 
 from vemoizer.diarization import (
     ATTRIBUTION,
@@ -122,6 +123,32 @@ def test_load_pipeline_lazy_imports_pyannote(monkeypatch):
     fake_pipeline_cls.from_pretrained.assert_called_once_with("/fake/hf-cache/snapshot")
 
 
+def test_load_pipeline_raises_on_none(monkeypatch):
+    """A snapshot that yields no loadable pipeline fails loudly with a clear
+    error (instead of ``None.to``) rather than a confusing downstream crash."""
+    import sys
+    import types
+
+    fake_pipeline_cls = mock.Mock()
+    fake_pipeline_cls.from_pretrained.return_value = None
+
+    module = types.ModuleType("pyannote.audio")
+    module.Pipeline = fake_pipeline_cls  # ty: ignore[unresolved-attribute]
+    parent = types.ModuleType("pyannote")
+    parent.audio = module  # ty: ignore[unresolved-attribute]
+    monkeypatch.setitem(sys.modules, "pyannote", parent)
+    monkeypatch.setitem(sys.modules, "pyannote.audio", module)
+    monkeypatch.setitem(sys.modules, "torch", mock.Mock())
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+
+    hf_mod = types.ModuleType("huggingface_hub")
+    hf_mod.snapshot_download = mock.Mock(return_value="/fake/hf-cache/snapshot")  # ty: ignore[unresolved-attribute]
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hf_mod)
+
+    with pytest.raises(RuntimeError, match="returned None"):
+        _load_pipeline("cpu")
+
+
 def test_attribution_string_is_cc_by():
     assert ATTRIBUTION.startswith(
         "Speaker diarization: pyannote/speaker-diarization-community-1"
@@ -154,3 +181,33 @@ def test_pipeline_receives_waveform_tensor_not_ndarray(monkeypatch):
     waveform = received["waveform"]
     # (channel, time) with a leading singleton channel dim
     assert tuple(waveform.shape) == (1, len(_AUDIO))
+
+
+def _received_kwargs(monkeypatch, speakers) -> dict:
+    received: dict = {}
+
+    def fake_pipeline(waveforms, **kwargs):
+        received.update(kwargs)
+        wrapper = mock.Mock(spec=["speaker_diarization"])
+        wrapper.speaker_diarization = _fake_diarization()
+        return wrapper
+
+    pipeline = mock.Mock(side_effect=fake_pipeline)
+    monkeypatch.setattr("vemoizer.diarization._load_pipeline", lambda device: pipeline)
+    diarize(_AUDIO, device="cpu", num_speakers=speakers)
+    return received
+
+
+def test_exact_speaker_count_pins_num_speakers(monkeypatch):
+    assert _received_kwargs(monkeypatch, 4) == {"num_speakers": 4}
+
+
+def test_speaker_range_bounds_clustering(monkeypatch):
+    assert _received_kwargs(monkeypatch, (3, 5)) == {
+        "min_speakers": 3,
+        "max_speakers": 5,
+    }
+
+
+def test_no_speaker_count_leaves_clustering_free(monkeypatch):
+    assert _received_kwargs(monkeypatch, None) == {}

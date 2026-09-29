@@ -289,7 +289,7 @@ class ConformerConvolution(nn.Module):
     def __call__(self, x: mx.array) -> mx.array:
         x = self.pointwise_conv1(x)
         x = nn.glu(x, axis=2)
-        x = mx.pad(x, ((0, 0), (self.padding, self.padding), (0, 0)))
+        x = mx.pad(x, [(0, 0), (self.padding, self.padding), (0, 0)])
         x = self.depthwise_conv(x)
         x = self.batch_norm(x)
         x = nn.silu(x)
@@ -464,7 +464,16 @@ class CanaryModel(nn.Module):
         )
         pos = len(prompt_ids)
         for _ in range(max_tokens):
-            next_token = int(mx.argmax(logits[:, -1], axis=-1).item())
+            token_idx = mx.argmax(logits[:, -1], axis=-1).item()
+            if isinstance(token_idx, int):
+                next_token = token_idx
+            elif isinstance(token_idx, float):
+                next_token = int(token_idx)
+            else:
+                raise TypeError(
+                    f"argmax().item() returned {type(token_idx).__name__}; "
+                    "expected int or float"
+                )
             if next_token == eos_id:
                 break
             generated.append(next_token)

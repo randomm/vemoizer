@@ -41,10 +41,61 @@ DEFAULT_TOLERANCE = 0.02
 DEFAULT_BASELINE = Path("tests/fixtures/wer_baseline.json")
 
 
+def transcribe_decode_only(path: Path | str, *, backend: str) -> dict:
+    """Run ingest -> VAD -> one single decode; no consensus, no LLM.
+
+    Lives here because eval is its only caller: the harness scores each
+    decode backend on its own so the consensus gain is a measured number
+    (invariant #7). The stage chain mirrors ``transcribe_file``'s decode
+    stage exactly — same VAD slicing, same merge.
+    """
+    from contextlib import suppress
+    from pathlib import Path as _Path
+    from typing import Any
+
+    import vemoizer.pipeline as pipeline_module
+    from vemoizer.decode_stage import decode_all
+    from vemoizer.ingest import IngestError
+
+    logger = pipeline_module.logger
+    # Resolved through the pipeline module so the same seams (and test
+    # monkeypatching) govern eval decodes and pipeline decodes alike.
+    backends = {
+        "parakeet": pipeline_module.ParakeetTranscriber,
+        "canary": pipeline_module.CanaryTranscriber,
+    }
+    if backend not in backends:
+        known = ", ".join(sorted(backends))
+        raise ValueError(f"unknown backend {backend!r} (known: {known})")
+    try:
+        audio = pipeline_module.ingest_audio(_Path(path))
+    except IngestError as e:
+        logger.error("ingest failed for %s: %s", path, e)
+        return {"text": "", "segments": [], "error": str(e)}
+    if len(audio) == 0:
+        return {"text": "", "segments": []}
+    slices = pipeline_module._speech_slices(audio)
+    transcriber: Any = None
+    result: dict[str, Any] | None = None
+    try:
+        transcriber = backends[backend]()
+        result = decode_all(transcriber, slices, f"decode ({backend})")
+    except Exception as e:  # noqa: BLE001 - fail-open stage boundary
+        logger.warning("decode (%s) failed: %s", backend, e)
+    finally:
+        if transcriber is not None:
+            with suppress(Exception):  # cleanup is best-effort (fail-open)
+                transcriber.cleanup()
+    if result is None:
+        return {"text": "", "segments": []}
+    return {
+        "text": str(result.get("text", "")).strip(),
+        "segments": list(result.get("segments") or []),
+    }
+
+
 def _decode_only(backend: str) -> Callable[[Path], str]:
     def _transcribe(wav: Path) -> str:
-        from vemoizer.pipeline import transcribe_decode_only
-
         return transcribe_decode_only(wav, backend=backend)["text"]
 
     return _transcribe

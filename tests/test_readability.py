@@ -8,7 +8,7 @@ instead of patching into it.
 
 from __future__ import annotations
 
-from vemoizer.readability import paragraphs, splice_verdicts
+from vemoizer.readability import paragraphs, splice_verdicts, tidy_paragraphs
 
 
 def _w(word: str, start: float, end: float) -> dict:
@@ -127,3 +127,121 @@ def test_paragraphs_empty_input() -> None:
 def test_paragraphs_unlabelled_segments_have_no_speaker_key() -> None:
     paras = paragraphs([_seg("moi", 0.0, 1.0)])
     assert "speaker" not in paras[0]
+
+
+# -- tidy_paragraphs (issue #71 forensics) -------------------------------
+#
+# Deterministic hygiene between assembly and repair: whisper repetition
+# loops ("Janni, " x74), duplicate adjacent paragraphs, digit-only noise
+# and monologue walls are mechanical defects — an LLM is the wrong tool
+# (its no-invention guard rightly vetoes a 74->1 collapse).
+
+
+def test_repetition_loop_collapses() -> None:
+    paras = [_seg("Janni, " * 74 + "aloitetaan", 0.0, 10.0)]
+    out = tidy_paragraphs(paras)
+    text = out[0]["text"]
+    assert text.count("Janni") == 1
+    assert "aloitetaan" in text
+    assert "…" in text  # the collapse is marked, not hidden
+
+
+def test_ngram_loops_collapse_too() -> None:
+    paras = [_seg("se on hyvä " * 5 + "idea", 0.0, 5.0)]
+    out = tidy_paragraphs(paras)
+    assert out[0]["text"].count("se on hyvä") == 1
+
+
+def test_moderate_repetition_is_left_alone() -> None:
+    """Two repeats are normal speech ('joo joo'); three+ is a loop."""
+    paras = [_seg("joo joo mennään", 0.0, 2.0)]
+    assert tidy_paragraphs(paras)[0]["text"] == "joo joo mennään"
+
+
+def test_identical_adjacent_paragraphs_dedupe() -> None:
+    paras = [
+        _seg("Tilauksen luominen ERP:ään.", 0.0, 2.0, speaker="S1"),
+        _seg("Tilauksen luominen ERP:ään.", 2.0, 4.0, speaker="S2"),
+        _seg("eri asia", 4.0, 5.0),
+    ]
+    out = tidy_paragraphs(paras)
+    assert [p["text"] for p in out] == ["Tilauksen luominen ERP:ään.", "eri asia"]
+
+
+def test_non_alphabetic_paragraphs_drop() -> None:
+    paras = [_seg("2708202", 0.0, 1.0), _seg("oikea lause", 1.0, 2.0)]
+    out = tidy_paragraphs(paras)
+    assert [p["text"] for p in out] == ["oikea lause"]
+
+
+def test_monologue_walls_split_at_sentences() -> None:
+    sentence = "Tässä on yksi kokonainen virke joka kertoo asioista. "
+    paras = [_seg((sentence * 40).strip(), 0.0, 100.0, speaker="S1")]
+    out = tidy_paragraphs(paras)
+    assert len(out) >= 2
+    for p in out:
+        assert len(p["text"]) <= 1200
+        assert p["speaker"] == "S1"
+    # timing stays monotonic and covers the original span
+    assert out[0]["start"] == 0.0
+    assert out[-1]["end"] == 100.0
+    for a, b in zip(out, out[1:], strict=False):
+        assert a["end"] <= b["start"] + 1e-6
+
+
+def test_tidy_empty_input() -> None:
+    assert tidy_paragraphs([]) == []
+
+
+def test_near_duplicate_short_paragraphs_dedupe_across_labels() -> None:
+    """Diarization boundary echo: same short sentence under two labels."""
+    paras = [
+        _seg("Tilauksen luominen ERP:ään.", 0.0, 2.0, speaker="S1"),
+        _seg("Tilauksen luominen ERP:hen", 2.0, 4.0, speaker="S2"),
+        _seg("eri asia kokonaan", 4.0, 5.0, speaker="S3"),
+    ]
+    out = tidy_paragraphs(paras)
+    assert [p["text"] for p in out] == [
+        "Tilauksen luominen ERP:ään.",
+        "eri asia kokonaan",
+    ]
+    assert out[0]["speaker"] == "S1"
+
+
+def test_long_near_duplicate_paragraphs_are_kept() -> None:
+    """Fuzzy dedupe only fires on short fragments, never real content."""
+    base = (
+        "Tässä on pidempi kappale jossa käydään läpi projektin tilanne "
+        "ja sovitaan seuraavista askelista yhdessä tiimin kanssa nyt."
+    )
+    variant = base.replace("nyt.", "heti.")
+    paras = [
+        _seg(base, 0.0, 5.0, speaker="S1"),
+        _seg(variant, 5.0, 10.0, speaker="S2"),
+    ]
+    out = tidy_paragraphs(paras)
+    assert len(out) == 2
+
+
+def test_boundary_echo_words_are_stripped_from_next_paragraph() -> None:
+    """Words duplicated across a speaker cut render once, not twice."""
+    paras = [
+        _seg("Sovitaan että demo pidetään perjantaina", 0.0, 3.0, speaker="S1"),
+        _seg(
+            "demo pidetään perjantaina ja kutsutaan kaikki mukaan",
+            3.0,
+            6.0,
+            speaker="S2",
+        ),
+    ]
+    out = tidy_paragraphs(paras)
+    assert out[1]["text"] == "ja kutsutaan kaikki mukaan"
+
+
+def test_single_shared_word_is_not_an_echo() -> None:
+    paras = [
+        _seg("Katsotaan tilanne huomenna", 0.0, 2.0, speaker="S1"),
+        _seg("huomenna on parempi päivä", 2.0, 4.0, speaker="S2"),
+    ]
+    out = tidy_paragraphs(paras)
+    assert out[1]["text"] == "huomenna on parempi päivä"

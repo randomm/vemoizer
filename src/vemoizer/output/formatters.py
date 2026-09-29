@@ -142,7 +142,8 @@ def format_txt(transcript: dict[str, Any]) -> str:
             body = str(para.get("text", "")).strip()
             if not body:
                 continue
-            blocks.append(_speaker_label(para) + body)
+            prefix = "⚠ " if para.get("suspect") else ""
+            blocks.append(prefix + _speaker_label(para) + body)
         if blocks:
             return "\n\n".join(blocks) + "\n"
     segments = _segments(transcript)

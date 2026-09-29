@@ -130,3 +130,152 @@ def test_generate_notes_never_raises() -> None:
     client = MagicMock()
     client.complete = MagicMock(side_effect=RuntimeError("provider exploded"))
     assert generate_notes(client, "teksti") is None
+
+
+# -- speaker grounding + glossary (issue #71 QA) -------------------------
+#
+# QA on a real meeting: the notes stage received raw text with NO speaker
+# information, so action items attributed tasks to invented names ("Mui")
+# and to the wrong people. Notes must see the speaker-labelled paragraphs
+# and be forbidden from inventing attributions.
+
+
+def test_notes_prompt_carries_speaker_labels() -> None:
+    paragraphs = [
+        {
+            "start": 0.0,
+            "end": 5.0,
+            "text": "minä teen matskut",
+            "speaker": "SPEAKER_01",
+        },
+        {"start": 6.0, "end": 9.0, "text": "sovitaan niin", "speaker": "SPEAKER_00"},
+    ]
+    seen = {}
+
+    def spy(system, user, max_tokens=2048):
+        seen["system"], seen["user"] = system, user
+        return _notes_json()
+
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=spy)
+    notes = generate_notes(
+        client, "minä teen matskut sovitaan niin", paragraphs=paragraphs
+    )
+    assert notes is not None
+    assert "[SPEAKER_01]" in seen["user"]
+    assert "[SPEAKER_00]" in seen["user"]
+    # attribution rules present
+    assert "SPEAKER" in seen["system"]
+
+
+def test_notes_prompt_forbids_inventing_names() -> None:
+    seen = {}
+
+    def spy(system, user, max_tokens=2048):
+        seen["system"] = system
+        return _notes_json()
+
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=spy)
+    generate_notes(client, "teksti tässä")
+    lowered = seen["system"].lower()
+    assert "älä keksi" in lowered or "never invent" in lowered
+
+
+def test_notes_prompt_carries_glossary_terms() -> None:
+    seen = {}
+
+    def spy(system, user, max_tokens=2048):
+        seen["system"] = system
+        return _notes_json()
+
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=spy)
+    generate_notes(client, "teksti", glossary=["Flagship-hanke", "Riihimäki"])
+    assert "Flagship-hanke" in seen["system"]
+    assert "Riihimäki" in seen["system"]
+
+
+def test_notes_prompt_carries_commitment_rules() -> None:
+    """Declined proposals became action items; the prompt must rule on it."""
+    from vemoizer.notes import _NOTES_SYSTEM_PROMPT
+
+    assert "ACTION ITEM RULES" in _NOTES_SYSTEM_PROMPT
+    assert "declined" in _NOTES_SYSTEM_PROMPT
+    assert "name mentioned once is not an owner" in _NOTES_SYSTEM_PROMPT
+
+
+def test_action_item_objects_ground_owner_via_evidence() -> None:
+    """Owner survives only when the evidence quote exists in the input."""
+    transcript = "[S1] Mä teen matskut valmiiksi torstaina. [S2] Hyvä juttu."
+    payload = json.dumps(
+        {
+            "title": "t",
+            "summary": "s",
+            "key_points": [],
+            "action_items": [
+                {
+                    "item": "Tekee matskut valmiiksi",
+                    "owner": "S1",
+                    "evidence": "Mä teen matskut valmiiksi torstaina",
+                },
+                {
+                    "item": "Ostaa ponin",
+                    "owner": "S2",
+                    "evidence": "tätä ei sanottu missään kohtaa",
+                },
+            ],
+        }
+    )
+    notes = generate_notes(_client([payload]), transcript)
+    assert notes is not None
+    assert notes["action_items"] == [
+        "S1: Tekee matskut valmiiksi",
+        "Ostaa ponin",
+    ]
+
+
+def test_suspect_paragraphs_are_marked_in_the_notes_prompt() -> None:
+    seen: dict[str, str] = {}
+
+    def spy(system: str, user: str) -> str:
+        seen["system"], seen["user"] = system, user
+        return _notes_json()
+
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=spy)
+    paragraphs = [
+        {"text": "selvä kohta", "speaker": "S1"},
+        {"text": "kolme miljoonaa euroa", "speaker": "S2", "suspect": "number"},
+    ]
+    generate_notes(client, "x", paragraphs=paragraphs)
+    assert "⚠" in seen["user"]
+    assert "epävarma" in seen["system"].lower()
+
+
+def test_prompt_carries_grounding_rules() -> None:
+    from vemoizer.notes import _NOTES_SYSTEM_PROMPT
+
+    assert "evidence" in _NOTES_SYSTEM_PROMPT
+    assert "Sovitaan" in _NOTES_SYSTEM_PROMPT
+
+
+def test_owner_prefix_is_skipped_when_item_already_starts_with_owner() -> None:
+    transcript = "[S1] Tuomas laittaa pyynnöt eteenpäin huomenna."
+    payload = json.dumps(
+        {
+            "title": "t",
+            "summary": "s",
+            "key_points": [],
+            "action_items": [
+                {
+                    "item": "Tuomas laittaa pyynnöt eteenpäin",
+                    "owner": "Tuomas",
+                    "evidence": "Tuomas laittaa pyynnöt eteenpäin huomenna",
+                }
+            ],
+        }
+    )
+    notes = generate_notes(_client([payload]), transcript)
+    assert notes is not None
+    assert notes["action_items"] == ["Tuomas laittaa pyynnöt eteenpäin"]
