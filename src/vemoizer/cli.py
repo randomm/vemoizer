@@ -247,7 +247,10 @@ def transcribe(
                 and not result.get("segments")
                 and "error" not in result
             ):
-                typer.echo(f"error: no transcript produced for {file.name}", err=True)
+                typer.echo(
+                    f"error: no transcript produced for {file.name} (empty transcript)",
+                    err=True,
+                )
                 exit_code = 1
                 continue
             # Fail loud (issue #78): the user asked for speaker labels but
