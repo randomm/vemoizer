@@ -179,6 +179,11 @@ def format_json(transcript: dict[str, Any]) -> str:
         out["segments"] = transcript["segments"]
     if "words" in transcript and transcript["words"]:
         out["words"] = transcript["words"]
+    # M3 (issue #77): multi-part groups record their part offsets here;
+    # single-file runs have no part_markers key at all, so this mirrors
+    # the mirror-present-keys behaviour of the optional fields above.
+    if "part_markers" in transcript and transcript["part_markers"]:
+        out["part_markers"] = transcript["part_markers"]
     return json.dumps(out, ensure_ascii=False, indent=2) + "\n"
 
 

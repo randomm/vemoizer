@@ -27,14 +27,25 @@ layers entirely for meeting (the file is passed straight through); for
 memo it is filtered to that file's correction pairs via a second temp
 file (the whisper prompt stays empty, mirroring the layered memo seam).
 Temp files are deleted after the run.
+
+M3 split-recording grouping (issue #77): ``run_batch`` takes the
+M2-defined :class:`~vemoizer.presets.RunOptions` and, for 2+ input
+files, adds the grouping layer (``grouping`` module): natural sort,
+20 s boundary decodes, the confirm step (``--yes`` / ``--no-group`` /
+interactive), ffmpeg concat of multi-part groups, one decode per group
+(invariant 6), and the ``part_markers`` sidecar record.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import typer
 
 from vemoizer.caffeinate import caffeinate_context
@@ -45,6 +56,7 @@ from vemoizer.output.naming import (
     dated_basename,
     nfc_stem_and_suffix,
 )
+from vemoizer.presets import RunOptions
 
 #: The two output formats the meeting and memo presets write.
 PRESET_FORMATS = ("md", "json")
@@ -249,6 +261,275 @@ def transcribe_batch(
     return exit_code
 
 
+def _transcribe_one(
+    file: Path,
+    *,
+    config_path: str | None,
+    profile: str,
+    repair: bool,
+    glossary_path: str | None,
+    speakers: SpeakerCount | None,
+    diarize: bool,
+) -> dict:
+    """One ``transcribe_file`` call with the fail-loud config check."""
+    from vemoizer.pipeline import transcribe_file
+
+    try:
+        # Fail loud on a malformed project config (issue #78): clean error
+        # line, never a traceback (issue #78).
+        _resolve_llm_config(config_path)
+    except ConfigError as e:
+        return {"text": "", "segments": [], "error": str(e)}
+    return transcribe_file(
+        file,
+        diarize=diarize,
+        config_path=config_path,
+        profile=profile,
+        repair=repair,
+        glossary_path=glossary_path,
+        speakers=speakers,
+    )
+
+
+def run_batch(
+    files: list[Path],
+    options: RunOptions,
+    *,
+    formats: Sequence[str] = ("txt", "json", "srt", "vtt", "md"),
+    out: Path | None = None,
+    quiet: bool = False,
+    yes: bool = False,
+    no_group: bool = False,
+    transcribe_fn: Callable[[np.ndarray], dict[str, Any]] | None = None,
+    input_fn: Callable[[str], str] | None = None,
+    print_fn: Callable[[str], None] | None = None,
+    tty_isatty: Callable[[], bool] | None = None,
+) -> int:
+    """Transcribe *files* with M3 split-recording grouping (issue #77).
+
+    Takes the M2 :class:`~vemoizer.presets.RunOptions` (not an ad-hoc
+    kwargs dict). Single file: no grouping work at all (no boundary
+    slice, no Whisper boundary model load) — the plain per-file loop.
+    Multi-file: natural sort, then:
+
+    - ``--no-group``: each file transcribed standalone (no boundary
+      decode, no concat, no part markers);
+    - ``--yes``: the boundary decodes still run (they feed the proposal)
+      and every proposal is accepted without a prompt;
+    - interactive: one confirmation prompt per boundary (Enter accept,
+      ``e`` edit — any valid partition, ``q`` quit).
+
+    Multi-part groups are joined with the ffmpeg concat demuxer (``-c
+    copy``) into a temp file and decoded ONCE (invariant 6); the part
+    offsets (decoded-PCM, never ffprobe) become
+    ``transcript["part_markers"]`` so the JSON sidecar and Markdown
+    carry the ``— osa N (äänitys X) —`` markers. Single-part groups
+    carry no ``part_markers`` key at all.
+
+    Returns 0 on success, 1 if any group failed, 2 on a bad
+    combination of group flags.
+    """
+    from vemoizer.grouping import (
+        GroupingError,
+        concat_groups,
+        confirm_groups,
+        decode_boundaries,
+        natural_sort,
+        part_offsets,
+        propose_groups,
+    )
+
+    ordered = natural_sort(files)
+
+    # Mutually exclusive group-decision flags.
+    if yes and no_group:
+        typer.echo("error: --yes and --no-group are mutually exclusive", err=True)
+        return 2
+
+    # Single file: no grouping work at all — no boundary slice, no
+    # boundary model load, no prompt — the plain per-file loop.
+    if len(ordered) < 2:
+        return _run_plain(
+            ordered,
+            options,
+            formats=formats,
+            out=out,
+            quiet=quiet,
+        )
+
+    if no_group:
+        # --no-group: each file standalone — no boundary decode, no
+        # concat, no part markers.
+        return _run_plain(
+            ordered,
+            options,
+            formats=formats,
+            out=out,
+            quiet=quiet,
+        )
+
+    if not no_group:
+        # The TTY guard is BEFORE any boundary decode or model load, so a
+        # piped/CI invocation fails in milliseconds instead of hanging on
+        # input() — and --yes never pays the prompt cost it skips.
+        isatty = tty_isatty if tty_isatty is not None else sys.stdin.isatty
+        if not yes and input_fn is None and not isatty():
+            typer.echo(
+                "error: group confirmation requires a TTY; use --yes or --no-group",
+                err=True,
+            )
+            return 2
+        # --yes still runs the boundary decodes (they feed the proposal);
+        # --no-group is the flag that skips them.
+        tail_texts, head_texts = decode_boundaries(ordered, transcribe_fn)
+        proposals = propose_groups(ordered, tail_texts, head_texts)
+        try:
+            groups = confirm_groups(
+                ordered,
+                proposals,
+                yes=yes,
+                no_group=False,
+                input_fn=input_fn or input,
+                print_fn=(
+                    print_fn
+                    if print_fn is not None
+                    else (lambda s: typer.echo(s, err=True))
+                ),
+            )
+        except GroupingError as e:
+            typer.echo(f"error: {e}", err=True)
+            return 1
+    else:
+        groups = [[p] for p in ordered]
+
+    exit_code = 0
+    with caffeinate_context():
+        for group in groups:
+            if len(group) == 1:
+                result = _transcribe_one(
+                    group[0],
+                    config_path=options.config_path,
+                    profile=options.profile,
+                    repair=options.repair,
+                    glossary_path=options.glossary_path,
+                    speakers=options.speakers,
+                    diarize=options.diarize,
+                )
+                label = group[0].name
+                stem, _ = nfc_stem_and_suffix(group[0])
+            else:
+                try:
+                    merged = concat_groups(group)
+                except GroupingError as e:
+                    typer.echo(f"error: {e}", err=True)
+                    return 1
+                merged_is_temp = merged != group[0]
+                try:
+                    offsets = part_offsets(group)
+                    result = _transcribe_one(
+                        merged,
+                        config_path=options.config_path,
+                        profile=options.profile,
+                        repair=options.repair,
+                        glossary_path=options.glossary_path,
+                        speakers=options.speakers,
+                        diarize=options.diarize,
+                    )
+                finally:
+                    if merged_is_temp:
+                        merged.unlink(missing_ok=True)
+                if "error" not in result:
+                    # Multi-part groups only: single-part groups get no
+                    # part_markers key at all (issue #77).
+                    result["part_markers"] = [
+                        {
+                            "offset": off.start_offset,
+                            "label": f"— osa {off.part_number} "
+                            f"(äänitys {off.source_filename})",
+                        }
+                        for off in offsets
+                    ]
+                label = "+".join(p.name for p in group)
+                stem, _ = nfc_stem_and_suffix(group[0])
+
+            if _check_result(Path(label), result, diarize=options.diarize):
+                exit_code = 1
+                continue
+            if not _write_group_outputs(
+                group,
+                result,
+                formats=list(formats),
+                out=out,
+                quiet=quiet,
+            ):
+                exit_code = 1
+                continue
+            if not quiet:
+                typer.echo(f"wrote transcript for {label}")
+    return exit_code
+
+
+def _run_plain(
+    ordered: list[Path],
+    options: RunOptions,
+    *,
+    formats: Sequence[str],
+    out: Path | None,
+    quiet: bool,
+) -> int:
+    """The plain per-file loop (single-file runs and --no-group groups)."""
+    exit_code = 0
+    with caffeinate_context():
+        for file in ordered:
+            result = _transcribe_one(
+                file,
+                config_path=options.config_path,
+                profile=options.profile,
+                repair=options.repair,
+                glossary_path=options.glossary_path,
+                speakers=options.speakers,
+                diarize=options.diarize,
+            )
+            if _check_result(file, result, diarize=options.diarize):
+                exit_code = 1
+                continue
+            if not _write_group_outputs(
+                [file],
+                result,
+                formats=list(formats),
+                out=out,
+                quiet=quiet,
+            ):
+                exit_code = 1
+                continue
+            if not quiet:
+                typer.echo(f"wrote transcript for {file.name}")
+    return exit_code
+
+
+def _write_group_outputs(
+    group: list[Path],
+    result: dict,
+    *,
+    formats: list[str],
+    out: Path | None,
+    quiet: bool,
+) -> bool:
+    """Write one group's outputs; True on success (the --out override
+    still applies, as in the plain loop)."""
+    if out is not None:
+        return _write_output(out, result, formats[0] if formats else "txt")
+    stem, _ = nfc_stem_and_suffix(group[0])
+    from vemoizer.output.formatters import FORMAT_EXTENSIONS
+
+    return all(
+        [
+            _write_output(Path(f"{stem}{FORMAT_EXTENSIONS[fmt]}"), result, fmt)
+            for fmt in formats
+        ]
+    )
+
+
 def run_preset(
     files: list[Path],
     *,
@@ -272,7 +553,7 @@ def run_preset(
     pairs; memo: merged correction pairs ONLY (whisper prompt stays
     empty, ``apply_corrections`` still fires).  An explicit
     ``--glossary`` is passed through as-is for meeting; for memo it is
-    filtered to that file's correction pairs via a temp file (same
+    filtered to correction pairs only, via a temp file (same
     empty-whisper-prompt invariant).  ``quiet`` suppresses the final
     ``wrote <path>`` summary lines.  Temp files are deleted after the
     run.
@@ -333,8 +614,8 @@ def run_preset(
     # Temp-file seam: without --glossary, write the composed glossary to
     # a temp file and pass it through the existing glossary_path argument
     # (no new pipeline parameter).  Memo: correction pairs ONLY (the
-    # whisper prompt stays empty); meeting: merged terms (bare + @ lines)
-    # plus the merged correction pairs.
+    # whisper prompt stays empty) — meeting: merged terms (bare + @
+    # lines) plus the merged correction pairs.
     temp_path: Path | None = None
     effective_glossary: str | None = None
     exit_code = 0

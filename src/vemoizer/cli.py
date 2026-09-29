@@ -184,6 +184,24 @@ def transcribe(
         help="Run speaker diarization and attach speaker labels "
         "(pyannote.audio; off by default).",
     ),
+    yes: bool = typer.Option(  # noqa: B008
+        False,
+        "--yes",
+        help=(
+            "Group mode for 2+ files: run the boundary decodes and accept "
+            "every continuation proposal without a prompt (mutually "
+            "exclusive with --no-group)."
+        ),
+    ),
+    no_group: bool = typer.Option(  # noqa: B008
+        False,
+        "--no-group",
+        help=(
+            "Skip split-recording grouping entirely (each file is "
+            "transcribed standalone; no boundary decode, no concat, no "
+            "part markers). Mutually exclusive with --yes."
+        ),
+    ),
 ) -> None:
     """Transcribe one or more voice memos and write transcript files."""
     # Resolve low-memory mode (auto-detect or explicit flag)
@@ -221,20 +239,52 @@ def transcribe(
             f"({formats[0]}) is written to it",
             err=True,
         )
+    if yes and no_group:
+        typer.echo("error: --yes and --no-group are mutually exclusive", err=True)
+        raise typer.Exit(code=2)
 
-    exit_code = transcribe_batch(
-        files,
-        formats=formats,
-        config_path=str(config) if config is not None else None,
-        profile=profile,
-        repair=repair,
-        glossary_path=str(glossary) if glossary is not None else None,
-        speakers=speaker_count,
-        diarize=diarize,
-        out=out,
-        quiet=quiet,
-        copy=copy,
-    )
+    # Two or more files: M3 split-recording grouping (issue #77) — natural
+    # sort, 20s boundary decodes, confirmation (--yes / --no-group /
+    # interactive), concat, one decode per group, part markers. A single
+    # file stays on the plain per-file loop (no grouping work at all).
+    if len(files) > 1:
+        from vemoizer.batch import run_batch
+        from vemoizer.presets import RunOptions
+
+        batch_options = RunOptions(
+            profile=profile,
+            diarize=diarize,
+            repair=repair,
+            speakers=speaker_count,
+            glossary_path=str(glossary) if glossary is not None else None,
+            config_path=str(config) if config is not None else None,
+            whisper_prompt=[],
+            llm_terms=[],
+            corrections={},
+        )
+        exit_code = run_batch(
+            files,
+            batch_options,
+            formats=formats,
+            out=out,
+            quiet=quiet,
+            yes=yes,
+            no_group=no_group,
+        )
+    else:
+        exit_code = transcribe_batch(
+            files,
+            formats=formats,
+            config_path=str(config) if config is not None else None,
+            profile=profile,
+            repair=repair,
+            glossary_path=str(glossary) if glossary is not None else None,
+            speakers=speaker_count,
+            diarize=diarize,
+            out=out,
+            quiet=quiet,
+            copy=copy,
+        )
     if exit_code:
         raise typer.Exit(code=exit_code)
 

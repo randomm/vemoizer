@@ -485,6 +485,7 @@ def test_cli_batch_continues_after_empty_transcript(tmp_path, monkeypatch) -> No
     IS written; the final exit code is 1."""
     from typer.testing import CliRunner
 
+    import vemoizer.grouping as grouping
     import vemoizer.pipeline as pipeline_module
     from vemoizer.cli import app as cli_app
 
@@ -493,11 +494,18 @@ def test_cli_batch_continues_after_empty_transcript(tmp_path, monkeypatch) -> No
             return {"text": "", "segments": []}
         return {"text": "moikka", "segments": []}
 
+    def fake_decode(files, transcribe_fn=None):
+        return ["kiitos ja moi"], ["a"]
+
     monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.setattr(grouping, "decode_boundaries", fake_decode)
+    monkeypatch.setattr(grouping, "concat_groups", lambda files: files[0])
+    monkeypatch.setattr(grouping, "part_offsets", lambda files: [])
     monkeypatch.chdir(tmp_path)
     runner = CliRunner()
     result = runner.invoke(
-        cli_app, ["transcribe", "silent.m4a", "good.m4a", "--format", "txt"]
+        cli_app,
+        ["transcribe", "silent.m4a", "good.m4a", "--format", "txt", "--yes"],
     )
     assert result.exit_code == 1
     assert not (tmp_path / "silent.txt").exists()

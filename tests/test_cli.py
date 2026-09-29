@@ -56,12 +56,19 @@ def test_transcribe_missing_file_fails_closed(tmp_path, monkeypatch) -> None:
 
 
 def test_transcribe_with_all_flags(tmp_path, monkeypatch) -> None:
+    import vemoizer.grouping as grouping
     import vemoizer.pipeline as pipeline_module
 
     def fake_transcribe_file(path, **kwargs):
         return {"text": "moikka maailma", "segments": []}
 
+    def fake_decode_boundaries(files, transcribe_fn=None):
+        return ["x"], ["a"]
+
     monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.setattr(grouping, "decode_boundaries", fake_decode_boundaries)
+    monkeypatch.setattr(grouping, "concat_groups", lambda files: files[0])
+    monkeypatch.setattr(grouping, "part_offsets", lambda files: [])
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(
         app,
@@ -76,11 +83,13 @@ def test_transcribe_with_all_flags(tmp_path, monkeypatch) -> None:
             "--out",
             "-",
             "--diarize",
+            "--yes",
         ],
     )
-    # flags are accepted and the pipeline result is emitted on stdout
+    # --yes with a mid-sentence tail -> continuation -> both files in one
+    # group -> one combined output to --out.
     assert result.exit_code == 0
-    assert result.stdout.count("moikka maailma") == 2
+    assert "moikka maailma" in result.stdout
 
 
 def test_transcribe_diarize_default_off(tmp_path, monkeypatch) -> None:
@@ -428,6 +437,8 @@ def test_empty_then_healthy_batch_continues_and_exits_nonzero(
     set to 1 + continue), the second yields real text and IS written. The
     final exit code is 1, matching the existing exit_code=1 + continue
     pattern used for the "error" and write-failure paths."""
+    import vemoizer.grouping as grouping
+
     calls: list = []
 
     def fake(path, **kw):
@@ -436,12 +447,19 @@ def test_empty_then_healthy_batch_continues_and_exits_nonzero(
             return {"text": "", "segments": []}
         return {"text": "moikka", "segments": []}
 
+    def fake_decode(files, transcribe_fn=None):
+        return ["kiitos ja moi"], ["a"]
+
+    monkeypatch.setattr(grouping, "decode_boundaries", fake_decode)
+    monkeypatch.setattr(grouping, "concat_groups", lambda files: files[0])
+    monkeypatch.setattr(grouping, "part_offsets", lambda files: [])
     result = _invoke_transcribe(
         tmp_path,
         monkeypatch,
         fake,
         "a.m4a",
         "b.m4a",
+        "--yes",
     )
     assert result.exit_code == 1
     # Both files were attempted (the loop continued past the first failure).
