@@ -15,14 +15,23 @@ without duplicating the loop.
   title naming.
 
 Both presets call ``transcribe_file`` with the existing signature —
-no new pipeline parameter.  The glossary path flows through the
-existing ``glossary_path`` argument; the temp-file seam for layered
-glossary composition (corrections-only for memo, merged terms+@ for
-meeting) will land with the glossary_layers workstream.
+no new pipeline parameter.  The layered glossary (``glossary_layers``:
+``load_layers`` → ``merge``) is composed into a temporary glossary file
+and passed through the existing ``glossary_path`` argument: for meeting
+the temp file carries the merged terms (bare + ``@`` lines) and merged
+correction pairs; for memo it carries the merged correction pairs only,
+so the whisper ``initial_prompt`` stays empty while
+``apply_corrections`` still fires on the deterministic pairs (issue #82,
+DESIGN DECISION "memo seam").  An explicit ``--glossary`` replaces the
+layers entirely (no temp file); for memo that file's correction pairs
+are used and its prompt terms ignored.  The temp file is deleted after
+the run.
 """
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 
 import typer
@@ -199,6 +208,17 @@ def run_preset(
 ) -> int:
     """Run the *meeting* or *memo* preset over *files*.
 
+    Composition (issue #82, DESIGN DECISION): calls
+    ``glossary_layers.load_layers`` + ``merge`` (no merge when an
+    explicit ``--glossary`` is given), ``presets.resolve_options`` for
+    the resolved options, then ``transcribe_file`` per file with the
+    composed glossary.  Without ``--glossary`` the merged/filtered
+    glossary is written to a temp file passed as ``glossary_path`` —
+    meeting: merged terms (bare + ``@`` lines) and merged correction
+    pairs; memo: merged correction pairs ONLY (whisper prompt stays
+    empty, ``apply_corrections`` still fires) — and the temp file is
+    deleted after the run.
+
     Both presets:
 
     - use ``profile="meeting"`` (whisper decode, skip consensus).
@@ -213,68 +233,127 @@ def run_preset(
     Returns 0 on success, 1 on any failure.
     """
     from vemoizer.pipeline import transcribe_file
+    from vemoizer.presets import resolve_options
 
-    # Resolve preset defaults.
-    if command == "meeting":
-        do_diarize = diarize if diarize is not None else True
-        do_repair = repair if repair is not None else True
-        do_speakers = speakers if speakers is not None else (2, 6)
-    elif command == "memo":
-        do_diarize = diarize if diarize is not None else False
-        do_repair = repair if repair is not None else True
-        do_speakers = None
-    else:
+    if command not in ("meeting", "memo"):
         typer.echo(f"error: unknown preset {command!r}", err=True)
         return 2
+
+    # Layered glossary: load_layers (I/O) → merge (pure) — skipped when
+    # --glossary explicitly replaces both layers entirely (no merging).
+    merged_terms: list[str] = []
+    merged_corrections: dict[str, str] = {}
+    if glossary_path is None:
+        from vemoizer.glossary_layers import load_layers, merge
+
+        home_terms, home_corr, project_terms, project_corr = load_layers()
+        merged_terms, merged_corrections, notices = merge(
+            project_terms,
+            project_corr,
+            home_terms,
+            home_corr,
+        )
+        for notice in notices:
+            typer.echo(notice, err=True)
+
+    # Pure core: resolve the preset options from the merged layers and
+    # the CLI overrides (CLI > layers > preset defaults).
+    options = resolve_options(
+        command,
+        layers=None,
+        cli_overrides={
+            "glossary": glossary_path,
+            "config": config_path,
+            "glossary_terms": merged_terms,
+            "glossary_corrections": merged_corrections,
+            "repair": repair,
+            "diarize": diarize,
+            "speakers": speakers,
+        },
+    )
+
+    # Temp-file seam: without --glossary, write the composed glossary to
+    # a temp file and pass it through the existing glossary_path argument
+    # (no new pipeline parameter).  Memo: correction pairs ONLY (the
+    # whisper prompt stays empty); meeting: merged terms (bare + @ lines)
+    # plus the merged correction pairs.
+    temp_path: Path | None = None
+    if options.glossary_path is None:
+        if command == "memo":
+            lines = [f"{w} => {r}" for w, r in options.corrections.items()]
+        else:
+            lines = [
+                *options.whisper_prompt,
+                *[f"@{t}" for t in options.llm_terms],
+                *[f"{w} => {r}" for w, r in options.corrections.items()],
+            ]
+        if lines:
+            fd, name = tempfile.mkstemp(prefix="vemoizer-glossary-", suffix=".txt")
+            os.close(fd)
+            temp_path = Path(name)
+            temp_path.write_text(
+                "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8"
+            )
+            effective_glossary = str(temp_path)
+        else:
+            effective_glossary = None
+    else:
+        effective_glossary = options.glossary_path
 
     exit_code = 0
     written: list[str] = []
 
-    with caffeinate_context():
-        for file in files:
-            result = transcribe_file(
-                file,
-                diarize=do_diarize,
-                config_path=config_path,
-                profile="meeting",
-                repair=do_repair,
-                glossary_path=glossary_path,
-                speakers=do_speakers,
-            )
-            for warning in result.pop("warnings", []):
-                typer.echo(warning, err=True)
-            if "error" in result:
-                typer.echo(f"error: {result['error']}", err=True)
-                exit_code = 1
-                continue
-            if (
-                not result.get("text")
-                and not result.get("segments")
-                and "error" not in result
-            ):
-                typer.echo(
-                    f"error: no transcript produced for {file.name} (empty transcript)",
-                    err=True,
+    try:
+        with caffeinate_context():
+            for file in files:
+                result = transcribe_file(
+                    file,
+                    diarize=options.diarize,
+                    config_path=options.config_path,
+                    profile=options.profile,
+                    repair=options.repair,
+                    glossary_path=effective_glossary,
+                    speakers=options.speakers,
                 )
-                exit_code = 1
-                continue
-            elif (
-                do_diarize
-                and result.get("segments")
-                and not any("speaker" in seg for seg in result["segments"])
-            ):
-                typer.echo(
-                    f"error: diarize requested but no speaker labels "
-                    f"returned for {file.name}",
-                    err=True,
-                )
-                exit_code = 1
-                continue
+                for warning in result.pop("warnings", []):
+                    typer.echo(warning, err=True)
+                if "error" in result:
+                    typer.echo(f"error: {result['error']}", err=True)
+                    exit_code = 1
+                    continue
+                if (
+                    not result.get("text")
+                    and not result.get("segments")
+                    and "error" not in result
+                ):
+                    typer.echo(
+                        "error: no transcript produced for "
+                        f"{file.name} (empty transcript)",
+                        err=True,
+                    )
+                    exit_code = 1
+                    continue
+                elif (
+                    options.diarize
+                    and result.get("segments")
+                    and not any("speaker" in seg for seg in result["segments"])
+                ):
+                    typer.echo(
+                        f"error: diarize requested but no speaker labels "
+                        f"returned for {file.name}",
+                        err=True,
+                    )
+                    exit_code = 1
+                    continue
 
-            # Determine the fallback stem from the FIRST file in the
-            # argument list (deterministic), not the current iteration.
-            first_stem, _ = nfc_stem_and_suffix(files[0])
-            written.extend(_write_preset_output(result, first_stem, Path.cwd()))
+                # Determine the fallback stem from the FIRST file in the
+                # argument list (deterministic), not the current iteration.
+                first_stem, _ = nfc_stem_and_suffix(files[0])
+                written.extend(_write_preset_output(result, first_stem, Path.cwd()))
+    finally:
+        # The temp glossary file is deleted after the run (issue #82).
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
     # Print one "wrote <relative path>" line per written file at the end.
     for name in written:

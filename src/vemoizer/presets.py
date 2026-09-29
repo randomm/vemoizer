@@ -195,12 +195,19 @@ def resolve_options(
         # runner writes them; glossary_prompt then yields None).
         prompt_terms = []
     config_path = overrides.get("config")
+
+    def _opt(key: str, default: object) -> object:
+        # A None override means "the CLI didn't set this flag" — use the
+        # preset default (None is not a valid CLI value for any of these).
+        value = overrides.get(key)
+        return value if value is not None else default
+
     return replace(
         base,
-        profile=str(overrides.get("profile", base.profile)),
-        diarize=bool(overrides.get("diarize", base.diarize)),
-        repair=bool(overrides.get("repair", base.repair)),
-        speakers=overrides.get("speakers", base.speakers),
+        profile=str(_opt("profile", base.profile)),
+        diarize=bool(_opt("diarize", base.diarize)),
+        repair=bool(_opt("repair", base.repair)),
+        speakers=_opt("speakers", base.speakers),
         glossary_path=(
             str(glossary_path) if glossary_path is not None else base.glossary_path
         ),
