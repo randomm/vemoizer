@@ -751,3 +751,27 @@ def test_no_llm_config_skips_notes_silently(tmp_path, monkeypatch) -> None:
     )
     assert "notes" not in result
     assert "warnings" not in result
+
+
+def test_diarization_run_appends_cc_by_attribution(tmp_path, monkeypatch) -> None:
+    """CC-BY-4.0 requires attribution whenever the gated weights ran."""
+    _consensus_setup(monkeypatch)
+    _patch_redecode(monkeypatch, "moikka")
+    _patch_diarize(monkeypatch, segments=[(0.0, 2.0, "SPEAKER_00")])
+    result = transcribe_file(
+        "/nonexistent.m4a", config_path=str(tmp_path / "none.toml"), diarize=True
+    )
+    from vemoizer.diarization import ATTRIBUTION
+
+    assert ATTRIBUTION in result.get("warnings", [])
+
+
+def test_no_attribution_without_diarization(tmp_path, monkeypatch) -> None:
+    _consensus_setup(monkeypatch)
+    _patch_redecode(monkeypatch, "moikka")
+    result = transcribe_file(
+        "/nonexistent.m4a", config_path=str(tmp_path / "none.toml")
+    )
+    from vemoizer.diarization import ATTRIBUTION
+
+    assert ATTRIBUTION not in result.get("warnings", [])

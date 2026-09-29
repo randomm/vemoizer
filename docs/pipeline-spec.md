@@ -22,8 +22,7 @@ those spans with a third model, and let a configured LLM adjudicate.
      -> VAD (chunk long memos, drop silence)
      -> decode A: Parakeet TDT 0.6B v3  (auto language ID, word timestamps)
      -> decode B: Canary-1b-v2          (strongest off-the-shelf Finnish)
-     -> align A and B on word onsets (DTW)
-     -> flag disputed spans (low word similarity, or reported LID flip)
+     -> slice-level dispute detection (normalized text similarity per VAD slice)
      -> re-decode ONLY disputed slices with Whisper-large Finnish v3
      -> LLM adjudication over candidates + context (optional, fails open)
      -> diarization (speaker labels, CC-BY gated weights)
@@ -111,12 +110,30 @@ VAD model weights ship inside the `silero-vad` pip package
   `TranscriptionResult` contract before reaching alignment (`words` is
   optional in that contract).
 
-### 5. Alignment (DTW on word onsets)
+### 5. Dispute detection (slice-level text similarity)
 
-`src/vemoizer/alignment.py`. Pure, model-free DTW over the word onset lists
-from decodes A and B produces a monotonic word pairing; each pair carries a
-case/punctuation-insensitive similarity cost. One side may be a gap
-(insertion/deletion).
+`src/vemoizer/slice_align.py`. Decode B emits no word timestamps, and
+word-level comparison is wrong for Finnish anyway: measured on the
+reference 64-minute memo, ~70 % of DTW word pairs "dispute" (morphology
+and tokenizer drift between backends) while only ~15 % of speech *time*
+has genuinely divergent slice text. The dispute unit is therefore the
+**VAD slice** (median ~2 s, real bounds — no synthetic timestamps): a
+slice is disputed when the char-level similarity of its normalized A/B
+texts falls below `SLICE_DISPUTE_THRESHOLD` (0.55, calibrated on the
+reference memo). Each disputed span carries the slice's detected language
+(invariant #3). When the span-count cap trims the set, the most severe
+disputes survive, not the earliest.
+
+Guardrails (`src/vemoizer/spans.py`): spans clip to `MAX_SPAN_S` (15 s),
+cap at `MAX_SPANS` (300), and a disputed fraction above
+`MAX_DISPUTED_FRACTION` (25 %) aborts consensus and ships decode A —
+applied only above 60 s of speech (a short clip disputing wholly is
+normal and cheap). `VEMOIZER_DISABLE_CONSENSUS=1` is the kill-switch.
+
+`src/vemoizer/alignment.py` (word-onset DTW) remains the documented
+mechanism for when decode B gains real word timestamps (e.g. Canary
+cross-attention alignment); the slice-level detector is the seam it will
+replace.
 
 ### 6. Disputed-span flagging
 
@@ -180,10 +197,26 @@ the final text.
 - A CPU fallback exists for machines where the fixed MPS path is unavailable.
 - Dependency of this package: `pyannote.audio==4.0.7` (CC-BY-4.0 gated weights, see above).
 
-### 10. Output formatting
+### 10. Assembly
 
-`src/vemoizer/output/`. Formats: `txt`, `json`, `srt`, `vtt` (default:
-all four). Subtitle cue timestamps: SRT uses `HH:MM:SS,mmm -->` (comma,
+`src/vemoizer/readability.py`. Adjudicated verdicts are spliced INTO
+decode A's sentence segments (full coverage — with zero disputes the
+output text is byte-identical to decode A's), and consecutive segments
+group into paragraphs at silence gaps ≥ 1.5 s or speaker changes.
+
+### 11. LLM notes (optional, fails open)
+
+`src/vemoizer/notes.py`. The configured LLM turns the assembled
+transcript into `{title, summary, key_points, action_items}`; transcripts
+over 24 K chars are map-reduced in ~12 K-char chunks. Any failure returns
+no notes and lands one line in the run's warnings — the transcript is
+never affected.
+
+### 12. Output formatting
+
+`src/vemoizer/output/`. Formats: `txt`, `json`, `srt`, `vtt`, `md`
+(default: all five). `md` renders the notes (sections omitted when
+absent) plus the paragraphed, speaker-labelled transcript. Subtitle cue timestamps: SRT uses `HH:MM:SS,mmm -->` (comma,
 1-based), VTT uses `HH:MM:SS.mmm -->` (dot) under a `WEBVTT` header.
 Filenames are NFC-normalized (macOS APFS stores NFD).
 

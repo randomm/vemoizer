@@ -35,6 +35,7 @@ import numpy as np
 from .audio_contract import SAMPLE_RATE
 from .canary_transcriber import CanaryTranscriber
 from .decode_stage import decode_all
+from .diarization import ATTRIBUTION as DIARIZATION_ATTRIBUTION
 from .diarization import diarize, speaker_for_span
 from .ingest import IngestError, ingest_audio
 from .llm import LLMClient, LLMConfig, load_config
@@ -407,10 +408,12 @@ def transcribe_file(
         redecoded = _redecode_spans(audio, spans)
 
     speaker_segments: list[tuple[float, float, str]] | None = None
+    diarization_ran = False
     if diarize:
         logger.info("diarization: starting")
         diarize_start = time.monotonic()
         speaker_segments = _run_diarization_stage(audio)
+        diarization_ran = speaker_segments is not None
         logger.info(
             "diarization: %s speaker segments in %s",
             len(speaker_segments) if speaker_segments is not None else "no",
@@ -421,6 +424,10 @@ def transcribe_file(
     result = _assemble(
         result_a, result_b, redecoded, llm_config, speaker_segments, spans=spans
     )
+    if diarization_ran:
+        # CC-BY-4.0: the gated pyannote weights require attribution whenever
+        # they actually ran; the CLI prints the warnings channel.
+        result.setdefault("warnings", []).append(DIARIZATION_ATTRIBUTION)
 
     if llm_config is not None and result.get("text"):
         notes_start = time.monotonic()
