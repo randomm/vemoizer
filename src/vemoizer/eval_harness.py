@@ -178,17 +178,19 @@ def run_meeting_eval(
     the sample as an empty hypothesis (WER 1.0 against a non-empty
     reference, term-hit 0.0).
 
-    *reuse* maps stems to hypotheses already computed by :func:`run_eval`
-    for the same corpus (passed out through its *hypotheses* parameter).
-    Samples present in
-    *reuse* skip the decode and score the reused hypothesis, so the WER
-    walk and the term-hit walk share the decode and a growing meeting set
-    does not compound into one extra pass per sample. Samples absent from
-    *reuse* (or not scored by the WER walk) are decoded through
-    *transcribe* as before, keeping the WER gate independent of the
-    informational term-hit metric: a corpus without a ``.terms`` pair
-    scores WER as before, and the meeting metric can be dropped or changed
-    without touching the gate.
+    *reuse* is a performance seam owned by the CLI, not the harness: it
+    maps stems to hypotheses the WER walk (:func:`run_eval`) already
+    decoded (passed out through its *hypotheses* parameter), and the
+    meeting walk scores those without re-decoding, so a growing meeting
+    set does not compound into one extra decode pass per sample. A direct
+    caller that passes *reuse* is responsible for that mapping covering the
+    meeting samples — a partial dict silently mixes reused and freshly
+    decoded hypotheses in the same result, which confounds any comparison
+    the numbers are used for. The meeting walk itself never chooses to
+    skip a decode: the WER gate stays independent of the informational
+    term-hit metric because a corpus without a ``.terms`` pair scores WER
+    as before, and the meeting metric can be dropped or changed without
+    touching the gate.
     """
     if not corpus_dir.is_dir():
         raise FileNotFoundError(f"corpus directory not found: {corpus_dir}")

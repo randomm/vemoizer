@@ -230,12 +230,6 @@ def glossary_prompt(terms: list[str], tokenizer: Tokenizer | None = None) -> str
     Lowest-priority (earliest-listed) terms are dropped first — with a
     ``logger.warning`` naming them, never silently.
 
-    Budgeting is O(n) over the terms: each term is tokenized once in the
-    budgeting loop regardless of whether it survives, which is negligible
-    for the small glossaries this is built for (the default whisper
-    tokenizer is fast; a pathological 1000+ term glossary pays the full
-    O(n) tokenization cost with only a ~150-token tail surviving).
-
     ``@``-prefixed LLM-only terms (M2) are excluded at any budget: they
     must never enter the whisper prompt and cannot occupy the tail via
     the ``@`` path.
