@@ -117,8 +117,10 @@ def _terms_present(words: list[str], terms: list[str]) -> set[str]:
 
 
 def run_eval(
-    corpus_dir: Path, transcribe: Callable[[Path], str]
-) -> tuple[dict[str, float], dict[str, str]]:
+    corpus_dir: Path,
+    transcribe: Callable[[Path], str],
+    hypotheses: dict[str, str] | None = None,
+) -> dict[str, float]:
     """Walk *corpus_dir* and score *transcribe* against the references.
 
     Samples are stem pairs: ``<stem>.txt`` (reference transcript) with
@@ -131,15 +133,15 @@ def run_eval(
     numbers.
 
     Returns the per-sample WER mapping (``{stem: wer}`` plus one
-    ``"aggregate"`` key, macro average over samples) alongside the
-    per-sample hypotheses (``{stem: hypothesis}``); the hypotheses are
-    what :func:`run_meeting_eval` reuses for the term-hit metric so the
+    ``"aggregate"`` key, macro average over samples). If a writable
+    *hypotheses* dict is passed, it is filled with the per-sample
+    hypotheses (``{stem: hypothesis}``) as the walk progresses — that is
+    what :func:`run_meeting_eval` reuses via its *reuse* parameter so the
     meeting walk does not re-decode a sample the WER walk just scored.
     """
     if not corpus_dir.is_dir():
         raise FileNotFoundError(f"corpus directory not found: {corpus_dir}")
     results: dict[str, float] = {}
-    hyps: dict[str, str] = {}
     for wav in sorted(corpus_dir.glob("*.wav")):
         txt = wav.with_suffix(".txt")
         if not txt.is_file():
@@ -150,12 +152,13 @@ def run_eval(
         except Exception:  # noqa: BLE001 - one sample must not abort the run
             logger.warning("transcription failed for %s; scoring as empty", wav.name)
             hypothesis = ""
+        if hypotheses is not None:
+            hypotheses[wav.stem] = hypothesis
         results[wav.stem] = wer(reference, hypothesis)
-        hyps[wav.stem] = hypothesis
     if not results:
-        return {AGGREGATE_KEY: 0.0}, {}
+        return {AGGREGATE_KEY: 0.0}
     results[AGGREGATE_KEY] = sum(results.values()) / len(results)
-    return results, hyps
+    return results
 
 
 def run_meeting_eval(
@@ -176,7 +179,8 @@ def run_meeting_eval(
     reference, term-hit 0.0).
 
     *reuse* maps stems to hypotheses already computed by :func:`run_eval`
-    for the same corpus (its second return value). Samples present in
+    for the same corpus (passed out through its *hypotheses* parameter).
+    Samples present in
     *reuse* skip the decode and score the reused hypothesis, so the WER
     walk and the term-hit walk share the decode and a growing meeting set
     does not compound into one extra pass per sample. Samples absent from

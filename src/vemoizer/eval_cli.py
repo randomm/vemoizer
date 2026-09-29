@@ -181,7 +181,8 @@ def register_eval(app) -> None:
             transcribe = BACKENDS[name]
             if name == "consensus" and llm:
                 transcribe = _consensus_llm
-            results, hyps = run_eval(corpus, transcribe)
+            hyps: dict[str, str] = {}
+            results = run_eval(corpus, transcribe, hyps)
             measured[name] = results
             typer.echo(f"[{name}]")
             for sample, value in results.items():

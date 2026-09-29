@@ -81,14 +81,15 @@ def test_run_eval_scores_the_injected_transcriber(tmp_path: Path) -> None:
     def perfect(wav: Path) -> str:
         return (wav.with_suffix(".txt")).read_text(encoding="utf-8")
 
-    results, hyps = run_eval(corpus, perfect)
+    hyps: dict[str, str] = {}
+    results = run_eval(corpus, perfect, hyps)
     assert results == {"one": 0.0, "two": 0.0, AGGREGATE_KEY: 0.0}
     assert hyps == {"one": "moro aami", "two": "toista tallaista"}
 
 
 def test_run_eval_reports_real_errors(tmp_path: Path) -> None:
     corpus = _corpus(tmp_path, {"one": "a b c"})
-    results, _ = run_eval(corpus, lambda wav: "a x c")
+    results = run_eval(corpus, lambda wav: "a x c")
     assert results["one"] == pytest.approx(1 / 3)
     assert results[AGGREGATE_KEY] == pytest.approx(1 / 3)
 
@@ -102,7 +103,8 @@ def test_run_eval_transcriber_failure_scores_one_not_crash(tmp_path: Path) -> No
             raise RuntimeError("model exploded")
         return wav.with_suffix(".txt").read_text(encoding="utf-8")
 
-    results, hyps = run_eval(corpus, flaky)
+    hyps: dict[str, str] = {}
+    results = run_eval(corpus, flaky, hyps)
     assert results["bad"] == 1.0  # empty hypothesis against a real reference
     assert results["good"] == 0.0
     assert hyps == {"bad": "", "good": "c d"}
@@ -113,7 +115,8 @@ def test_run_eval_ignores_unpaired_stems(tmp_path: Path) -> None:
     (tmp_path / "lone.wav").write_bytes(b"RIFF")
     _corpus(tmp_path, {"paired": "hello world"})
 
-    results, hyps = run_eval(tmp_path, lambda wav: "hello world")
+    hyps: dict[str, str] = {}
+    results = run_eval(tmp_path, lambda wav: "hello world", hyps)
 
     assert "orphan" not in results
     assert "lone" not in results
@@ -127,7 +130,8 @@ def test_run_eval_missing_directory_raises(tmp_path: Path) -> None:
 
 
 def test_run_eval_empty_corpus_gives_zero_aggregate(tmp_path: Path) -> None:
-    results, hyps = run_eval(tmp_path, lambda wav: "")
+    hyps: dict[str, str] = {}
+    results = run_eval(tmp_path, lambda wav: "", hyps)
     assert results == {AGGREGATE_KEY: 0.0}
     assert hyps == {}
 

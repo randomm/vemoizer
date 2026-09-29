@@ -44,7 +44,7 @@ def test_corpus_matches_the_committed_baseline_fingerprint(baseline: dict) -> No
 def test_backend_wer_does_not_regress(backend: str, baseline: dict) -> None:
     from vemoizer.eval_cli import BACKENDS
 
-    results, _ = run_eval(CORPUS, BACKENDS[backend])
+    results = run_eval(CORPUS, BACKENDS[backend])
     regressions = compare_to_baseline(
         results,
         baseline["backends"][backend],
