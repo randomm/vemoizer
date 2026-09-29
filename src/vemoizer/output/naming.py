@@ -17,11 +17,19 @@ string is the one a user actually typed or will recognize.
 
 from __future__ import annotations
 
+import re
 import unicodedata
+from datetime import date
 from pathlib import Path
 
 #: Unicode normalization form every path in/out of this process is held in.
 _NFC = "NFC"
+
+#: Maximum length of a dated-title base (everything after the date).
+_MAX_BASE_CHARS = 80
+
+#: ``"word  word"`` — multiple internal spaces collapse to one.
+_WHITESPACE_RUN = re.compile(r"\s{2,}")
 
 
 def nfc(name: str) -> str:
@@ -75,3 +83,68 @@ def nfc_stem_and_suffix(path: Path | str) -> tuple[str, str]:
     """
     p = Path(path)
     return nfc(p.stem), nfc(p.suffix)
+
+
+def sanitize_title(raw: str) -> str:
+    """Sanitize an LLM title for use in a dated output filename.
+
+    Path separators, control characters (including zero-width joiners
+    and the BOM), and leading/trailing dots and spaces are removed;
+    internal whitespace collapses to single spaces; the result is NFC
+    and capped at 80 characters. An empty result (blank or fully
+    stripped input) returns ``""`` so the caller can fall back to a
+    deterministic stem.
+    """
+    t = unicodedata.normalize("NFC", str(raw))
+    # Path separators and control characters are dropped entirely, so
+    # "a/b" becomes "ab" (not "a b"); zero-width joiners and the BOM
+    # are the same — invisible characters that must not survive into a
+    # filename.
+    t = re.sub(r"[/\\\u0000-\u001f\u007f\u200b-\u200f\ufeff]", "", t)
+    t = _WHITESPACE_RUN.sub(" ", t)
+    t = re.sub(r"\.{2,}", ".", t)
+    t = t.strip(" .")
+    return t[:_MAX_BASE_CHARS]
+
+
+def dated_basename(
+    title: str,
+    *,
+    date_str: str | None = None,
+    fallback_stem: str | None = None,
+) -> str:
+    """Build the dated output base name ``YYYY-MM-DD <title>``.
+
+    ``title`` is sanitized; if sanitising leaves nothing, *fallback_stem*
+    (the first source file stem) is used, also sanitized. Returns the
+    base without any suffix, so the caller appends ``.md`` / ``.json``.
+    """
+    d = date_str or date.today().isoformat()
+    base = sanitize_title(title) or sanitize_title(fallback_stem or "")
+    if not base:
+        raise ValueError("dated_basename: title and fallback_stem both empty")
+    return f"{d} {base}"
+
+
+def collision_free_path(directory: Path | str, base: str, suffix: str) -> Path:
+    """Return a non-colliding path in *directory* for *base* + *suffix*.
+
+    The directory and every candidate name are NFC-normalised before
+    probing, so an APFS NFD spelling of an existing file is treated as a
+    collision (never overwritten). The first free name is returned;
+    otherwise `` (2)``, `` (3)``, ... is inserted before the suffix.
+    Candidates are checked against the real filesystem via
+    ``Path.exists``. The returned path is NFC.
+    """
+    dir_path = nfc_path(Path(directory))
+    base = nfc(base)
+    suffix = nfc(suffix)
+    candidate = dir_path / f"{base}{suffix}"
+    if not candidate.exists():
+        return candidate
+    n = 2
+    while True:
+        candidate = dir_path / f"{base} ({n}){suffix}"
+        if not candidate.exists():
+            return candidate
+        n += 1
