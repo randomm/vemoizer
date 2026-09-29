@@ -9,14 +9,35 @@ unreadable file is an empty glossary, never an error.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
+import pytest
+
 from vemoizer.glossary import (
+    GLOSSARY_PROMPT_TOKEN_BUDGET,
     apply_corrections,
     glossary_prompt,
     load_corrections,
     load_glossary,
 )
+
+
+class FakeTokenizer:
+    """A whisper-tokenizer stand-in with deterministic token counts.
+
+    Each space-separated token costs 1 (the separator) plus 1 per non-space
+    character in the token. Deliberately simple; the real tokenizer is
+    exercised by the pipeline.
+    """
+
+    def encode(self, text: str) -> list[int]:
+        ids: list[int] = []
+        for i, tok in enumerate(text.split()):
+            if i > 0:
+                ids.append(0)  # separator token
+            ids.append(len(tok))  # 1 per non-space char in the token
+        return ids
 
 
 def test_loads_one_term_per_line_skipping_comments(tmp_path: Path) -> None:
@@ -37,7 +58,9 @@ def test_none_path_is_empty_glossary() -> None:
 
 
 def test_prompt_joins_terms_for_whisper() -> None:
-    prompt = glossary_prompt(["Flagship-hanke", "Nordea", "Movescount"])
+    prompt = glossary_prompt(
+        ["Flagship-hanke", "Nordea", "Movescount"], FakeTokenizer()
+    )
     assert prompt is not None
     assert "Flagship-hanke" in prompt
     assert "Nordea" in prompt
@@ -45,16 +68,63 @@ def test_prompt_joins_terms_for_whisper() -> None:
 
 
 def test_empty_terms_give_no_prompt() -> None:
-    assert glossary_prompt([]) is None
+    assert glossary_prompt([], FakeTokenizer()) is None
 
 
-def test_prompt_is_bounded() -> None:
-    """Whisper's prompt window is ~224 tokens; a huge glossary must not
-    push the actual instruction out of it."""
+def test_prompt_is_bounded_by_token_budget() -> None:
+    """Whisper's prompt window is 223 tokens; a huge glossary must not
+    push the actual instruction out of it. The budget is in WHISPER
+    TOKENS (issue #76), not characters."""
     terms = [f"Termi{i}" for i in range(500)]
-    prompt = glossary_prompt(terms)
+    tok = FakeTokenizer()
+    prompt = glossary_prompt(terms, tok)
     assert prompt is not None
-    assert len(prompt) < 1200
+    # The prompt string must fit in GLOSSARY_PROMPT_TOKEN_BUDGET tokens,
+    # including the "Sanasto: " prefix and the trailing period.
+    assert len(tok.encode(prompt)) <= GLOSSARY_PROMPT_TOKEN_BUDGET
+
+
+def test_prompt_tail_priority_and_drop_notice(caplog: pytest.LogCaptureFixture) -> None:
+    """The LAST-listed term is highest priority and sits at the TAIL of
+    the prompt string; earliest-listed (lowest-priority) terms are dropped
+    first with a logged notice (never silently)."""
+    terms = [f"Termi{i}" for i in range(200)]
+    tok = FakeTokenizer()
+    with caplog.at_level(logging.WARNING, logger="vemoizer.glossary"):
+        prompt = glossary_prompt(terms, tok)
+    assert prompt is not None
+    # Highest-priority (last-listed) term is at the tail.
+    assert prompt.endswith("Termi199.")
+    # Lowest-priority (earliest-listed) terms are absent.
+    assert "Termi0" not in prompt
+    # A notice naming the dropped terms was emitted via logger.warning.
+    assert any("dropped" in r.message.lower() for r in caplog.records), (
+        "expected a drop notice via logger.warning"
+    )
+
+
+def test_prompt_at_prefixed_never_enter_whisper() -> None:
+    """REGRESSION (issue #76): @-prefixed LLM-only names must never enter
+    the whisper prompt, at any budget, and cannot occupy the tail via the
+    @ path."""
+    terms = ["@Jukka Loikkanen", "@Maija", "Flagship-hanke", "Nordea"]
+    tok = FakeTokenizer()
+    prompt = glossary_prompt(terms, tok)
+    assert prompt is not None
+    # No @ term (or its name) appears in the prompt.
+    assert "Jukka" not in prompt
+    assert "Loikkanen" not in prompt
+    assert "Maija" not in prompt
+    # The tail must be a non-@ term (Nordea, the last non-@-term).
+    assert prompt.endswith("Nordea.")
+
+
+def test_prompt_at_only_terms_give_no_prompt() -> None:
+    """A glossary with only @-prefixed terms yields no whisper prompt —
+    @-terms must not occupy the prompt tail via the @ path."""
+    terms = ["@Jukka Loikkanen", "@Maija", "@Peltsi"]
+    tok = FakeTokenizer()
+    assert glossary_prompt(terms, tok) is None
 
 
 # -- correction pairs (issue #71 round 2) --------------------------------

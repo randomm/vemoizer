@@ -15,7 +15,9 @@ from vemoizer.eval_harness import (
     AGGREGATE_KEY,
     compare_to_baseline,
     corpus_fingerprint,
+    glossary_term_hit_rate,
     run_eval,
+    run_meeting_eval,
     wer,
 )
 
@@ -123,6 +125,170 @@ def test_run_eval_missing_directory_raises(tmp_path: Path) -> None:
 
 def test_run_eval_empty_corpus_gives_zero_aggregate(tmp_path: Path) -> None:
     assert run_eval(tmp_path, lambda wav: "") == {AGGREGATE_KEY: 0.0}
+
+
+# --- glossary_term_hit_rate ------------------------------------------------
+# issue #76: the meeting eval metric. A term "appears" when it stands alone
+# as a whole-word token (case-insensitive); near-misses (substrings, stem
+# variants) do not count. Repeated occurrences count once. The metric is the
+# number the glossary prompt work is judged by (kept only if term hits rise
+# and WER does not regress).
+
+
+def test_term_hit_all_terms_present_in_both_sides_is_one() -> None:
+    ref = "meidän sprint planning alkaa ja backlog on täynnä"
+    hyp = "sprint planning alkaa ja backlog on täynnä"
+    terms = ["sprint planning", "backlog"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 1.0
+
+
+def test_term_hit_no_term_in_hypothesis_is_zero() -> None:
+    ref = "meidän sprint planning alkaa ja backlog on täynnä"
+    hyp = "tämä on joku muu puhdasta"
+    terms = ["sprint planning", "backlog"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 0.0
+
+
+def test_term_hit_partial_term_occurrence() -> None:
+    ref = "sprint planning alkaa ja backlog on täynnä"
+    hyp = "backlog on täynnä"  # only one of two terms
+    terms = ["sprint planning", "backlog"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 0.5
+
+
+def test_term_hit_one_of_three_terms() -> None:
+    ref = "sprint planning alkaa ja backlog on täynnä ja prioriteetit selkeät"
+    hyp = "backlog on täynnä"
+    terms = ["sprint planning", "backlog", "prioriteetit"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == pytest.approx(1 / 3)
+
+
+def test_term_hit_case_insensitive() -> None:
+    ref = "Sprint Planning alkaa"
+    hyp = "sprint planning alkaa"
+    terms = ["sprint planning"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 1.0
+
+
+def test_term_hit_punctuation_around_term_does_not_break_match() -> None:
+    ref = "sprint planning alkaa, ja backlog täynnä."
+    hyp = "sprint planning alkaa ja backlog täynnä"
+    terms = ["sprint planning", "backlog"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 1.0
+
+
+def test_term_hit_substring_is_not_a_whole_word_match() -> None:
+    # "backlogi" contains "backlog" as a substring but is a different
+    # (inflected) word; a whole-word match must not count it.
+    ref = "backlog on täynnä"
+    hyp = "backlogi on täynnä"
+    assert glossary_term_hit_rate(ref, hyp, ["backlog"]) == 0.0
+
+
+def test_term_hit_hyphenated_form_matches() -> None:
+    # "sprint-planning" normalizes to the two words "sprint planning"
+    # (punctuation-as-space), so it still counts.
+    ref = "sprint planning alkaa"
+    hyp = "sprint-planning alkaa"
+    assert glossary_term_hit_rate(ref, hyp, ["sprint planning"]) == 1.0
+
+
+def test_term_hit_vacuous_when_no_term_in_reference_is_one() -> None:
+    # A glossary with no term in the reference yields 1.0 (no work to do),
+    # not 0.0 — the metric is "of the terms the reference uses, how many
+    # survived", and the empty set has no survivors to lose.
+    ref = "ei termejä tässä"
+    hyp = "ei termejä tässä"
+    terms = ["sprint planning", "backlog"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 1.0
+
+
+def test_term_hit_repeated_occurrences_count_once() -> None:
+    ref = "backlog on täynnä ja backlog on täynnä"
+    hyp = "backlog on täynnä"
+    terms = ["backlog"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 1.0
+
+
+def test_term_hit_case_and_punctuation_variants_count_once() -> None:
+    # "backlog" and "Backlog" normalize to the same token, so they share one
+    # slot in both reference and hypothesis and never double-count.
+    ref = "backlog on täynnä"
+    hyp = "backlog on täynnä"
+    terms = ["backlog", "Backlog", "backlog,"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 1.0
+
+
+def test_term_hit_empty_terms_returns_one() -> None:
+    # No terms in the glossary means nothing can be missed; 1.0 keeps the
+    # metric well-defined and composable with a 0.0 baseline entry.
+    ref = "jokin puhdasta"
+    hyp = "jokin puhdasta"
+    assert glossary_term_hit_rate(ref, hyp, []) == 1.0
+
+
+# --- run_meeting_eval -------------------------------------------------------
+# The meeting eval consumes a single multi-speaker fixture: <stem>.wav +
+# <stem>.txt + <stem>.terms. The harness must skip samples without a .terms
+# file (they belong to the WER walk, not the meeting eval), and a crashing
+# backend must not abort the run.
+
+
+def _meeting_corpus(tmp_path: Path, stem: str = "meeting_sample") -> Path:
+    (tmp_path / f"{stem}.wav").write_bytes(b"RIFF0000WAVE")
+    (tmp_path / f"{stem}.txt").write_text(
+        "sprint planning alkaa ja backlog on täynnä",
+        encoding="utf-8",
+    )
+    (tmp_path / f"{stem}.terms").write_text(
+        "sprint planning\nbacklog\n", encoding="utf-8"
+    )
+    return tmp_path
+
+
+def test_run_meeting_eval_scores_wer_and_term_hit(tmp_path: Path) -> None:
+    corpus = _meeting_corpus(tmp_path)
+    results = run_meeting_eval(corpus, lambda wav: "backlog on täynnä")
+    assert "meeting_sample" in results
+    sample = results["meeting_sample"]
+    assert sample["term_hit"] == pytest.approx(0.5)  # only "backlog" survived
+    assert sample["wer"] == pytest.approx(4 / 7)  # 4 edits over 7 reference words
+
+
+def test_run_meeting_eval_perfect_transcript_is_zero_wer_one_term_hit(
+    tmp_path: Path,
+) -> None:
+    corpus = _meeting_corpus(tmp_path)
+    ref = (corpus / "meeting_sample.txt").read_text(encoding="utf-8")
+    results = run_meeting_eval(corpus, lambda wav: ref)
+    sample = results["meeting_sample"]
+    assert sample["wer"] == 0.0
+    assert sample["term_hit"] == 1.0
+
+
+def test_run_meeting_eval_skips_samples_without_terms_file(tmp_path: Path) -> None:
+    # A corpus with only WER samples (no .terms) yields the aggregate-only
+    # shape: the WER walk is unaffected by the meeting eval.
+    _corpus(tmp_path, {"one": "moro aami"})
+    results = run_meeting_eval(tmp_path, lambda wav: "moro aami")
+    assert results == {AGGREGATE_KEY: {"wer": 0.0, "term_hit": 0.0}}
+
+
+def test_run_meeting_eval_transcriber_failure_scores_as_empty(tmp_path: Path) -> None:
+    corpus = _meeting_corpus(tmp_path)
+
+    def crash(wav: Path) -> str:
+        raise RuntimeError("model exploded")
+
+    results = run_meeting_eval(corpus, crash)
+    sample = results["meeting_sample"]
+    assert sample["term_hit"] == 0.0  # nothing captured
+    assert sample["wer"] == 1.0
+
+
+def test_run_meeting_eval_missing_directory_raises(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        run_meeting_eval(tmp_path / "no-such-corpus", lambda wav: "")
 
 
 # --- corpus_fingerprint ----------------------------------------------------

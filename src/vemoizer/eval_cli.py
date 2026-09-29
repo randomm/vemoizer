@@ -31,6 +31,7 @@ from vemoizer.eval_harness import (
     compare_to_baseline,
     corpus_fingerprint,
     run_eval,
+    run_meeting_eval,
 )
 
 #: Gate tolerance: greedy decodes are deterministic in principle, but Metal
@@ -188,6 +189,7 @@ def register_eval(app) -> None:
                     continue
                 typer.echo(f"{sample}\t{value:.4f}")
             typer.echo(f"{AGGREGATE_KEY}\t{results[AGGREGATE_KEY]:.4f}")
+            _emit_meeting_term_hits(corpus, transcribe)
 
         fingerprint = corpus_fingerprint(corpus)
         if update_baseline:
@@ -195,6 +197,26 @@ def register_eval(app) -> None:
             typer.echo(f"baseline updated: {baseline}")
         if check:
             _check_baseline(baseline, fingerprint, measured)
+
+
+def _emit_meeting_term_hits(corpus: Path, transcribe: Callable[[Path], str]) -> None:
+    """Emit the meeting-fixture glossary term-hit rate (issue #76).
+
+    The meeting eval runs one additional decode pass of each meeting sample
+    through the same transcribe callable as the WER walk (the WER run
+    already decoded the sample separately). The metric is informational
+    here — it is the number the glossary prompt work is judged by (kept
+    only if term hits rise and WER does not regress). Absent meeting
+    fixtures (a corpus without a ``.terms`` pair) nothing is emitted:
+    the WER gate above is unaffected.
+    """
+    meeting = run_meeting_eval(corpus, transcribe)
+    samples = [s for s in meeting if s != AGGREGATE_KEY]
+    if not samples:
+        return
+    for sample in samples:
+        typer.echo(f"[term-hit/{sample}]\t{meeting[sample]['term_hit']:.4f}")
+    typer.echo(f"[term-hit/{AGGREGATE_KEY}]\t{meeting[AGGREGATE_KEY]['term_hit']:.4f}")
 
 
 def _write_baseline(

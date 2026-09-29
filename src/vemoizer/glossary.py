@@ -21,9 +21,31 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-#: Whisper's prompt window is small (~224 tokens); the glossary must not
-#: overflow it. Terms beyond the budget are dropped with a warning.
-_MAX_PROMPT_CHARS = 1000
+# mlx-whisper keeps only the LAST 223 prompt tokens per decode window
+# (n_text_ctx=448 in decoding.py: prompt_tokens[-(n_ctx // 2 - 1):]), and
+# those 223 must hold the previous-text tail plus the glossary. The
+# glossary gets 150 of them — the rest is previous text, because
+# whisper's rolling context (condition_on_previous_text) is what carries
+# the recording forward.
+GLOSSARY_PROMPT_TOKEN_BUDGET = 150
+PREVIOUS_TEXT_TOKEN_BUDGET = 223 - GLOSSARY_PROMPT_TOKEN_BUDGET
+
+_PROMPT_PREFIX = "Sanasto: "
+_SEPARATOR = ", "
+
+
+def _whisper_tokenizer() -> Any | None:
+    """The mlx_whisper tokenizer, or ``None`` if unavailable (fail-open).
+
+    ``get_tokenizer`` is ``lru_cache``-wrapped, so the encoding is fetched
+    once per process; the per-term budgeting in ``glossary_prompt`` is cheap.
+    """
+    try:
+        from mlx_whisper.tokenizer import get_tokenizer
+
+        return get_tokenizer(True)
+    except Exception:  # noqa: BLE001 - fail-open (no prompt, run continues)
+        return None
 
 
 def _read_lines(path: str | Path | None) -> list[str]:
@@ -41,16 +63,35 @@ def _read_lines(path: str | Path | None) -> list[str]:
     ]
 
 
+def _as_token_ids(tokenizer: Any, text: str) -> list[int]:
+    """Tokenize *text* to plain ids (``encode`` returns an id list)."""
+    ids = tokenizer.encode(text)
+    if not isinstance(ids, list):
+        ids = list(ids)
+    return [int(i) for i in ids]
+
+
+def _token_cost(tokenizer: Any, text: str) -> int:
+    """Tokens *text* occupies in the whisper tokenizer."""
+    return len(_as_token_ids(tokenizer, text))
+
+
 def load_glossary(path: str | Path | None) -> list[str]:
     """Prompt terms from the glossary file; ``[]`` when absent (fail-open).
 
     Only explicitly listed terms seed the prompt; ``wrong => right``
     correction lines are post-recognition fixes and contribute nothing.
-    Prompt order is load-bearing (whisper echoes whatever leads it when
-    audio is unclear), so a term kept out of the list on purpose must not
-    re-enter through a pair's right side.
+    ``@``-prefixed lines are LLM-only terms (issue #76): they stay out of
+    the whisper prompt at any budget (see ``glossary_prompt``) and out of
+    the ASR prompt here. Prompt order is load-bearing (whisper echoes
+    whatever leads it when audio is unclear), so a term kept out of the
+    list on purpose must not re-enter through a pair's right side.
     """
-    terms = [line for line in _read_lines(path) if "=>" not in line]
+    terms = [
+        line
+        for line in _read_lines(path)
+        if "=>" not in line and not line.startswith("@")
+    ]
     if terms:
         logger.info("glossary: %d terms from %s", len(terms), path)
     return terms
@@ -144,34 +185,86 @@ def apply_corrections_to_notes(
     out = dict(notes)
     for key in ("title", "summary"):
         if isinstance(out.get(key), str):
-            out[key] = _correct_text(out[key], compiled)
+            out[key] = _correct_text(str(out[key]), compiled)
     for key in ("key_points", "action_items"):
         if isinstance(out.get(key), list):
             out[key] = [_correct_text(str(item), compiled) for item in out[key]]
     return out
 
 
-def glossary_prompt(terms: list[str]) -> str | None:
+def glossary_prompt(terms: list[str], tokenizer: Any | None = None) -> str | None:
     """The whisper ``initial_prompt`` seeding recognition with *terms*.
+
+    ``tokenizer`` is the mlx_whisper tokenizer (``get_tokenizer(True)``);
+    when omitted it is loaded once via the fail-open ``_whisper_tokenizer``
+    helper and the prompt is ``None`` if it cannot be obtained.
 
     Styled as preceding transcript text (that is what initial_prompt is),
     so the terms read as vocabulary already in use, not as an instruction.
+
+    Budgeted in WHISPER TOKENS, not characters (issue #76): the string must
+    fit in ``GLOSSARY_PROMPT_TOKEN_BUDGET`` tokens INCLUDING the
+    ``"Sanasto: "`` prefix and the trailing period, leaving
+    ``PREVIOUS_TEXT_TOKEN_BUDGET`` tokens for the previous-text tail so the
+    combined prompt stays under the 223-token window mlx-whisper keeps.
+
+    Priority is inverted from file order: the LAST-listed term is the
+    highest-priority and sits at the TAIL of the prompt string (the part
+    mlx-whisper's ``prompt_tokens[-223:]`` slice keeps when truncating).
+    Lowest-priority (earliest-listed) terms are dropped first — with a
+    ``logger.warning`` naming them, never silently.
+
+    ``@``-prefixed LLM-only terms (M2) are excluded at any budget: they
+    must never enter the whisper prompt and cannot occupy the tail via
+    the ``@`` path.
     """
-    if not terms:
+    if tokenizer is None:
+        tokenizer = _whisper_tokenizer()
+        if tokenizer is None:
+            logger.warning("whisper tokenizer unavailable; glossary prompt off")
+            return None
+    asr_terms = [t for t in terms if not t.startswith("@")]
+    if not asr_terms:
         return None
-    prefix = "Sanasto: "
-    budget = _MAX_PROMPT_CHARS - len(prefix)
+
+    prefix_cost = _token_cost(tokenizer, _PROMPT_PREFIX)
+    period_cost = _token_cost(tokenizer, ".")
+    sep_cost = _token_cost(tokenizer, _SEPARATOR)
+    overhead = prefix_cost + period_cost
+    if overhead > GLOSSARY_PROMPT_TOKEN_BUDGET:
+        # Degenerate: even an empty glossary overflows. Ship nothing.
+        logger.warning(
+            "glossary: prefix overhead %d tokens exceeds budget %d; "
+            "whisper prompt left empty",
+            overhead,
+            GLOSSARY_PROMPT_TOKEN_BUDGET,
+        )
+        return None
+
+    # Build from the LAST term (highest priority) backwards, filling the
+    # tail of the budget; drop the earliest-listed (lowest-priority) first.
+    budget = GLOSSARY_PROMPT_TOKEN_BUDGET - overhead
     kept: list[str] = []
+    dropped: list[str] = []
     used = 0
-    for term in terms:
-        cost = len(term) + 2
-        if used + cost > budget:
-            logger.warning(
-                "glossary: %d terms exceed the prompt budget; using first %d",
-                len(terms),
-                len(kept),
-            )
-            break
+    for term in reversed(asr_terms):
+        term_cost = _token_cost(tokenizer, term)
+        # First kept term: cost = term_cost. Each additional term adds
+        # term_cost + one separator.
+        additional = term_cost if not kept else term_cost + sep_cost
+        if used + additional > budget:
+            dropped.append(term)
+            continue
         kept.append(term)
-        used += cost
-    return prefix + ", ".join(kept) + "."
+        used += additional
+    kept.reverse()  # prompt order = file order, highest-priority last
+
+    if dropped:
+        logger.warning(
+            "glossary: %d terms dropped (prompt budget %d tokens exceeded); "
+            "dropped: %s",
+            len(dropped),
+            GLOSSARY_PROMPT_TOKEN_BUDGET,
+            ", ".join(dropped[:10]) + ("…" if len(dropped) > 10 else ""),
+        )
+    return _PROMPT_PREFIX + _SEPARATOR.join(kept) + "."

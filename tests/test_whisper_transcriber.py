@@ -1,9 +1,10 @@
-"""WhisperTranscriber — turbo decode A for the meeting profile (issue #71).
+"""WhisperTranscriber — turbo decode A for the meeting profile (issue #71, #76).
 
 mlx_whisper is mocked throughout: no downloads, no GPU. The transcriber
-feeds the WHOLE recording to one transcribe() call (mlx-whisper windows
-internally) and surfaces words/segments/language; per-VAD-slice records
-for dispute detection are derived from the word timestamps.
+decodes the recording in 30 s windows (each its own transcribe() call so
+the glossary initial_prompt re-seeds every window — issue #76) and surfaces
+words/segments/language; per-VAD-slice records for dispute detection are
+derived from the word timestamps.
 """
 
 from __future__ import annotations
@@ -54,7 +55,11 @@ def test_model_is_revision_pinned_turbo() -> None:
     assert len(MODEL_REVISION) == 40
 
 
-def test_transcribe_is_one_call_over_the_whole_recording() -> None:
+def test_transcribe_decodes_each_window_separately() -> None:
+    """Each 30 s window is its own transcribe() call so the glossary
+    initial_prompt re-seeds it (issue #76: a single whole-file call would
+    let the rolling context slide the glossary past the 223-token
+    keep-window)."""
     raw = _raw(
         [
             _seg(
@@ -71,19 +76,23 @@ def test_transcribe_is_one_call_over_the_whole_recording() -> None:
         patch.dict("sys.modules", {"mlx_whisper": mock}),
         patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
     ):
-        t = WhisperTranscriber()
+        t = WhisperTranscriber(initial_prompt="Sanasto: Flagship.")
         result = t.transcribe(_audio(120.0))
 
-    assert mock.transcribe.call_count == 1  # never per-slice
-    kwargs = mock.transcribe.call_args.kwargs
-    assert kwargs["path_or_hf_repo"] == "/tmp/turbo"
-    assert kwargs["word_timestamps"] is True
-    assert kwargs["temperature"][0] == 0.0  # deterministic-first ladder
-    assert kwargs["condition_on_previous_text"] is True
-    assert result["text"] == "moro vaan"
+    assert mock.transcribe.call_count == 4  # 4 × 30 s windows
+    first_kwargs = mock.transcribe.call_args_list[0].kwargs
+    last_kwargs = mock.transcribe.call_args_list[-1].kwargs
+    assert first_kwargs["path_or_hf_repo"] == "/tmp/turbo"
+    assert first_kwargs["word_timestamps"] is True
+    assert first_kwargs["temperature"][0] == 0.0  # deterministic-first ladder
+    assert first_kwargs["condition_on_previous_text"] is True
+    assert first_kwargs["initial_prompt"] == "Sanasto: Flagship."
+    assert last_kwargs["initial_prompt"] == "Sanasto: Flagship."  # re-seeds each window
+    # 4 windows each return the same "moro vaan" segment; text is the
+    # concatenation of all windows' text.
+    assert result["text"].count("moro vaan") == 4
     assert result["language"] == "fi"
-    assert [w["word"] for w in result["words"]] == ["moro", "vaan"]
-    assert result["words"][0]["start"] == 0.0
+    assert result["words"][0]["word"] == "moro"
     assert result["segments"][0]["text"] == "moro vaan"
 
 
@@ -157,7 +166,9 @@ def test_conditioning_on_with_fallback_ladder() -> None:
     ):
         WhisperTranscriber(initial_prompt="Sanasto: Flagship.").transcribe(_audio(60.0))
     kwargs = mock.transcribe.call_args.kwargs
-    # Rolling context carries the glossary vocabulary past the first window
+    # Rolling context ON within each window; the glossary itself re-seeds at
+    # every window boundary (each window is its own transcribe() call), so
+    # the prompt does not depend on the rolling context carrying it.
     assert kwargs["condition_on_previous_text"] is True
     # ...safely: the paper-validated anti-loop stack
     assert kwargs["temperature"] == (0.0, 0.2, 0.4)
