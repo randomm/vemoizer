@@ -552,7 +552,7 @@ def test_pcm_duration_keyboard_interrupt_kills_and_reaps(tmp_path: Path) -> None
     class _StalledPipe:
         def __init__(self) -> None:
             self.read_called = False
-            self._interrupt = threading.Event()
+            self._interrupt: threading.Event = threading.Event()
 
         def read(self, size: int | None = None) -> bytes:
             if not self.read_called:
@@ -620,7 +620,7 @@ def test_pcm_duration_keyboard_interrupt_kills_and_reaps(tmp_path: Path) -> None
         # is also stuck in a read loop). The drain's except-BaseException
         # handler must kill and reap before propagating.
         time.sleep(0.5)  # let the drain start and block
-        stalled_proc.stdout._interrupt.set()  # type: ignore[union-attr]
+        stalled_proc.stdout._interrupt.set()
 
         drain_thread.join(timeout=10.0)
         assert not drain_thread.is_alive(), "drain thread did not finish"
@@ -628,6 +628,8 @@ def test_pcm_duration_keyboard_interrupt_kills_and_reaps(tmp_path: Path) -> None
     # The fake must have been killed and reaped.
     assert stalled_proc.killed, "stalled process was not killed"
     assert stalled_proc.waited, "stalled process was not reaped (waited)"
-    # The drain thread must have caught a BaseException (KeyboardInterrupt
-    # or a wrapped version).
-    assert result[0] is not None, "drain thread did not raise"
+    # The reader's KeyboardInterrupt is re-raised by the drain's
+    # except-BaseException handler, so it must surface unwrapped.
+    assert isinstance(result[0], KeyboardInterrupt), (
+        f"expected KeyboardInterrupt to propagate, got {result[0]!r}"
+    )
