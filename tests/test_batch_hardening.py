@@ -407,8 +407,10 @@ def test_preset_output_pair_shares_stem(tmp_path, monkeypatch) -> None:
     def fixed_base(title: str, **kw) -> str:
         return "2026-01-15 Kokeilu"
 
-    monkeypatch.setattr(batch, "dated_basename", fixed_base)
-    monkeypatch.setattr(batch, "collision_free_paths", naming.collision_free_paths)
+    monkeypatch.setattr("vemoizer.batch_output.dated_basename", fixed_base)
+    monkeypatch.setattr(
+        "vemoizer.batch_output.collision_free_paths", naming.collision_free_paths
+    )
     written = batch._write_preset_output(
         {"notes": {"title": "Kokeilu"}, "text": "x", "segments": []},
         "fallback",

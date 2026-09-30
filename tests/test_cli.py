@@ -56,19 +56,32 @@ def test_transcribe_missing_file_fails_closed(tmp_path, monkeypatch) -> None:
 
 
 def test_transcribe_with_all_flags(tmp_path, monkeypatch) -> None:
+    """2 files + --yes: grouping is on by default for 2+ files. The
+    mid-sentence boundary is a continuation, so both files land in ONE
+    group: transcribe_file runs exactly once (on the concatenated group)
+    and the combined output contains the transcript once. CliRunner's
+    stdin is not a TTY by default — --yes is what keeps this from
+    failing the TTY guard.
+    """
     import vemoizer.grouping as grouping
     import vemoizer.pipeline as pipeline_module
 
+    calls: list[str] = []
+
     def fake_transcribe_file(path, **kwargs):
+        calls.append(str(path))
         return {"text": "moikka maailma", "segments": []}
 
     def fake_decode_boundaries(files, transcribe_fn=None):
+        # Mid-sentence tail, no closing cue -> continuation -> one group.
         return ["x"], ["a"]
 
     monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
     monkeypatch.setattr(grouping, "decode_boundaries", fake_decode_boundaries)
     monkeypatch.setattr(grouping, "concat_groups", lambda files: files[0])
+    monkeypatch.setattr("vemoizer.batch.concat_groups", lambda files: files[0])
     monkeypatch.setattr(grouping, "part_offsets", lambda files: [])
+    monkeypatch.setattr("vemoizer.batch.part_offsets", lambda files: [])
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(
         app,
@@ -77,7 +90,7 @@ def test_transcribe_with_all_flags(tmp_path, monkeypatch) -> None:
             "a.m4a",
             "b.m4a",
             "--format",
-            "txt,srt",
+            "txt",
             "--quiet",
             "--verbose",
             "--out",
@@ -86,10 +99,113 @@ def test_transcribe_with_all_flags(tmp_path, monkeypatch) -> None:
             "--yes",
         ],
     )
-    # --yes with a mid-sentence tail -> continuation -> both files in one
-    # group -> one combined output to --out.
     assert result.exit_code == 0
-    assert "moikka maailma" in result.stdout
+    # One combined group: exactly ONE decode, and the output contains the
+    # transcript exactly once (not twice, not zero times).
+    assert len(calls) == 1
+    assert result.stdout.count("moikka maailma") == 1
+
+
+def test_transcribe_no_group_produces_one_transcript_per_file(
+    tmp_path, monkeypatch
+) -> None:
+    """2 files + --no-group: no grouping at all — one standalone transcript
+    per file (transcribe_file called once per file), no boundary decode,
+    no concat."""
+    import vemoizer.grouping as grouping
+    import vemoizer.pipeline as pipeline_module
+
+    calls: list[str] = []
+    boundary_calls: list[int] = []
+
+    def fake_transcribe_file(path, **kwargs):
+        calls.append(str(path))
+        return {"text": f"moikka {len(calls)}", "segments": []}
+
+    def fake_decode_boundaries(files, transcribe_fn=None):
+        boundary_calls.append(1)
+        return [""], [""]
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.setattr(grouping, "decode_boundaries", fake_decode_boundaries)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(
+        app, ["transcribe", "a.m4a", "b.m4a", "--out", "-", "--no-group"]
+    )
+    assert result.exit_code == 0
+    # One transcript per file (2), and grouping was skipped entirely.
+    assert len(calls) == 2
+    assert boundary_calls == []
+    assert "moikka 1" in result.stdout
+    assert "moikka 2" in result.stdout
+    assert result.stdout.count("moikka") == 2
+
+
+def test_transcribe_non_tty_without_yes_or_no_group_fails_immediately(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """2+ files, CliRunner's default non-TTY stdin, no --yes/--no-group:
+    the CLI must fail IMMEDIATELY with exit 2 and a message naming --yes /
+    --no-group, BEFORE any boundary decode, transcriber, or ingest. No real
+    model or ffmpeg is touched (transcribe_file faked, decode_boundaries
+    faked)."""
+    import numpy as np
+
+    import vemoizer.grouping as grouping
+    import vemoizer.ingest as ingest
+    import vemoizer.pipeline as pipeline_module
+
+    touched: dict[str, int] = {"decode": 0, "transcribe_file": 0, "ingest": 0}
+
+    def fake_decode_boundaries(files, transcribe_fn=None):
+        touched["decode"] += 1
+        return [""], [""]
+
+    def fake_transcribe_file(path, **kwargs):
+        touched["transcribe_file"] += 1
+        return {"text": "hei", "segments": []}
+
+    def fake_ingest_audio(path):
+        touched["ingest"] += 1
+        return np.zeros(16000, dtype=np.float32)
+
+    monkeypatch.setattr(grouping, "decode_boundaries", fake_decode_boundaries)
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.setattr(ingest, "ingest_audio", fake_ingest_audio)
+    monkeypatch.chdir(tmp_path)
+    # CliRunner's stdin is not a TTY by default — the guard must fire.
+    result = runner.invoke(app, ["transcribe", "a.m4a", "b.m4a", "--out", "-"])
+    assert result.exit_code == 2
+    assert "--yes" in result.stderr
+    assert "--no-group" in result.stderr
+    assert "TTY" in result.stderr
+    # Nothing downstream ran: no decode, no transcribe, no ingest.
+    assert touched == {"decode": 0, "transcribe_file": 0, "ingest": 0}
+
+
+def test_transcribe_yes_and_no_group_mutually_exclusive(tmp_path, monkeypatch) -> None:
+    """2 files with both --yes and --no-group: rejected immediately (exit 2,
+    clear message) before any decode or boundary work."""
+    import vemoizer.grouping as grouping
+    import vemoizer.pipeline as pipeline_module
+
+    touched: dict[str, int] = {"decode": 0, "transcribe_file": 0}
+
+    def fake_decode_boundaries(files, transcribe_fn=None):
+        touched["decode"] += 1
+        return [""], [""]
+
+    def fake_transcribe_file(path, **kwargs):
+        touched["transcribe_file"] += 1
+        return {"text": "hei", "segments": []}
+
+    monkeypatch.setattr(grouping, "decode_boundaries", fake_decode_boundaries)
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["transcribe", "a.m4a", "b.m4a", "--yes", "--no-group"])
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.stderr
+    assert touched == {"decode": 0, "transcribe_file": 0}
 
 
 def test_transcribe_diarize_default_off(tmp_path, monkeypatch) -> None:
