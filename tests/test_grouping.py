@@ -556,7 +556,7 @@ def test_part_offsets_cumulative_pcm_durations(tmp_path, monkeypatch) -> None:
         f.touch()
     durations_by_name = {f.name: d for f, d in zip(files, durations, strict=True)}
 
-    def fake_pcm_duration(path):
+    def fake_pcm_duration(path, timeout=300.0):
         name = Path(path).name
         return durations_by_name[name]
 
@@ -581,7 +581,7 @@ def test_part_offsets_uses_pcm_duration_not_full_decode(tmp_path, monkeypatch) -
     for f in files:
         f.touch()
 
-    def fake_pcm_duration(path):
+    def fake_pcm_duration(path, timeout=300.0):
         return 7.0
 
     monkeypatch.setattr(grouping, "pcm_duration_seconds", fake_pcm_duration)

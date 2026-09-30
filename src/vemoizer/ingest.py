@@ -123,8 +123,11 @@ def _drain_ffmpeg_pcm(
     A daemon reader thread counts the bytes on stdout while the caller
     waits on that thread with the remaining wall-clock budget — the bound
     is enforced DURING the drain, not after EOF (a wedged ffmpeg that is
-    alive but produces no output is killed, reaped, and
-    :class:`subprocess.TimeoutExpired` is raised, never let hang the
+    alive but produces no output is killed, reaped, and an
+    :class:`IngestError` (``"…timed out after N s…"``) is raised by the
+    caller (``pcm_duration_seconds``) — the internal
+    :class:`subprocess.TimeoutExpired` is converted before it propagates,
+    never let hang the
     batch). *stderr_file* is a temp file the process already writes to
     (never an unread pipe, which could deadlock the drain once the pipe
     buffer fills); after the process is reaped it is read back and

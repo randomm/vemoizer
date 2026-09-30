@@ -14,11 +14,18 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+import time
 from collections.abc import Sequence
 from contextlib import suppress
 from pathlib import Path
 
 from .grouping_common import PartOffset, _escape_concat_path
+
+# Default cumulative wall-clock budget (seconds) for ``part_offsets``.
+# The budget shrinks only by the wall time each decode actually spends
+# (bounded above by its granted per-call timeout); a stalled decode burns
+# at most its share of the budget, a fast one barely any.
+PART_OFFSETS_TOTAL_TIMEOUT = 900.0
 
 
 def concat_groups(group: Sequence[Path | str]) -> Path:
@@ -64,6 +71,18 @@ def concat_groups(group: Sequence[Path | str]) -> Path:
     suffix = parts[0].suffix or ".m4a"
     out_path = tmp_dir / ("group" + suffix)
     list_path = tmp_dir / "concat.txt"
+    # Newline/carriage return in a part's name would split the concat list
+    # line — the concat demuxer format has no escape for them — so reject
+    # such names BEFORE the list file is written.
+    for part in parts:
+        name = part.name
+        if "\n" in name or "\r" in name:
+            raise GroupingError(
+                f"concat: part file name contains a newline or carriage "
+                f"return, which the ffmpeg concat list format cannot "
+                f"escape: {name!r}"
+            )
+    success = False
     try:
         list_path.write_text(
             "".join(_escape_concat_path(p) + "\n" for p in parts),
@@ -108,17 +127,20 @@ def concat_groups(group: Sequence[Path | str]) -> Path:
             raise GroupingError(
                 f"concat: ffmpeg failed for {names} (exit {proc.returncode}): {stderr}"
             )
+        success = True
         return out_path
     finally:
         # The temp dir must outlive the call on success: the caller owns
         # the merged file and deletes it after transcription (the list
-        # file always goes). On any failure path (missing list file,
-        # ffmpeg error, timeout, unexpected exception) the merged file is
-        # never returned — remove it and the temp dir so no partial
-        # private audio leaks, including on KeyboardInterrupt (round 3
+        # file always goes). On ANY non-success path (missing list file,
+        # ffmpeg error, timeout, unexpected exception, KeyboardInterrupt)
+        # ffmpeg's ``-y`` may have left a PARTIAL merged file behind, so
+        # remove it together with the temp dir — no partial private audio
+        # or empty dir leaks, including on KeyboardInterrupt (round 3
         # finding 12).
         list_path.unlink(missing_ok=True)
-        if not out_path.exists():
+        if not success:
+            out_path.unlink(missing_ok=True)
             with suppress(OSError):
                 tmp_dir.rmdir()
 
@@ -137,7 +159,9 @@ def remove_concat_output(merged: Path) -> None:
         merged.parent.rmdir()
 
 
-def part_offsets(group: Sequence[Path | str]) -> list[PartOffset]:
+def part_offsets(
+    group: Sequence[Path | str], total_timeout: float = PART_OFFSETS_TOTAL_TIMEOUT
+) -> list[PartOffset]:
     """Cumulative decoded-PCM start offset per part of *group*.
 
     Part 1 starts at 0.0; part N starts at the sum of the decoded
@@ -147,15 +171,32 @@ def part_offsets(group: Sequence[Path | str]) -> list[PartOffset]:
     container duration lie). The decode streams in bounded chunks and
     keeps only the byte count, so measuring a group of hour-long parts
     does not materialise their full float32 PCM.
+
+    The measurement loop is bounded by a CUMULATIVE wall-clock budget
+    (*total_timeout*, default :data:`PART_OFFSETS_TOTAL_TIMEOUT` seconds):
+    the budget shrinks only by real elapsed wall-clock time, measured with
+    ``time.monotonic()`` around each decode — never by the parts' decoded
+    audio durations, which are unrelated to how long the decode itself took
+    (two 30-minute parts decoded in milliseconds each do not exhaust the
+    budget). Each part's decode gets the REMAINING budget as its per-call
+    ``timeout``; a decode that stalls until that timeout expires has, by
+    definition, spent that wall time and burns it. When the remaining
+    budget is exhausted, an :class:`IngestError` is raised naming the part
+    that could not be measured and the total budget — the loop never starts
+    a decode it cannot possibly afford.
     """
     # Deferred import so that monkeypatch.setattr(grouping,
     # "pcm_duration_seconds", ...) in tests patches the name that
     # part_offsets actually looks up.
     from .grouping import pcm_duration_seconds as _pcm_duration_seconds
+    from .ingest import IngestError
 
     parts = [Path(p) for p in group]
     offsets: list[PartOffset] = []
     total = 0.0
+    # The budget shrinks by the wall time each decode actually spent
+    # (bounded above by its granted timeout), never by the audio duration.
+    remaining = total_timeout
     for i, part in enumerate(parts, start=1):
         offsets.append(
             PartOffset(
@@ -164,5 +205,14 @@ def part_offsets(group: Sequence[Path | str]) -> list[PartOffset]:
                 start_offset=total,
             )
         )
-        total += _pcm_duration_seconds(part)
+        if remaining <= 0:
+            raise IngestError(
+                f"part offsets: wall-clock budget of {total_timeout:.0f}s "
+                f"exhausted before measuring {part.name}"
+            )
+        granted = remaining
+        start = time.monotonic()
+        d = _pcm_duration_seconds(part, timeout=granted)
+        remaining -= time.monotonic() - start
+        total += d
     return offsets
