@@ -27,28 +27,64 @@ to one logical recording and joins the accepted groups:
   metadata.
 
 The heuristic is advisory: an explicit user partition always wins.
+
+The impure halves of this module live in dedicated submodules:
+
+- :mod:`vemoizer.grouping_decode` — the 20 s edge-window ffmpeg decode
+  (``decode_boundaries``, ``_decode_edge_window``).
+- :mod:`vemoizer.grouping_concat` — the ffmpeg concat demuxer
+  (``concat_groups``, ``remove_concat_output``) and part offsets
+  (``part_offsets``).
+- :mod:`vemoizer.grouping_probe` — the ffprobe duration probe
+  (``probe_duration_seconds``) and stream signature (``_probe_stream``).
+
+All are re-exported from this module for backwards compatibility with
+existing imports and ``monkeypatch.setattr("vemoizer.grouping.X", ...)``
+targets.
 """
 
 from __future__ import annotations
 
-import logging
 import re
-import subprocess
-import tempfile
 from collections.abc import Callable, Sequence
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-import numpy as np
-
-from vemoizer.ingest import IngestError, duration_seconds, ingest_audio
+from vemoizer.grouping_concat import (  # noqa: F401
+    concat_groups,
+    part_offsets,
+    remove_concat_output,
+)
+from vemoizer.grouping_decode import (  # noqa: F401
+    decode_boundaries,
+)
+from vemoizer.grouping_probe import (  # noqa: F401
+    _probe_stream,
+    probe_duration_seconds,
+)
+from vemoizer.ingest import (  # noqa: F401  (re-export)
+    IngestError,
+    duration_seconds,
+    ingest_audio,
+)
 from vemoizer.output.naming import nfc_stem_and_suffix
 from vemoizer.textnorm import textnorm
-from vemoizer.transcriber import Transcriber
 
-logger = logging.getLogger(__name__)
+# Re-export the shared data types (now in grouping_common.py).
+from .grouping_common import PartMarker, PartOffset  # noqa: F401  (re-export)
+
+
+def _decode_edge_window(path: Path, start: float, end: float):
+    """Indirection for :func:`grouping_decode._decode_edge_window`.
+
+    Defined here (not imported) so that ``monkeypatch.setattr(grouping,
+    "_decode_edge_window", fake)`` in tests patches the name that
+    ``decode_boundaries`` actually calls (via this local name).
+    """
+    from .grouping_decode import _decode_edge_window as _dew
+
+    return _dew(path, start, end)
+
 
 #: Seconds of each file edge decoded for the continuation probe.
 BOUNDARY_SECONDS = 20.0
@@ -99,19 +135,7 @@ class GroupingError(Exception):
     """User-visible grouping failure (malformed partition, concat error)."""
 
 
-@dataclass(frozen=True)
-class PartOffset:
-    """One part of a multi-part group: number, source file, start offset.
-
-    ``start_offset`` is cumulative decoded-PCM seconds from the start of
-    the concatenated group (part 1 starts at 0.0; part N starts at the
-    sum of the decoded durations of parts 1..N-1) — never ffprobe or
-    container metadata.
-    """
-
-    part_number: int
-    source_filename: str
-    start_offset: float
+# PartOffset is re-exported from grouping_common for backwards compat.
 
 
 @dataclass(frozen=True)
@@ -247,349 +271,6 @@ def propose_groups(
             )
         )
     return proposals
-
-
-# ---------------------------------------------------------------------------
-# Impure boundary decode
-# ---------------------------------------------------------------------------
-
-
-def _decode_edge_window(path: Path, start: float, end: float) -> np.ndarray:
-    """Decode ``[start, end)`` seconds of *path* — just that window.
-
-    ffmpeg seeks (``-ss`` / ``-t``), so a 1-hour file costs a 20 s decode
-    instead of a full-file decode (~2.4 GB of transient float32 PCM).
-    ffmpeg itself is the clamp: ``-t`` never decodes past the actual media
-    end (a trailing ffprobe overestimate never over-reads) and a negative
-    ``-ss`` (a tail start past the end) seeks to the start — so the
-    requested window is a request, and the decoded bytes are the truth.
-    The tail start is bounded on the probed duration, never container
-    metadata beyond that.
-    """
-    argv = [
-        "ffmpeg",
-        "-nostdin",
-        "-v",
-        "error",
-        "-ss",
-        f"{start:.6f}",
-        "-t",
-        f"{end - start:.6f}",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-c:a",
-        "pcm_f32le",
-        "-f",
-        "f32le",
-        "-",
-        "-i",
-        str(path),
-    ]
-    proc = subprocess.run(argv, capture_output=True, check=False, timeout=60.0)
-    if proc.returncode != 0:
-        raise IngestError(f"ffmpeg edge decode failed for {path}: {proc.stderr!r}")
-    raw = proc.stdout
-    n = len(raw) // 4
-    if n == 0:
-        return np.zeros(0, dtype=np.float32)
-    return np.frombuffer(raw, dtype=np.float32, count=n).copy()
-
-
-def decode_boundaries(
-    files: Sequence[Path | str],
-    transcribe_fn: Callable[[np.ndarray], dict[str, Any]] | None = None,
-) -> tuple[list[str], list[str]]:
-    """Decode each boundary's 20 s tail and head.
-
-    Returns ``(tail_texts, head_texts)`` — one entry per boundary, i.e.
-    ``len(files) - 1`` of each (the last file's tail has no successor,
-    so it is never decoded). A shared *transcribe_fn* is loaded once and
-    cleaned up after the last boundary. The default is a lazily created
-    ``WhisperTranscriber(language=None)`` — the concrete class the meeting
-    profile decodes with: boundary text can be Finnish or English (no
-    language pinning), and the closing-cue heuristic only needs a coarse
-    read, not full accuracy. Any per-slice decode failure degrades that
-    edge to ``""`` (no evidence) — never a raise.
-
-    Only the 20 s edge windows are decoded (ffmpeg ``-ss`` / ``-t``); the
-    file's full duration is probed with ffprobe for bounds only (the
-    decoded PCM still defines every offset — ffprobe never measures
-    transcribed audio). When ffprobe yields no duration (``0.0``) for an
-    existing file, the tail edge is skipped (``""``) rather than
-    requesting an unbounded decode window.
-    """
-    ordered = natural_sort(files)
-
-    transcriber: Transcriber | None = None
-    try:
-        if transcribe_fn is None:
-            from vemoizer.whisper_transcriber import WhisperTranscriber
-
-            transcriber = WhisperTranscriber(language=None)
-
-        def _edge_text(path: Path, start: float, end: float) -> str:
-            """Decode ``[start, end)`` seconds of *path*; ``""`` on failure."""
-            try:
-                audio = _decode_edge_window(path, start, end)
-                if len(audio) == 0:
-                    return ""
-                if transcribe_fn is not None:
-                    text = transcribe_fn(audio).get("text", "")
-                else:
-                    assert transcriber is not None  # resolved above
-                    text = transcriber.transcribe(audio).get("text", "")
-                return str(text).strip()
-            except (IngestError, RuntimeError, OSError) as e:
-                logger.warning("boundary decode failed for %s: %s", path, e)
-                return ""
-
-        tail_texts: list[str] = []
-        head_texts: list[str] = []
-        for i in range(len(ordered) - 1):
-            path = ordered[i]
-            dur = probe_duration_seconds(path)
-            # No probe evidence (``0.0``): skip the tail rather than
-            # requesting an unbounded decode window (ffprobe failure) —
-            # say so, since the boundary then degrades to a break with no
-            # tail evidence.
-            if dur > 0.0:
-                tail = _edge_text(path, dur - BOUNDARY_SECONDS, dur)
-            else:
-                logger.warning(
-                    "no duration evidence for %s (ffprobe failed or "
-                    "unreadable); tail probe skipped, boundary will "
-                    "degrade to a break",
-                    path,
-                )
-                tail = ""
-            tail_texts.append(tail)
-            # The head is the first 20 s of the NEXT file (the one the
-            # boundary leads into), not of the current file.
-            head_texts.append(_edge_text(ordered[i + 1], 0.0, BOUNDARY_SECONDS))
-        return tail_texts, head_texts
-    finally:
-        if transcriber is not None:
-            with suppress(Exception):  # cleanup is best-effort (fail-open)
-                transcriber.cleanup()
-
-
-# ---------------------------------------------------------------------------
-# Concat
-# ---------------------------------------------------------------------------
-
-
-def _escape_concat_path(p: Path) -> str:
-    """Escape *p* for an ffmpeg concat list file line (``file '<path>'``).
-
-    Single-quote quoting with ``'`` escaped as ``'\\''`` (POSIX style):
-    paths with spaces, Unicode (``ä``/``ö``), or apostrophes
-    (``Möös's memo.m4a``) all produce a valid list file.
-    """
-    return "file '" + str(p).replace("'", "'\\''") + "'"
-
-
-def _probe_stream(part: Path) -> str:
-    """The part's audio stream signature (codec/sample_rate/channels)."""
-    try:
-        proc = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-select_streams",
-                "a:0",
-                "-show_entries",
-                "stream=codec_name,sample_rate,channels",
-                "-of",
-                "csv=p=0",
-                str(part),
-            ],
-            capture_output=True,
-            check=False,
-            timeout=30.0,
-        )
-    except FileNotFoundError:
-        raise GroupingError(
-            "ffprobe not found on PATH; install ffmpeg (e.g. `brew install ffmpeg`)"
-        ) from None
-    if proc.returncode != 0:
-        raise GroupingError(
-            f"ffprobe failed for {part.name} "
-            f"(exit {proc.returncode}): "
-            f"{proc.stderr.decode('utf-8', errors='replace').strip()}"
-        )
-    return proc.stdout.decode("utf-8", errors="replace").strip()
-
-
-def probe_duration_seconds(path: Path) -> float:
-    """Container duration via ffprobe — advisory only, never load-bearing.
-
-    Used to BOUND a probe decode (how many seconds to request from
-    ffmpeg) — not the duration of any transcribed audio. Part offsets
-    and boundary positions come from decoded PCM, never container
-    metadata (edit lists in iOS Voice Memos make ffprobe duration lie).
-    An unreadable or corrupt file yields ``0.0`` ("no probe evidence").
-    """
-    try:
-        proc = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "csv=p=0",
-                str(path),
-            ],
-            capture_output=True,
-            check=False,
-            timeout=30.0,
-        )
-    except FileNotFoundError:
-        return 0.0
-    if proc.returncode != 0:
-        return 0.0
-    value = proc.stdout.decode("utf-8", errors="replace").strip()
-    try:
-        return float(value)
-    except ValueError:
-        return 0.0
-
-
-def concat_groups(group: Sequence[Path | str]) -> Path:
-    """Join *group* into one temp .m4a with the ffmpeg concat demuxer.
-
-    ``-c copy`` (no re-encode). The concat demuxer needs every part to
-    share the same audio stream, so a per-part ffprobe check runs first
-    and a mismatch raises :class:`GroupingError` naming the offending
-    files — ``-c copy`` alone would silently corrupt the output. A
-    single-file group is a passthrough: no ffmpeg call, no temp file,
-    the input itself is returned.
-    """
-    parts = [Path(p) for p in group]
-    if len(parts) == 1:
-        return parts[0]
-
-    for part in parts:
-        if not part.is_file():
-            raise GroupingError(f"concat: part file not found: {part}")
-
-    probes = [(p, _probe_stream(p)) for p in parts]
-    (first_part, first_sig) = probes[0]
-    mismatched = [(p, sig) for p, sig in probes[1:] if sig != first_sig]
-    if mismatched:
-        names = ", ".join(p.name for p, _ in probes)
-        raise GroupingError(
-            f"concat: audio stream mismatch among {names}: "
-            f"{first_part.name} has (codec, sample_rate, channels) "
-            f"{first_sig!r} but {mismatched[0][0].name} has "
-            f"{mismatched[0][1]!r}"
-        )
-
-    # The merged group holds every second of the split recording — a
-    # world-readable temp file would expose hours of private audio in a
-    # shared temp dir, so the concat output lives in a 0o700 directory.
-    tmp_dir = Path(tempfile.mkdtemp(prefix="vemoizer-concat-"))
-    suffix = parts[0].suffix or ".m4a"
-    out_path = tmp_dir / ("group" + suffix)
-    list_path = tmp_dir / "concat.txt"
-    try:
-        list_path.write_text(
-            "".join(_escape_concat_path(p) + "\n" for p in parts),
-            encoding="utf-8",
-        )
-        try:
-            proc = subprocess.run(
-                [
-                    "ffmpeg",
-                    "-nostdin",
-                    "-v",
-                    "error",
-                    "-f",
-                    "concat",
-                    "-safe",
-                    "0",
-                    "-i",
-                    str(list_path),
-                    "-c",
-                    "copy",
-                    "-y",
-                    str(out_path),
-                ],
-                capture_output=True,
-                check=False,
-                timeout=120.0,
-            )
-        except FileNotFoundError as e:
-            raise GroupingError(
-                "ffmpeg not found on PATH; install ffmpeg (e.g. `brew install ffmpeg`)"
-            ) from e
-        except subprocess.TimeoutExpired:
-            raise GroupingError("concat: ffmpeg timed out") from None
-        if proc.returncode != 0:
-            stderr = proc.stderr.decode("utf-8", errors="replace").strip()
-            names = ", ".join(p.name for p in parts)
-            raise GroupingError(
-                f"concat: ffmpeg failed for {names} (exit {proc.returncode}): {stderr}"
-            )
-        return out_path
-    finally:
-        # The temp dir must outlive the call: the caller owns the merged
-        # file and deletes it after transcription (the list file always
-        # goes).
-        list_path.unlink(missing_ok=True)
-        # On any failure path (missing list file, ffmpeg error, timeout)
-        # the merged file is never returned — remove it and the temp dir
-        # so no partial private audio leaks. On success the dir outlives
-        # the call: the caller owns the merged file.
-        if not out_path.exists():
-            with suppress(OSError):
-                tmp_dir.rmdir()
-
-
-def remove_concat_output(merged: Path) -> None:
-    """Delete a :func:`concat_groups` temp file AND its 0o700 temp dir.
-
-    The caller (``run_batch``) owns the merged file — delete it on every
-    path after transcription, including the error/exit paths, so no
-    merged private audio is left behind in the temp dir.
-    """
-    merged.unlink(missing_ok=True)
-    # A non-empty or vanished dir cannot be unlinked either way — the
-    # file itself is already gone, so nothing more to clean.
-    with suppress(OSError):
-        merged.parent.rmdir()
-
-
-def part_offsets(group: Sequence[Path | str]) -> list[PartOffset]:
-    """Cumulative decoded-PCM start offset per part of *group*.
-
-    Part 1 starts at 0.0; part N starts at the sum of the decoded
-    durations of parts 1..N-1. Durations come from ``ingest_audio``
-    (decoded PCM byte count) — never ffprobe or container metadata (iOS
-    Voice Memos edit lists make container duration lie).
-
-    Note: the full decode of every part here (plus the pipeline's decode
-    of the merged group) is the spec-mandated decoded-PCM offset contract
-    — the cost of never trusting container metadata for transcription
-    alignment.
-    """
-    parts = [Path(p) for p in group]
-    offsets: list[PartOffset] = []
-    total = 0.0
-    for i, part in enumerate(parts, start=1):
-        offsets.append(
-            PartOffset(
-                part_number=i,
-                source_filename=part.name,
-                start_offset=total,
-            )
-        )
-        total += duration_seconds(ingest_audio(part))
-    return offsets
 
 
 # ---------------------------------------------------------------------------

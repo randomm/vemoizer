@@ -1,0 +1,213 @@
+"""Boundary-decode half of the M3 split-recording grouping (issue #77).
+
+The 20 s edge-window decode that feeds :func:`vemoizer.grouping.propose_groups`
+with pre-decoded tail/head texts. Split from ``grouping.py`` so that the
+pure heuristic (grouping.py) and the impure ffmpeg/Whisper decode (this
+module) each have a single, small responsibility.
+
+``decode_boundaries`` returns ``(tail_texts, head_texts)`` — one entry per
+boundary, i.e. ``len(files) - 1`` of each (the last file's tail has no
+successor, so it is never decoded). A shared ``transcribe_fn`` is loaded
+once and cleaned up after the last boundary. The default is a lazily
+created ``WhisperTranscriber(language=None)`` — the concrete class the
+meeting profile decodes with: boundary text can be Finnish or English (no
+language pinning), and the closing-cue heuristic only needs a coarse read,
+not full accuracy. Any per-slice decode failure degrades that edge to
+``""`` (no evidence) — never a raise.
+
+Only the 20 s edge windows are decoded (ffmpeg ``-ss`` / ``-t``); the
+file's full duration is probed with ffprobe for bounds only (the decoded
+PCM still defines every offset — ffprobe never measures transcribed
+audio). When ffprobe yields no duration (``0.0``) for an existing file,
+the tail edge is skipped (``""``) rather than requesting an unbounded
+decode window.
+"""
+
+from __future__ import annotations
+
+import logging
+import subprocess
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from vemoizer.ingest import IngestError
+from vemoizer.transcriber import Transcriber
+
+logger = logging.getLogger(__name__)
+
+
+def _decode_edge_window(path: Path, start: float, end: float) -> np.ndarray:
+    """Decode ``[start, end)`` seconds of *path* — just that window.
+
+    ffmpeg seeks (``-ss`` / ``-t``), so a 1-hour file costs a 20 s decode
+    instead of a full-file decode (~2.4 GB of transient float32 PCM).
+    ffmpeg itself is the clamp: ``-t`` never decodes past the actual media
+    end (a trailing ffprobe overestimate never over-reads) and a negative
+    ``-ss`` (a tail start past the end) seeks to the start — so the
+    requested window is a request, and the decoded bytes are the truth.
+    The tail start is bounded on the probed duration, never container
+    metadata beyond that.
+    """
+    argv = [
+        "ffmpeg",
+        "-nostdin",
+        "-v",
+        "error",
+        "-ss",
+        f"{start:.6f}",
+        "-t",
+        f"{end - start:.6f}",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_f32le",
+        "-f",
+        "f32le",
+        "-",
+        "-i",
+        str(path),
+    ]
+    proc = subprocess.run(argv, capture_output=True, check=False, timeout=60.0)
+    if proc.returncode != 0:
+        # stderr is ffmpeg internals — truncate and strip newlines so the
+        # user-facing line stays a single bounded paragraph that still
+        # names the offending file (round 3 finding 8).
+        stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+        stderr = " ".join(stderr.split())
+        if len(stderr) > 200:
+            stderr = stderr[:200] + "…"
+        raise IngestError(f"ffmpeg edge decode failed for {path}: {stderr}")
+    raw = proc.stdout
+    n = len(raw) // 4
+    if n == 0:
+        return np.zeros(0, dtype=np.float32)
+    return np.frombuffer(raw, dtype=np.float32, count=n).copy()
+
+
+def decode_boundaries(
+    files: Sequence[Path | str],
+    transcribe_fn: Callable[[np.ndarray], dict[str, Any]] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Decode each boundary's 20 s tail and head.
+
+    Returns ``(tail_texts, head_texts)`` — one entry per boundary, i.e.
+    ``len(files) - 1`` of each (the last file's tail has no successor,
+    so it is never decoded). A shared *transcribe_fn* is loaded once and
+    cleaned up after the last boundary. The default is a lazily created
+    ``WhisperTranscriber(language=None)`` — the concrete class the meeting
+    profile decodes with: boundary text can be Finnish or English (no
+    language pinning), and the closing-cue heuristic only needs a coarse
+    read, not full accuracy. Any per-slice decode failure degrades that
+    edge to ``""`` (no evidence) — never a raise.
+
+    Only the 20 s edge windows are decoded (ffmpeg ``-ss`` / ``-t``); the
+    file's full duration is probed with ffprobe for bounds only (the
+    decoded PCM still defines every offset — ffprobe never measures
+    transcribed audio). When ffprobe yields no duration (``0.0``) for an
+    existing file, the tail edge is skipped (``""``) rather than
+    requesting an unbounded decode window.
+    """
+    # Deferred imports so that monkeypatch.setattr(grouping, "X", ...)
+    # in tests patches the names that decode_boundaries actually looks up.
+    from .grouping import BOUNDARY_SECONDS, natural_sort, probe_duration_seconds
+    from .grouping import _decode_edge_window as _dew
+
+    ordered = natural_sort(files)
+
+    transcriber: Transcriber | None = None
+    last_audio: np.ndarray | None = None
+    _window: np.ndarray | None = None  # loop-local; del'd in the finally
+    _tr_snapshot: Transcriber | None = None
+    if transcribe_fn is None:
+        from vemoizer.whisper_transcriber import WhisperTranscriber
+
+        transcriber = WhisperTranscriber(language=None)
+        _tr_snapshot = transcriber
+    try:
+
+        def _edge_text(
+            path: Path, start: float, end: float
+        ) -> tuple[str, np.ndarray | None]:
+            """Decode ``[start, end)`` seconds of *path*; ``("", audio)``.
+
+            The decoded PCM array is returned alongside the text so the
+            ``finally`` block can drop the reference deterministically;
+            audio is the only large local this function owns besides the
+            transcriber itself. ``None`` when nothing was decoded (empty
+            window or failure) — there is then no array to drop.
+            """
+            tr = _tr_snapshot
+            try:
+                audio = _dew(path, start, end)
+                if len(audio) == 0:
+                    return "", None
+                if transcribe_fn is not None:
+                    text = transcribe_fn(audio).get("text", "")
+                else:
+                    if tr is None:
+                        raise RuntimeError("boundary transcriber not loaded")
+                    text = tr.transcribe(audio).get("text", "")
+                return str(text).strip(), audio
+            except (IngestError, RuntimeError, OSError) as e:
+                # Log the full error for diagnostics; the user-facing path
+                # is the degraded "" (no evidence) below.
+                logger.warning("boundary decode failed for %s: %s", path, e)
+                return "", None
+
+        tail_texts: list[str] = []
+        head_texts: list[str] = []
+        for i in range(len(ordered) - 1):
+            path = ordered[i]
+            dur = probe_duration_seconds(path)
+            # No probe evidence (``0.0``): skip the tail rather than
+            # requesting an unbounded decode window (ffprobe failure) —
+            # say so, since the boundary then degrades to a break with no
+            # tail evidence.
+            if dur > 0.0:
+                tail, tail_audio = _edge_text(path, dur - BOUNDARY_SECONDS, dur)
+            else:
+                logger.warning(
+                    "no duration evidence for %s (ffprobe failed or "
+                    "unreadable); tail probe skipped, boundary will "
+                    "degrade to a break",
+                    path,
+                )
+                tail, tail_audio = "", None
+            tail_texts.append(tail)
+            # The head is the first 20 s of the NEXT file (the one the
+            # boundary leads into), not of the current file.
+            head, head_audio = _edge_text(ordered[i + 1], 0.0, BOUNDARY_SECONDS)
+            head_texts.append(head)
+            # Keep only the newest decoded window alive: once a boundary's
+            # both edges are done, the previous window is no longer needed
+            # and the reference is dropped (the loop variable itself would
+            # otherwise pin the last window until this finally).
+            _window = head_audio if head_audio is not None else tail_audio
+            last_audio = _window
+        return tail_texts, head_texts
+    finally:
+        # Do NOT call transcriber.cleanup() here. cleanup() sets
+        # mlx_whisper.transcribe.ModelHolder.model = None, destroying the
+        # shared MLX model cache that the main pipeline's WhisperTranscriber
+        # (meeting profile, decode_meeting) would otherwise reuse for the
+        # per-group decode; the shared ModelHolder cache (holding the actual
+        # weights) must survive for the main pipeline. The transcriber
+        # instance itself is released here DETERMINISTICALLY by dropping
+        # every local reference (transcriber + the last decoded PCM array)
+        # rather than relying on GC to find the scope exit first — the
+        # instance's __del__ then releases it, while the shared ModelHolder
+        # cache is preserved. Memory stays bounded: the boundary model is
+        # the same whisper-large-v3-turbo weights the main pipeline would
+        # load anyway, so no extra peak is incurred (round 3 findings 9-16).
+        del transcriber
+        del _window
+        del last_audio
+        if "tail_audio" in locals():
+            del tail_audio
+        if "head_audio" in locals():
+            del head_audio

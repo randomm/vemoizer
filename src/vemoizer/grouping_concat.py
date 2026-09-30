@@ -1,0 +1,170 @@
+"""FFmpeg concat demuxer and part offsets for M3 split-recording grouping.
+
+``concat_groups`` joins a group's parts with the ffmpeg concat demuxer
+(``-c copy``, no re-encode). ``part_offsets`` measures each part's
+cumulative decoded-PCM start offset (``ingest_audio`` +
+``duration_seconds``), never ffprobe or container metadata.
+
+Split from ``grouping.py`` so the concat/offset machinery (impure ffmpeg
+I/O) has its own module separate from the pure heuristic and the edit
+partition parser.
+"""
+
+from __future__ import annotations
+
+import subprocess
+import tempfile
+from collections.abc import Sequence
+from contextlib import suppress
+from pathlib import Path
+
+from .grouping_common import PartOffset, _escape_concat_path
+
+
+def concat_groups(group: Sequence[Path | str]) -> Path:
+    """Join *group* into one temp .m4a with the ffmpeg concat demuxer.
+
+    ``-c copy`` (no re-encode). The concat demuxer needs every part to
+    share the same audio stream, so a per-part ffprobe check runs first
+    and a mismatch raises :class:`GroupingError` naming the offending
+    files — ``-c copy`` alone would silently corrupt the output. A
+    single-file group is a passthrough: no ffmpeg call, no temp file,
+    the input itself is returned.
+    """
+    from .grouping import GroupingError
+
+    parts = [Path(p) for p in group]
+    if len(parts) == 1:
+        return parts[0]
+
+    for part in parts:
+        if not part.is_file():
+            raise GroupingError(f"concat: part file not found: {part}")
+
+    # Deferred import so that monkeypatch.setattr(grouping, "_probe_stream",
+    # ...) in tests patches the name that concat_groups actually looks up.
+    from .grouping import _probe_stream as _ps
+
+    probes = [(p, _ps(p)) for p in parts]
+    (first_part, first_sig) = probes[0]
+    mismatched = [(p, sig) for p, sig in probes[1:] if sig != first_sig]
+    if mismatched:
+        names = ", ".join(p.name for p, _ in probes)
+        raise GroupingError(
+            f"concat: audio stream mismatch among {names}: "
+            f"{first_part.name} has (codec, sample_rate, channels) "
+            f"{first_sig!r} but {mismatched[0][0].name} has "
+            f"{mismatched[0][1]!r}"
+        )
+
+    # The merged group holds every second of the split recording — a
+    # world-readable temp file would expose hours of private audio in a
+    # shared temp dir, so the concat output lives in a 0o700 directory.
+    tmp_dir = Path(tempfile.mkdtemp(prefix="vemoizer-concat-"))
+    suffix = parts[0].suffix or ".m4a"
+    out_path = tmp_dir / ("group" + suffix)
+    list_path = tmp_dir / "concat.txt"
+    try:
+        list_path.write_text(
+            "".join(_escape_concat_path(p) + "\n" for p in parts),
+            encoding="utf-8",
+        )
+        try:
+            proc = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-nostdin",
+                    "-v",
+                    "error",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-i",
+                    str(list_path),
+                    "-c",
+                    "copy",
+                    "-y",
+                    str(out_path),
+                ],
+                capture_output=True,
+                check=False,
+                timeout=120.0,
+            )
+        except FileNotFoundError as e:
+            raise GroupingError(
+                "ffmpeg not found on PATH; install ffmpeg (e.g. `brew install ffmpeg`)"
+            ) from e
+        except subprocess.TimeoutExpired:
+            raise GroupingError("concat: ffmpeg timed out") from None
+        if proc.returncode != 0:
+            # Truncate and collapse stderr to a single bounded paragraph
+            # that still names the offending files (round 3 finding 8).
+            stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+            stderr = " ".join(stderr.split())
+            if len(stderr) > 200:
+                stderr = stderr[:200] + "…"
+            names = ", ".join(p.name for p in parts)
+            raise GroupingError(
+                f"concat: ffmpeg failed for {names} (exit {proc.returncode}): {stderr}"
+            )
+        return out_path
+    finally:
+        # The temp dir must outlive the call on success: the caller owns
+        # the merged file and deletes it after transcription (the list
+        # file always goes). On any failure path (missing list file,
+        # ffmpeg error, timeout, unexpected exception) the merged file is
+        # never returned — remove it and the temp dir so no partial
+        # private audio leaks, including on KeyboardInterrupt (round 3
+        # finding 12).
+        list_path.unlink(missing_ok=True)
+        if not out_path.exists():
+            with suppress(OSError):
+                tmp_dir.rmdir()
+
+
+def remove_concat_output(merged: Path) -> None:
+    """Delete a :func:`concat_groups` temp file AND its 0o700 temp dir.
+
+    The caller (``run_batch``) owns the merged file — delete it on every
+    path after transcription, including the error/exit paths, so no
+    merged private audio is left behind in the temp dir.
+    """
+    merged.unlink(missing_ok=True)
+    # A non-empty or vanished dir cannot be unlinked either way — the
+    # file itself is already gone, so nothing more to clean.
+    with suppress(OSError):
+        merged.parent.rmdir()
+
+
+def part_offsets(group: Sequence[Path | str]) -> list[PartOffset]:
+    """Cumulative decoded-PCM start offset per part of *group*.
+
+    Part 1 starts at 0.0; part N starts at the sum of the decoded
+    durations of parts 1..N-1. Durations come from ``ingest_audio``
+    (decoded PCM byte count) — never ffprobe or container metadata (iOS
+    Voice Memos edit lists make container duration lie).
+
+    Note: the full decode of every part here (plus the pipeline's decode
+    of the merged group) is the spec-mandated decoded-PCM offset contract
+    — the cost of never trusting container metadata for transcription
+    alignment.
+    """
+    # Deferred import so that monkeypatch.setattr(grouping, "ingest_audio",
+    # ...) in tests patches the name that part_offsets actually looks up.
+    from .grouping import duration_seconds as _duration_seconds
+    from .grouping import ingest_audio as _ingest_audio
+
+    parts = [Path(p) for p in group]
+    offsets: list[PartOffset] = []
+    total = 0.0
+    for i, part in enumerate(parts, start=1):
+        offsets.append(
+            PartOffset(
+                part_number=i,
+                source_filename=part.name,
+                start_offset=total,
+            )
+        )
+        total += _duration_seconds(_ingest_audio(part))
+    return offsets

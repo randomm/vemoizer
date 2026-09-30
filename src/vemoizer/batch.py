@@ -34,13 +34,16 @@ files, adds the grouping layer (``grouping`` module): natural sort,
 20 s boundary decodes, the confirm step (``--yes`` / ``--no-group`` /
 interactive), ffmpeg concat of multi-part groups, one decode per group
 (invariant 6), and the ``part_markers`` sidecar record.
+
+The output-writing helpers (``_write_output``, ``_write_preset_output``,
+``_write_temp_glossary``, ``_check_result``) live in
+:mod:`vemoizer.batch_output` and are re-exported here for backwards
+compatibility with existing tests.
 """
 
 from __future__ import annotations
 
-import os
 import sys
-import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -52,15 +55,60 @@ from vemoizer.caffeinate import caffeinate_context
 from vemoizer.diarization import SpeakerCount
 from vemoizer.ingest import IngestError
 from vemoizer.llm import ConfigError
-from vemoizer.output.naming import (
+from vemoizer.output.naming import (  # noqa: F401
     collision_free_paths,
     dated_basename,
     nfc_stem_and_suffix,
 )
 from vemoizer.presets import RunOptions
 
-#: The two output formats the meeting and memo presets write.
-PRESET_FORMATS = ("md", "json")
+
+def _write_temp_glossary(lines: list[str]) -> str:
+    """Indirection for :func:`batch_output._write_temp_glossary`.
+
+    Defined here (not imported) so that ``monkeypatch.setattr(batch,
+    "_write_temp_glossary", fake)`` in tests patches the name that
+    ``run_preset`` actually calls.
+    """
+    from vemoizer.batch_output import _write_temp_glossary as _wgt
+
+    return _wgt(lines)
+
+
+# Re-export the output-writing helpers (now in batch_output.py) so
+# existing imports from vemoizer.batch continue to work.
+from vemoizer.batch_output import (  # noqa: F401,E402
+    PRESET_FORMATS,
+    _check_result,
+    _write_output,
+    _write_preset_output,
+    run_preset,
+)
+
+# Re-export the grouping helpers (now in grouping_*.py submodules) so
+# existing imports and monkeypatch.setattr("vemoizer.grouping.X", ...)
+# continue to work.
+from vemoizer.grouping import (  # noqa: F401,E402
+    GroupingError,
+    GroupProposal,
+    PartMarker,
+    PartOffset,
+    natural_sort,
+    stems_of,
+)
+from vemoizer.grouping_concat import (  # noqa: F401,E402
+    concat_groups,
+    part_offsets,
+    remove_concat_output,
+)
+from vemoizer.grouping_decode import (  # noqa: F401,E402
+    _decode_edge_window,
+    decode_boundaries,
+)
+from vemoizer.grouping_probe import (  # noqa: F401,E402
+    _probe_stream,
+    probe_duration_seconds,
+)
 
 
 def _resolve_llm_config(config_path: str | None):
@@ -79,118 +127,6 @@ def _resolve_llm_config(config_path: str | None):
     if config_path is not None:
         return load_config(config_path)
     return _default_search()
-
-
-def _write_output(target: Path, result: dict, fmt: str) -> bool:
-    """Render *result* in *fmt* and write it to *target* (``-`` = stdout).
-
-    Returns True on success; False after printing the error, so the caller
-    can fail the run instead of reporting a transcript that was never
-    written.
-    """
-    from vemoizer.output.formatters import format_transcript
-
-    try:
-        rendered = format_transcript(result, fmt)
-    except (ValueError, KeyError) as e:
-        typer.echo(f"error: {e}", err=True)
-        return False
-    if str(target) == "-":
-        typer.echo(rendered)
-        return True
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(rendered, encoding="utf-8")
-    except OSError as e:
-        typer.echo(f"error: could not write {target}: {e}", err=True)
-        return False
-    return True
-
-
-def _write_preset_output(
-    result: dict,
-    first_stem: str,
-    out_dir: Path,
-) -> list[str]:
-    """Write the meeting/memo output pair (``.md`` + ``.json``) to *out_dir*.
-
-    The base name is ``YYYY-MM-DD <title>`` where *title* comes from
-    ``result["notes"]["title"]`` and falls back to *first_stem* (the
-    first source file's stem) when the LLM produced no title.  Collision
-    suffixes `` (2)``, `` (3)``, … are checked against the real
-    filesystem via ``collision_free_path``.
-
-    Returns the list of written relative paths (for the ``wrote <path>``
-    summary lines).
-    """
-    notes = result.get("notes")
-    title = ""
-    if isinstance(notes, dict):
-        t = notes.get("title")
-        if isinstance(t, str) and t.strip():
-            title = t
-
-    base = dated_basename(title, fallback_stem=first_stem)
-    # The .md/.json pair is probed as a unit so both files always share
-    # one stem (never ``X.md`` + ``X (2).json``) — issue #82 review.
-    paths = collision_free_paths(out_dir, base, [f".{fmt}" for fmt in PRESET_FORMATS])
-    written: list[str] = []
-    for path, fmt in zip(paths, PRESET_FORMATS, strict=True):
-        if _write_output(path, result, fmt):
-            written.append(path.name)
-    return written
-
-
-def _check_result(
-    file: Path | str, result: dict, *, diarize: bool, diarize_label: str = "--diarize"
-) -> int:
-    """The M1 fail-loud checks over one file's result (issue #78).
-
-    *file* may be a path or a string label (a multi-part group's "a.m4a+
-    b.m4a"); only display matters, so a bare label string is accepted
-    directly. Prints the warnings channel, then fails (1) on an ``error``
-    key, an empty transcript, or ``--diarize`` without speaker labels;
-    returns 0 when the result looks like a real transcript. The messages
-    are pinned by tests — both ``transcribe_batch`` and ``run_preset`` go
-    through here (one implementation); ``diarize_label`` preserves each
-    entry point's pre-M2 wording for the no-labels line.
-    """
-    for warning in result.pop("warnings", []):
-        typer.echo(warning, err=True)
-    if "error" in result:
-        typer.echo(f"error: {result['error']}", err=True)
-        return 1
-    if not result.get("text") and not result.get("segments"):
-        typer.echo(
-            f"error: no transcript produced for {file} (empty transcript)",
-            err=True,
-        )
-        return 1
-    if (
-        diarize
-        and result.get("segments")
-        and not any("speaker" in seg for seg in result["segments"])
-    ):
-        typer.echo(
-            f"error: {diarize_label} requested but "
-            f"no speaker labels returned for {file}",
-            err=True,
-        )
-        return 1
-    return 0
-
-
-def _write_temp_glossary(lines: list[str]) -> str:
-    """Write *lines* to a fresh temp glossary file; return its path.
-
-    Raises ``OSError`` on a write failure so the caller can fail with a
-    clean error line inside the protected region (no leaked file).
-    """
-    fd, name = tempfile.mkstemp(prefix="vemoizer-glossary-", suffix=".txt")
-    os.close(fd)
-    path = Path(name)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return str(path)
 
 
 def transcribe_batch(
@@ -270,7 +206,9 @@ def _transcribe_one(file: Path, options: RunOptions) -> dict[str, Any]:
     The return is ``TranscriptionResult``-shaped (``text`` required;
     ``segments`` / ``part_markers`` / ``notes`` optional) — or the
     ``{"text", "segments", "error"}`` triple when the project config
-    check fails (a clean error line downstream, never a traceback).
+    check fails. The ``error`` key is part of the contract: ``_check_result`
+    turns it into a clean ``error: ...`` line, so it must be visible in the
+    type, not elided (round 3 finding 2).
     """
     from vemoizer.pipeline import transcribe_file
 
@@ -289,6 +227,70 @@ def _transcribe_one(file: Path, options: RunOptions) -> dict[str, Any]:
         glossary_path=options.glossary_path,
         speakers=options.speakers,
     )
+
+
+def _write_group_outputs(
+    group: list[Path],
+    result: dict,
+    *,
+    formats: list[str],
+    out: Path | None,
+) -> bool:
+    """Write one group's outputs; True on success.
+
+    The ``--out`` override applies only for single-group runs (or stdout,
+    where each group streams in order) — a multi-group run with an explicit
+    file target is rejected up front in :func:`run_batch` before any
+    decode, so it never reaches this loop.
+    """
+    if out is not None:
+        return _write_output(out, result, formats[0] if formats else "txt")
+    stem, _ = nfc_stem_and_suffix(group[0])
+    from vemoizer.output.formatters import FORMAT_EXTENSIONS
+
+    return all(
+        [
+            _write_output(Path(f"{stem}{FORMAT_EXTENSIONS[fmt]}"), result, fmt)
+            for fmt in formats
+        ]
+    )
+
+
+def _run_plain(
+    ordered: list[Path],
+    options: RunOptions,
+    *,
+    formats: Sequence[str],
+    out: Path | None,
+    quiet: bool,
+) -> int:
+    """The plain per-file loop (single-file runs and --no-group groups).
+
+    Note: intentionally diverges from ``transcribe_batch`` — no ``--copy``
+    support and per-file config-error continue (the batch loop honors
+    ``--copy`` and aborts the run on a malformed project config). The
+    divergence is deliberate: the plain loop feeds the grouping path
+    where ``--copy`` is a single-file-only concern and a broken config
+    should fail that file, not the whole multi-file run.
+    """
+    exit_code = 0
+    with caffeinate_context():
+        for file in ordered:
+            result = _transcribe_one(file, options)
+            if _check_result(file, result, diarize=options.diarize):
+                exit_code = 1
+                continue
+            if not _write_group_outputs(
+                [file],
+                result,
+                formats=list(formats),
+                out=out,
+            ):
+                exit_code = 1
+                continue
+            if not quiet:
+                typer.echo(f"wrote transcript for {file.name}")
+    return exit_code
 
 
 def run_batch(
@@ -334,15 +336,7 @@ def run_batch(
     Returns 0 on success, 1 if any group failed, 2 on a bad
     combination of group flags.
     """
-    from vemoizer.grouping import (
-        GroupingError,
-        concat_groups,
-        confirm_groups,
-        decode_boundaries,
-        natural_sort,
-        part_offsets,
-        propose_groups,
-    )
+    from vemoizer.grouping import confirm_groups, propose_groups
 
     ordered = natural_sort(files)
 
@@ -376,7 +370,11 @@ def run_batch(
         return 2
     # --yes still runs the boundary decodes (they feed the proposal);
     # --no-group is the flag that skips them (it already returned above).
-    tail_texts, head_texts = decode_boundaries(ordered, transcribe_fn)
+    # Deferred import so that monkeypatch.setattr(grouping, "decode_boundaries", ...)
+    # in tests patches the name that run_batch actually calls.
+    from .grouping import decode_boundaries as _db
+
+    tail_texts, head_texts = _db(ordered, transcribe_fn)
     proposals = propose_groups(ordered, tail_texts, head_texts)
     try:
         groups = confirm_groups(
@@ -430,8 +428,6 @@ def run_batch(
                     offsets = part_offsets(group)
                 except IngestError as e:
                     if merged_is_temp:
-                        from vemoizer.grouping import remove_concat_output
-
                         remove_concat_output(merged)
                     typer.echo(f"error: {e}", err=True)
                     exit_code = 1
@@ -440,13 +436,12 @@ def run_batch(
                     result = _transcribe_one(merged, options)
                 finally:
                     if merged_is_temp:
-                        from vemoizer.grouping import remove_concat_output
-
                         remove_concat_output(merged)
                 if "error" not in result:
                     # Multi-part groups only: single-part groups get no
-                    # part_markers key at all (issue #77).
-                    result["part_markers"] = [
+                    # part_markers key at all (issue #77). PartMarker gives
+                    # each {offset, label} entry an explicit type (finding 5).
+                    markers: list[PartMarker] = [
                         {
                             "offset": off.start_offset,
                             "label": f"— osa {off.part_number} "
@@ -454,6 +449,7 @@ def run_batch(
                         }
                         for off in offsets
                     ]
+                    result["part_markers"] = markers
                 label = "+".join(p.name for p in group)
 
             if _check_result(label, result, diarize=options.diarize):
@@ -469,242 +465,4 @@ def run_batch(
                 continue
             if not quiet:
                 typer.echo(f"wrote transcript for {label}")
-    return exit_code
-
-
-def _run_plain(
-    ordered: list[Path],
-    options: RunOptions,
-    *,
-    formats: Sequence[str],
-    out: Path | None,
-    quiet: bool,
-) -> int:
-    """The plain per-file loop (single-file runs and --no-group groups).
-
-    Note: intentionally diverges from ``transcribe_batch`` — no ``--copy``
-    support and per-file config-error continue (the batch loop honors
-    ``--copy`` and aborts the run on a malformed project config). The
-    divergence is deliberate: the plain loop feeds the grouping path
-    where ``--copy`` is a single-file-only concern and a broken config
-    should fail that file, not the whole multi-file run.
-    """
-    exit_code = 0
-    with caffeinate_context():
-        for file in ordered:
-            result = _transcribe_one(file, options)
-            if _check_result(file, result, diarize=options.diarize):
-                exit_code = 1
-                continue
-            if not _write_group_outputs(
-                [file],
-                result,
-                formats=list(formats),
-                out=out,
-            ):
-                exit_code = 1
-                continue
-            if not quiet:
-                typer.echo(f"wrote transcript for {file.name}")
-    return exit_code
-
-
-def _write_group_outputs(
-    group: list[Path],
-    result: dict,
-    *,
-    formats: list[str],
-    out: Path | None,
-) -> bool:
-    """Write one group's outputs; True on success.
-
-    The ``--out`` override applies only for single-group runs (or stdout,
-    where each group streams in order) — a multi-group run with an explicit
-    file target is rejected up front in :func:`run_batch` before any
-    decode, so it never reaches this loop.
-    """
-    if out is not None:
-        return _write_output(out, result, formats[0] if formats else "txt")
-    stem, _ = nfc_stem_and_suffix(group[0])
-    from vemoizer.output.formatters import FORMAT_EXTENSIONS
-
-    return all(
-        [
-            _write_output(Path(f"{stem}{FORMAT_EXTENSIONS[fmt]}"), result, fmt)
-            for fmt in formats
-        ]
-    )
-
-
-def run_preset(
-    files: list[Path],
-    *,
-    command: str,
-    config_path: str | None,
-    glossary_path: str | None,
-    repair: bool | None = None,
-    diarize: bool | None = None,
-    speakers: SpeakerCount | None = None,
-    quiet: bool = False,
-) -> int:
-    """Run the *meeting* or *memo* preset over *files*.
-
-    Composition (issue #82, DESIGN DECISION): calls
-    ``glossary_layers.load_layers`` + ``merge`` (no merge when an
-    explicit ``--glossary`` is given), ``presets.resolve_options`` for
-    the resolved options, then ``transcribe_file`` per file with the
-    composed glossary.  Without ``--glossary`` the merged/filtered
-    glossary is written to a temp file passed as ``glossary_path`` —
-    meeting: merged terms (bare + ``@`` lines) and merged correction
-    pairs; memo: merged correction pairs ONLY (whisper prompt stays
-    empty, ``apply_corrections`` still fires).  An explicit
-    ``--glossary`` is passed through as-is for meeting; for memo it is
-    filtered to correction pairs only, via a temp file (same
-    empty-whisper-prompt invariant).  ``quiet`` suppresses the final
-    ``wrote <path>`` summary lines.  Temp files are deleted after the
-    run.
-
-    Both presets:
-
-    - use ``profile="meeting"`` (whisper decode, skip consensus).
-    - write ``.md`` + ``.json`` to the CWD with a dated, sanitised
-      title and NFC collision suffix.
-    - print one ``wrote <relative path>`` line per written file at the
-      end.
-
-    Meeting additionally enables diarization (default 2-6 speakers)
-    and repair.  Memo disables diarization but keeps repair on.
-
-    Returns 0 on success, 1 on any failure.
-    """
-    from vemoizer.pipeline import transcribe_file
-    from vemoizer.presets import resolve_options
-
-    if command not in ("meeting", "memo"):
-        typer.echo(f"error: unknown preset {command!r}", err=True)
-        return 2
-
-    # Layered glossary: load_layers (I/O) → merge (pure) — skipped when
-    # --glossary explicitly replaces both layers entirely (no merging).
-    merged_terms: list[str] = []
-    merged_corrections: dict[str, str] = {}
-    if glossary_path is None:
-        from vemoizer.glossary_layers import load_layers, merge
-
-        home_terms, home_corr, project_terms, project_corr = load_layers()
-        merged_terms, merged_corrections, notices = merge(
-            project_terms,
-            project_corr,
-            home_terms,
-            home_corr,
-        )
-        for notice in notices:
-            typer.echo(notice, err=True)
-
-    # Pure core: resolve the preset options from the merged layers and
-    # the CLI overrides (CLI > layers > preset defaults).
-    options = resolve_options(
-        command,
-        layers=None,
-        cli_overrides={
-            "glossary": glossary_path,
-            "config": config_path,
-            "glossary_terms": merged_terms,
-            "glossary_corrections": merged_corrections,
-            "repair": repair,
-            "diarize": diarize,
-            "speakers": speakers,
-        },
-    )
-
-    # Temp-file seam: without --glossary, write the composed glossary to
-    # a temp file and pass it through the existing glossary_path argument
-    # (no new pipeline parameter).  Memo: correction pairs ONLY (the
-    # whisper prompt stays empty) — meeting: merged terms (bare + @
-    # lines) plus the merged correction pairs.
-    temp_path: Path | None = None
-    effective_glossary: str | None = None
-    exit_code = 0
-    written: list[str] = []
-
-    # The temp file is created INSIDE the protected region so a write
-    # failure neither leaks the file nor raises a raw traceback
-    # (issue #82 review): a clean error line and exit 1 instead.
-    try:
-        if options.glossary_path is None:
-            if command == "memo":
-                lines = [f"{w} => {r}" for w, r in options.corrections.items()]
-            else:
-                lines = [
-                    *options.whisper_prompt,
-                    *[f"@{t}" for t in options.llm_terms],
-                    *[f"{w} => {r}" for w, r in options.corrections.items()],
-                ]
-            if lines:
-                temp_path = Path(_write_temp_glossary(lines))
-                effective_glossary = str(temp_path)
-        else:
-            effective_glossary = options.glossary_path
-            # Memo seam with an explicit --glossary (issue #82): the file
-            # replaces both layers, but the whisper initial_prompt must
-            # stay empty — so filter it to correction pairs only (same
-            # invariant as the layered memo path) via a temp file.
-            if command == "memo":
-                from vemoizer.glossary import load_corrections
-
-                lines = [
-                    f"{w} => {r}"
-                    for w, r in load_corrections(effective_glossary).items()
-                ]
-                if lines:
-                    temp_path = Path(_write_temp_glossary(lines))
-                    effective_glossary = str(temp_path)
-                else:
-                    effective_glossary = None
-
-        with caffeinate_context():
-            for file in files:
-                try:
-                    # Fail loud on a malformed project config (issue #78).
-                    _resolve_llm_config(options.config_path)
-                except ConfigError as e:
-                    # A malformed .vemoizer/config.toml must fail loud
-                    # with a clean error line, not a traceback (issue #78).
-                    typer.echo(f"error: {e}", err=True)
-                    return 1
-                result = transcribe_file(
-                    file,
-                    diarize=options.diarize,
-                    config_path=options.config_path,
-                    profile=options.profile,
-                    repair=options.repair,
-                    glossary_path=effective_glossary,
-                    speakers=options.speakers,
-                )
-                if _check_result(
-                    file, result, diarize=options.diarize, diarize_label="diarize"
-                ):
-                    exit_code = 1
-                    continue
-
-                # Determine the fallback stem from the FIRST file in the
-                # argument list (deterministic), not the current iteration.
-                first_stem, _ = nfc_stem_and_suffix(files[0])
-                written.extend(_write_preset_output(result, first_stem, Path.cwd()))
-    except OSError as e:
-        # Temp-glossary write failure: clean error, non-zero exit, no
-        # leaked file (the finally still cleans up what exists).
-        typer.echo(f"error: could not write glossary: {e}", err=True)
-        return 1
-    finally:
-        # The temp glossary file is deleted after the run (issue #82).
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
-
-    # Print one "wrote <relative path>" line per written file at the end
-    # (--quiet suppresses them).
-    for name in written:
-        if not quiet:
-            typer.echo(f"wrote {name}")
-
     return exit_code
