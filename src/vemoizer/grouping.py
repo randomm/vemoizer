@@ -23,8 +23,7 @@ to one logical recording and joins the accepted groups:
   single-quote-escapes each path (apostrophes in filenames survive); a
   per-part ffprobe check turns a codec mismatch into a clear error
   naming the offending files. Part offsets come from decoded PCM
-  (``ingest_audio`` + ``duration_seconds``), never ffprobe or container
-  metadata.
+  (``pcm_duration_seconds``), never ffprobe or container metadata.
 
 The heuristic is advisory: an explicit user partition always wins.
 

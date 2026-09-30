@@ -8,6 +8,7 @@ no-network/no-model invariant (pure subprocess + numpy).
 from __future__ import annotations
 
 import subprocess
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -306,24 +307,35 @@ def _mock_popen_stream(n_samples: int = 0, returncode: int = 0, stderr: bytes = 
             self._pos += len(chunk)
             return chunk
 
+    class _StderrFile:
+        def __init__(self, data: bytes) -> None:
+            self._buf = bytearray(data)
+
+        def read(self, size: int | None = None) -> bytes:
+            data = bytes(self._buf)
+            return data if size is None else data[:size]
+
+        def seek(self, offset: int, whence: int = 0) -> int:
+            return 0
+
     class _Proc:
         def __init__(self) -> None:
             self.stdout = _Pipe(raw)
-            self.stderr = _Pipe(stderr)
+            self.stderr = _StderrFile(stderr)
             self.returncode = returncode
+            self.killed = False
+            self.waited = False
 
-        def wait(self, timeout: float | None = None) -> None:
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.waited = True
             self.returncode = returncode
-            return None
+            return self.returncode
 
         def kill(self) -> None:
-            self.returncode = -9
-
-        def __enter__(self) -> _Proc:
-            return self
-
-        def __exit__(self, *_: object) -> None:
-            pass
+            self.killed = True
 
     return _Proc()
 
@@ -420,3 +432,202 @@ def test_pcm_duration_streams_in_chunks_not_full_array(tmp_path: Path) -> None:
     assert dur == pytest.approx(1.0)
     # All reads are bounded by the chunk size (1 << 20 bytes).
     assert all(size <= (1 << 20) for size in chunk_sizes)
+
+
+def test_pcm_duration_timeout_kills_and_reaps_process(tmp_path: Path) -> None:
+    """A stalled ffmpeg (no stdout, alive) must be killed and reaped within
+    the timeout — the wall-clock deadline is enforced DURING the drain,
+    not after EOF. Use a tiny timeout (0.2 s) and a fake that blocks
+    forever on its first stdout read."""
+    import time
+
+    class _StalledPipe:
+        def __init__(self) -> None:
+            self.read_called = False
+            self.blocked = threading.Event()
+
+        def read(self, size: int | None = None) -> bytes:
+            if not self.read_called:
+                self.read_called = True
+                self.blocked.set()
+                # Block forever (the test thread will join with a timeout).
+                while True:
+                    time.sleep(1)
+            return b""
+
+    class _StderrFile:
+        def __init__(self) -> None:
+            self._buf = bytearray()
+
+        def write(self, data: bytes) -> int:
+            self._buf.extend(data)
+            return len(data)
+
+        def read(self, size: int | None = None) -> bytes:
+            data = bytes(self._buf)
+            return data if size is None else data[:size]
+
+        def seek(self, offset: int, whence: int = 0) -> int:
+            return 0
+
+    class _StalledProc:
+        def __init__(self) -> None:
+            self.stdout = _StalledPipe()
+            self.stderr = _StderrFile()
+            self.returncode = None
+            self.killed = False
+            self.waited = False
+            self.wait_timeout: float | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.waited = True
+            self.wait_timeout = timeout
+            self.returncode = -9
+            return self.returncode
+
+        def kill(self) -> None:
+            self.killed = True
+
+    stalled_proc = _StalledProc()
+    with (
+        patch("vemoizer.ingest.subprocess.Popen", return_value=stalled_proc),
+        _temp_file(tmp_path, "stalled.m4a") as p,
+        pytest.raises(IngestError, match="timed out after"),
+    ):
+        pcm_duration_seconds(p, timeout=0.2)
+
+    # The fake must have been killed and reaped.
+    assert stalled_proc.killed, "stalled process was not killed"
+    assert stalled_proc.waited, "stalled process was not reaped (waited)"
+
+
+def test_pcm_duration_huge_stderr_does_not_deadlock(tmp_path: Path) -> None:
+    """A fake that writes a huge stderr must not deadlock the drain, and the
+    error message must stay bounded (≤ ~200 chars of stderr excerpt + prefix).
+
+    The stderr is written to a temp file (not a pipe), so no pipe buffer
+    can fill and block the drain. The error message is capped.
+    """
+    huge_stderr = b"E " + b"x" * 10_000
+
+    class _StderrFile:
+        def __init__(self, data: bytes) -> None:
+            self._buf = bytearray(data)
+
+        def read(self, size: int | None = None) -> bytes:
+            data = bytes(self._buf)
+            return data if size is None else data[:size]
+
+        def seek(self, offset: int, whence: int = 0) -> int:
+            return 0
+
+    proc = _mock_popen_stream(0, returncode=1, stderr=b"")
+    proc.stderr = _StderrFile(huge_stderr)
+    with (
+        patch("vemoizer.ingest.subprocess.Popen", return_value=proc),
+        _temp_file(tmp_path, "big_stderr.m4a") as p,
+        pytest.raises(IngestError) as exc_info,
+    ):
+        pcm_duration_seconds(p)
+    # The error message must be bounded (the stderr excerpt is ≤ 200 chars).
+    msg = str(exc_info.value)
+    assert len(msg) < 1000, f"error message unexpectedly long: {len(msg)} chars"
+
+
+def test_pcm_duration_keyboard_interrupt_kills_and_reaps(tmp_path: Path) -> None:
+    """A KeyboardInterrupt mid-drain must kill and reap the process (no
+    zombie, no leaked fd), and the interrupt must propagate.
+
+    The fake's stdout read blocks forever, so the drain thread is stuck
+    in reader.join(remaining). We inject a KeyboardInterrupt into the
+    drain thread by raising it in the reader thread (which is also stuck
+    in a read loop) — the drain's except-BaseException handler must kill
+    and reap before propagating.
+    """
+    import time
+
+    class _StalledPipe:
+        def __init__(self) -> None:
+            self.read_called = False
+            self._interrupt = threading.Event()
+
+        def read(self, size: int | None = None) -> bytes:
+            if not self.read_called:
+                self.read_called = True
+                # Block in short sleeps so we can detect the interrupt.
+                while not self._interrupt.is_set():
+                    time.sleep(0.1)
+                raise KeyboardInterrupt("injected for test")
+            return b""
+
+    class _StderrFile:
+        def __init__(self) -> None:
+            self._buf = bytearray()
+
+        def write(self, data: bytes) -> int:
+            self._buf.extend(data)
+            return len(data)
+
+        def read(self, size: int | None = None) -> bytes:
+            data = bytes(self._buf)
+            return data if size is None else data[:size]
+
+        def seek(self, offset: int, whence: int = 0) -> int:
+            return 0
+
+    class _StalledProc:
+        def __init__(self) -> None:
+            self.stdout = _StalledPipe()
+            self.stderr = _StderrFile()
+            self.returncode = None
+            self.killed = False
+            self.waited = False
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.waited = True
+            self.returncode = -9
+            return self.returncode
+
+        def kill(self) -> None:
+            self.killed = True
+
+    stalled_proc = _StalledProc()
+    with (
+        patch("vemoizer.ingest.subprocess.Popen", return_value=stalled_proc),
+        _temp_file(tmp_path, "stalled2.m4a") as p,
+    ):
+        # Start the drain in a thread. The reader thread will block in
+        # _StalledPipe.read, so the drain thread is stuck in reader.join.
+        result: list[BaseException | None] = [None]
+
+        def _run_drain() -> None:
+            try:
+                pcm_duration_seconds(p, timeout=10.0)
+            except BaseException as e:
+                result[0] = e
+
+        drain_thread = threading.Thread(target=_run_drain, daemon=True)
+        drain_thread.start()
+
+        # Wait until the reader thread is blocked on its first read,
+        # then inject a KeyboardInterrupt into the reader thread (which
+        # is also stuck in a read loop). The drain's except-BaseException
+        # handler must kill and reap before propagating.
+        time.sleep(0.5)  # let the drain start and block
+        stalled_proc.stdout._interrupt.set()  # type: ignore[union-attr]
+
+        drain_thread.join(timeout=10.0)
+        assert not drain_thread.is_alive(), "drain thread did not finish"
+
+    # The fake must have been killed and reaped.
+    assert stalled_proc.killed, "stalled process was not killed"
+    assert stalled_proc.waited, "stalled process was not reaped (waited)"
+    # The drain thread must have caught a BaseException (KeyboardInterrupt
+    # or a wrapped version).
+    assert result[0] is not None, "drain thread did not raise"
