@@ -38,6 +38,11 @@ The impure halves of this module live in dedicated submodules:
 - :mod:`vemoizer.grouping_probe` — the ffprobe duration probe
   (``probe_duration_seconds``) and stream signature (``_probe_stream``).
 
+``pcm_duration_seconds`` (the streaming decoded-PCM duration that
+``part_offsets`` uses) lives in :mod:`vemoizer.ingest` and is
+re-exported from here for the same monkeypatch-targeting reason as the
+others.
+
 All are re-exported from this module for backwards compatibility with
 existing imports and ``monkeypatch.setattr("vemoizer.grouping.X", ...)``
 targets.
@@ -66,6 +71,7 @@ from vemoizer.ingest import (  # noqa: F401  (re-export)
     IngestError,
     duration_seconds,
     ingest_audio,
+    pcm_duration_seconds,
 )
 from vemoizer.output.naming import nfc_stem_and_suffix
 from vemoizer.textnorm import textnorm
@@ -148,7 +154,7 @@ class GroupProposal:
     failure).
     """
 
-    parts: list[str]
+    parts: tuple[str, str]
     is_continuation: bool
     evidence: tuple[str, str]
 
@@ -265,7 +271,7 @@ def propose_groups(
             )
         proposals.append(
             GroupProposal(
-                parts=[ordered[i].name, ordered[i + 1].name],
+                parts=(ordered[i].name, ordered[i + 1].name),
                 is_continuation=is_continuation,
                 evidence=(tail_snip, head_snip),
             )
@@ -313,9 +319,12 @@ def parse_partition(s: str, stems: Sequence[str]) -> list[list[Path]]:
         ]
         if len(matches) > 1:
             # Ambiguity beats the duplicate check; see parse_partition.
+            # Each matching stem is rendered with repr and joined by ', '
+            # — the raw list repr ("['a', 'b']") was a debugging artifact
+            # that leaked into the user-facing message.
+            rendered = ", ".join(repr(m) for m in matches)
             raise GroupingError(
-                f"ambiguous part: {tok!r} matches {', '.join(matches)!r}; "
-                "type the full stem"
+                f"ambiguous part: {tok!r} matches {rendered}; type the full stem"
             )
         if len(matches) == 1:
             stem = matches[0]

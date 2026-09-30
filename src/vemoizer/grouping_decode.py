@@ -42,14 +42,16 @@ logger = logging.getLogger(__name__)
 def _decode_edge_window(path: Path, start: float, end: float) -> np.ndarray:
     """Decode ``[start, end)`` seconds of *path* — just that window.
 
-    ffmpeg seeks (``-ss`` / ``-t``), so a 1-hour file costs a 20 s decode
-    instead of a full-file decode (~2.4 GB of transient float32 PCM).
-    ffmpeg itself is the clamp: ``-t`` never decodes past the actual media
-    end (a trailing ffprobe overestimate never over-reads) and a negative
-    ``-ss`` (a tail start past the end) seeks to the start — so the
-    requested window is a request, and the decoded bytes are the truth.
-    The tail start is bounded on the probed duration, never container
-    metadata beyond that.
+    ``-ss`` / ``-t`` are placed BEFORE ``-i``: ffmpeg seeks into the input
+    (fast seek) and caps the decode length, so a 1-hour file costs a ~20 s
+    decode instead of a full-file decode (~2.4 GB of transient float32
+    PCM). Note: with input seeking, ``-ss`` lands on the nearest seekable
+    point, so the decoded window is approximate at the start boundary —
+    fine for a coarse closing-cue probe, never for transcription
+    alignment. ``-t`` cannot read past the actual media end, so an
+    over-estimated probed duration never over-reads; the caller clamps
+    the tail start against the probed duration and skips the tail when
+    the probe is empty (``0.0``).
     """
     argv = [
         "ffmpeg",
@@ -191,19 +193,19 @@ def decode_boundaries(
             last_audio = _window
         return tail_texts, head_texts
     finally:
-        # Do NOT call transcriber.cleanup() here. cleanup() sets
+        # cleanup() is deliberately NOT called here: it would set
         # mlx_whisper.transcribe.ModelHolder.model = None, destroying the
-        # shared MLX model cache that the main pipeline's WhisperTranscriber
-        # (meeting profile, decode_meeting) would otherwise reuse for the
-        # per-group decode; the shared ModelHolder cache (holding the actual
-        # weights) must survive for the main pipeline. The transcriber
-        # instance itself is released here DETERMINISTICALLY by dropping
-        # every local reference (transcriber + the last decoded PCM array)
-        # rather than relying on GC to find the scope exit first — the
-        # instance's __del__ then releases it, while the shared ModelHolder
-        # cache is preserved. Memory stays bounded: the boundary model is
-        # the same whisper-large-v3-turbo weights the main pipeline would
-        # load anyway, so no extra peak is incurred (round 3 findings 9-16).
+        # shared MLX model cache that the main pipeline's
+        # WhisperTranscriber (meeting profile) reuses for the per-group
+        # decode. The transcriber instance is released here instead by
+        # dropping every local reference (the transcriber + the last
+        # decoded PCM array) deterministically, rather than relying on GC
+        # to find the scope exit first — the instance's __del__ then
+        # releases it, while the shared ModelHolder cache (holding the
+        # actual weights) survives for the main pipeline. Memory stays
+        # bounded: the boundary model is the same whisper-large-v3-turbo
+        # weights the main pipeline would load anyway, so no extra peak is
+        # incurred (round 3 findings 9-16).
         del transcriber
         del _window
         del last_audio

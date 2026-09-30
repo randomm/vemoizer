@@ -31,6 +31,7 @@ from vemoizer.grouping import (
     parse_partition,
     part_offsets,
     propose_groups,
+    remove_concat_output,
     stems_of,
 )
 from vemoizer.textnorm import textnorm
@@ -294,8 +295,8 @@ def test_propose_groups_parts_are_sorted_names() -> None:
         Path("Uusi äänitys 426.m4a"),
     ]
     proposals = propose_groups(files, ["x", "y"], ["a", "b"])
-    assert proposals[0].parts == ["Uusi äänitys 425.m4a", "Uusi äänitys 426.m4a"]
-    assert proposals[1].parts == ["Uusi äänitys 426.m4a", "Uusi äänitys 428.m4a"]
+    assert proposals[0].parts == ("Uusi äänitys 425.m4a", "Uusi äänitys 426.m4a")
+    assert proposals[1].parts == ("Uusi äänitys 426.m4a", "Uusi äänitys 428.m4a")
 
 
 # ---------------------------------------------------------------------------
@@ -501,9 +502,13 @@ def test_concat_groups_real_concat_produces_one_file(tmp_path) -> None:
     a = _make_wav(tmp_path / "Uusi äänitys 425.wav", 1.0)
     b = _make_wav(tmp_path / "Uusi äänitys 426.wav", 1.0)
     out = concat_groups([a, b])
-    assert out.is_file()
-    assert out.stat().st_size > 0
-    out.unlink(missing_ok=True)
+    try:
+        assert out.is_file()
+        assert out.stat().st_size > 0
+    finally:
+        # remove_concat_output deletes the 0o700 temp dir too; unlink
+        # alone would leak it.
+        remove_concat_output(out)
 
 
 @requires_ffprobe
@@ -551,16 +556,41 @@ def test_part_offsets_cumulative_pcm_durations(tmp_path, monkeypatch) -> None:
         f.touch()
     durations_by_name = {f.name: d for f, d in zip(files, durations, strict=True)}
 
-    def fake_ingest(path):
+    def fake_pcm_duration(path):
         name = Path(path).name
-        return np.zeros(int(durations_by_name[name] * 16000), dtype=np.float32)
+        return durations_by_name[name]
 
-    monkeypatch.setattr(grouping, "ingest_audio", fake_ingest)
+    monkeypatch.setattr(grouping, "pcm_duration_seconds", fake_pcm_duration)
     offsets = part_offsets(files)
     assert len(offsets) == 3
     assert offsets[0] == PartOffset(1, "Uusi äänitys 425.m4a", 0.0)
     assert offsets[1] == PartOffset(2, "Uusi äänitys 426.m4a", 10.0)
     assert offsets[2] == PartOffset(3, "Uusi äänitys 427.m4a", 30.0)
+
+
+def test_part_offsets_uses_pcm_duration_not_full_decode(tmp_path, monkeypatch) -> None:
+    """part_offsets measures via pcm_duration_seconds, not ingest_audio.
+
+    A monkeypatch on the old seam (``grouping.ingest_audio``) must not
+    influence part offsets anymore — the streaming PCM-byte-count path is
+    what the ticket contract requires (no full float32 materialisation).
+    """
+    import vemoizer.grouping as grouping
+
+    files = [tmp_path / "a.m4a", tmp_path / "b.m4a"]
+    for f in files:
+        f.touch()
+
+    def fake_pcm_duration(path):
+        return 7.0
+
+    monkeypatch.setattr(grouping, "pcm_duration_seconds", fake_pcm_duration)
+    # Patch the OLD seam to prove it is no longer consulted.
+    monkeypatch.setattr(
+        grouping, "ingest_audio", lambda path: np.zeros(4, dtype=np.float32)
+    )
+    offsets = part_offsets(files)
+    assert [o.start_offset for o in offsets] == [0.0, 7.0]
 
 
 # ---------------------------------------------------------------------------
@@ -610,10 +640,14 @@ def test_parse_partition_unknown_stem_names_token() -> None:
 def test_parse_partition_ambiguous_trailing_integer_raises() -> None:
     """A trailing integer matching two stems is ambiguous (not unknown).
 
-    The error names the token AND both matching stems.
+    The error names the token AND each matching stem (rendered with repr,
+    joined by ', '), and suggests typing the full stem.
     """
     stems = ["A-42", "B-42"]
-    with pytest.raises(GroupingError, match=r"ambiguous part: '42' matches"):
+    with pytest.raises(
+        GroupingError,
+        match=r"ambiguous part: '42' matches 'A-42', 'B-42'; type the full stem",
+    ):
         parse_partition("42 + 42", stems)
 
 
@@ -668,9 +702,9 @@ def test_parse_partition_double_pipe_is_empty_group_error() -> None:
 def test_confirm_groups_yes_accepts_all_proposals() -> None:
     files = _files4()
     proposals = [
-        GroupProposal(parts=["a", "b"], is_continuation=True, evidence=("x", "y")),
-        GroupProposal(parts=["b", "c"], is_continuation=False, evidence=("x", "y")),
-        GroupProposal(parts=["c", "d"], is_continuation=True, evidence=("x", "y")),
+        GroupProposal(parts=("a", "b"), is_continuation=True, evidence=("x", "y")),
+        GroupProposal(parts=("b", "c"), is_continuation=False, evidence=("x", "y")),
+        GroupProposal(parts=("c", "d"), is_continuation=True, evidence=("x", "y")),
     ]
     groups = confirm_groups(files, proposals, yes=True)
     # 425+426 (continue), break, 427+428 (continue) -> 2 groups.
@@ -690,9 +724,9 @@ def test_confirm_groups_no_group_is_singletons() -> None:
 def test_confirm_groups_interactive_enter_accepts() -> None:
     files = _files4()
     proposals = [
-        GroupProposal(parts=["a", "b"], is_continuation=True, evidence=("x", "y")),
-        GroupProposal(parts=["b", "c"], is_continuation=False, evidence=("x", "y")),
-        GroupProposal(parts=["c", "d"], is_continuation=True, evidence=("x", "y")),
+        GroupProposal(parts=("a", "b"), is_continuation=True, evidence=("x", "y")),
+        GroupProposal(parts=("b", "c"), is_continuation=False, evidence=("x", "y")),
+        GroupProposal(parts=("c", "d"), is_continuation=True, evidence=("x", "y")),
     ]
     inputs = iter(["\n", "\n", "\n"])
     prints: list[str] = []
@@ -710,7 +744,7 @@ def test_confirm_groups_interactive_enter_accepts() -> None:
 def test_confirm_groups_interactive_q_aborts() -> None:
     files = _files4()
     proposals = [
-        GroupProposal(parts=["a", "b"], is_continuation=True, evidence=("x", "y")),
+        GroupProposal(parts=("a", "b"), is_continuation=True, evidence=("x", "y")),
     ]
     with pytest.raises(GroupingError, match="aborted"):
         confirm_groups(files, proposals, input_fn=lambda _: "q")
@@ -719,9 +753,9 @@ def test_confirm_groups_interactive_q_aborts() -> None:
 def test_confirm_groups_interactive_edit_uses_any_partition() -> None:
     files = _files4()
     proposals = [
-        GroupProposal(parts=["a", "b"], is_continuation=False, evidence=("x", "y")),
-        GroupProposal(parts=["b", "c"], is_continuation=False, evidence=("x", "y")),
-        GroupProposal(parts=["c", "d"], is_continuation=False, evidence=("x", "y")),
+        GroupProposal(parts=("a", "b"), is_continuation=False, evidence=("x", "y")),
+        GroupProposal(parts=("b", "c"), is_continuation=False, evidence=("x", "y")),
+        GroupProposal(parts=("c", "d"), is_continuation=False, evidence=("x", "y")),
     ]
     # 'e' then the partition string.
     inputs = iter(["e", "425+426+427 | 428"])
@@ -732,7 +766,7 @@ def test_confirm_groups_interactive_edit_uses_any_partition() -> None:
 def test_confirm_groups_interactive_edit_malformed_propagates() -> None:
     files = _files4()
     proposals = [
-        GroupProposal(parts=["a", "b"], is_continuation=False, evidence=("x", "y")),
+        GroupProposal(parts=("a", "b"), is_continuation=False, evidence=("x", "y")),
     ]
     inputs = iter(["e", "999 | 998"])
     with pytest.raises(GroupingError, match="unknown part"):

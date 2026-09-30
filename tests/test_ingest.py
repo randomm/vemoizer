@@ -19,6 +19,7 @@ from vemoizer.ingest import (
     IngestError,
     duration_seconds,
     ingest_audio,
+    pcm_duration_seconds,
 )
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -281,3 +282,141 @@ def test_duration_seconds_helper() -> None:
     assert duration_seconds(arr) == pytest.approx(1.0)
     arr2 = np.zeros(32_000, dtype=np.float32)
     assert duration_seconds(arr2) == pytest.approx(2.0)
+
+
+# ---------------------------------------------------------------------------
+# pcm_duration_seconds (streaming decoded-PCM byte count, no ffprobe)
+# ---------------------------------------------------------------------------
+
+
+def _mock_popen_stream(n_samples: int = 0, returncode: int = 0, stderr: bytes = b""):
+    """Build a fake Popen that streams n_samples of float32 on stdout."""
+    raw = np.zeros(n_samples, dtype=np.float32).tobytes()
+
+    class _Pipe:
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+            self._pos = 0
+
+        def read(self, size: int | None = None) -> bytes:
+            if size is None:
+                chunk = self._data[self._pos :]
+            else:
+                chunk = self._data[self._pos : self._pos + size]
+            self._pos += len(chunk)
+            return chunk
+
+    class _Proc:
+        def __init__(self) -> None:
+            self.stdout = _Pipe(raw)
+            self.stderr = _Pipe(stderr)
+            self.returncode = returncode
+
+        def wait(self, timeout: float | None = None) -> None:
+            self.returncode = returncode
+            return None
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        def __enter__(self) -> _Proc:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            pass
+
+    return _Proc()
+
+
+def test_pcm_duration_equals_ingest_duration_on_fixtures() -> None:
+    """pcm_duration_seconds matches duration_seconds(ingest_audio(...))
+    exactly on the real .m4a fixtures (incl. the edit-list quirk)."""
+    for name in ("edit_list.m4a", "he_aac.m4a", "stereo_44k.m4a"):
+        fixture = FIXTURES_DIR / name
+        if not fixture.is_file():
+            pytest.skip(f"{name} fixture not yet generated")
+        expected = duration_seconds(ingest_audio(fixture))
+        assert pcm_duration_seconds(fixture) == expected
+
+
+def test_pcm_duration_never_uses_ffprobe() -> None:
+    """The command must be ffmpeg with the same argv contract — no ffprobe."""
+    fixture = FIXTURES_DIR / "edit_list.m4a"
+    if not fixture.is_file():
+        pytest.skip("edit_list.m4a fixture not yet generated")
+    captured: list[str] = []
+    real_popen = subprocess.Popen
+
+    def spy_popen(argv, **kwargs):
+        captured.extend(argv)
+        return real_popen(argv, **kwargs)
+
+    with patch("vemoizer.ingest.subprocess.Popen", side_effect=spy_popen):
+        pcm_duration_seconds(fixture)
+    # ffmpeg, not ffprobe.
+    assert captured[0] == "ffmpeg"
+    assert "ffprobe" not in captured
+    # Same argv contract as ingest_audio.
+    assert "-nostdin" in captured
+    assert "-f" in captured and "f32le" in captured
+    assert "-" in captured  # stdout
+
+
+def test_pcm_duration_missing_file_raises_ingest_error(tmp_path: Path) -> None:
+    with pytest.raises(IngestError, match="not found"):
+        pcm_duration_seconds(tmp_path / "does_not_exist.m4a")
+
+
+def test_pcm_duration_missing_ffmpeg_raises_ingest_error(tmp_path: Path) -> None:
+    with (
+        patch("vemoizer.ingest.subprocess.Popen", side_effect=FileNotFoundError),
+        _temp_file(tmp_path, "x.m4a") as p,
+        pytest.raises(IngestError, match="ffmpeg not found"),
+    ):
+        pcm_duration_seconds(p)
+
+
+def test_pcm_duration_ffmpeg_failure_raises_ingest_error(tmp_path: Path) -> None:
+    """Nonzero exit → IngestError carrying the returncode (like ingest)."""
+    proc = _mock_popen_stream(0, returncode=1, stderr=b"Invalid data found")
+    with (
+        patch("vemoizer.ingest.subprocess.Popen", return_value=proc),
+        _temp_file(tmp_path, "corrupt.m4a") as p,
+        pytest.raises(IngestError) as exc_info,
+    ):
+        pcm_duration_seconds(p)
+    assert exc_info.value.returncode == 1
+
+
+def test_pcm_duration_empty_stream_is_zero(tmp_path: Path) -> None:
+    """Empty PCM stream → 0.0, matching ingest's empty array."""
+    proc = _mock_popen_stream(0)
+    with (
+        patch("vemoizer.ingest.subprocess.Popen", return_value=proc),
+        _temp_file(tmp_path, "empty.m4a") as p,
+    ):
+        assert pcm_duration_seconds(p) == 0.0
+
+
+def test_pcm_duration_streams_in_chunks_not_full_array(tmp_path: Path) -> None:
+    """The decode is streamed in bounded chunks — only the byte count is
+    kept (the fake Popen is fed 1 MiB chunks by the reader; a fake that
+    only supports a single full read would also work, but we assert the
+    reader never asks for more than its chunk size)."""
+    chunk_sizes: list[int] = []
+    proc = _mock_popen_stream(16_000)
+    orig_read = proc.stdout.read
+
+    def tracking_read(size: int) -> bytes:
+        chunk_sizes.append(size)
+        return orig_read(size)
+
+    proc.stdout.read = tracking_read
+    with (
+        patch("vemoizer.ingest.subprocess.Popen", return_value=proc),
+        _temp_file(tmp_path, "x.m4a") as p,
+    ):
+        dur = pcm_duration_seconds(p)
+    assert dur == pytest.approx(1.0)
+    # All reads are bounded by the chunk size (1 << 20 bytes).
+    assert all(size <= (1 << 20) for size in chunk_sizes)

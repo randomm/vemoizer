@@ -29,6 +29,7 @@ from vemoizer.grouping import (
     concat_groups,
     part_offsets,
     propose_groups,
+    remove_concat_output,
 )
 from vemoizer.ingest import duration_seconds, ingest_audio
 
@@ -122,7 +123,9 @@ def test_pair_concat_golden() -> None:
         expected = DURATION_A + DURATION_B
         assert total == pytest.approx(expected, abs=0.1)
     finally:
-        out.unlink(missing_ok=True)
+        # Remove the merged file AND its 0o700 temp dir (unlink alone
+        # leaves the empty dir behind).
+        remove_concat_output(out)
 
 
 @requires_ffmpeg

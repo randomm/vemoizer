@@ -2,8 +2,8 @@
 
 ``concat_groups`` joins a group's parts with the ffmpeg concat demuxer
 (``-c copy``, no re-encode). ``part_offsets`` measures each part's
-cumulative decoded-PCM start offset (``ingest_audio`` +
-``duration_seconds``), never ffprobe or container metadata.
+cumulative decoded-PCM start offset (``pcm_duration_seconds``: decoded
+PCM byte count, never ffprobe or container metadata).
 
 Split from ``grouping.py`` so the concat/offset machinery (impure ffmpeg
 I/O) has its own module separate from the pure heuristic and the edit
@@ -141,19 +141,17 @@ def part_offsets(group: Sequence[Path | str]) -> list[PartOffset]:
     """Cumulative decoded-PCM start offset per part of *group*.
 
     Part 1 starts at 0.0; part N starts at the sum of the decoded
-    durations of parts 1..N-1. Durations come from ``ingest_audio``
-    (decoded PCM byte count) — never ffprobe or container metadata (iOS
-    Voice Memos edit lists make container duration lie).
-
-    Note: the full decode of every part here (plus the pipeline's decode
-    of the merged group) is the spec-mandated decoded-PCM offset contract
-    — the cost of never trusting container metadata for transcription
-    alignment.
+    durations of parts 1..N-1. Durations come from
+    ``pcm_duration_seconds`` (streamed decoded-PCM byte count) — never
+    ffprobe or container metadata (iOS Voice Memos edit lists make
+    container duration lie). The decode streams in bounded chunks and
+    keeps only the byte count, so measuring a group of hour-long parts
+    does not materialise their full float32 PCM.
     """
-    # Deferred import so that monkeypatch.setattr(grouping, "ingest_audio",
-    # ...) in tests patches the name that part_offsets actually looks up.
-    from .grouping import duration_seconds as _duration_seconds
-    from .grouping import ingest_audio as _ingest_audio
+    # Deferred import so that monkeypatch.setattr(grouping,
+    # "pcm_duration_seconds", ...) in tests patches the name that
+    # part_offsets actually looks up.
+    from .grouping import pcm_duration_seconds as _pcm_duration_seconds
 
     parts = [Path(p) for p in group]
     offsets: list[PartOffset] = []
@@ -166,5 +164,5 @@ def part_offsets(group: Sequence[Path | str]) -> list[PartOffset]:
                 start_offset=total,
             )
         )
-        total += _duration_seconds(_ingest_audio(part))
+        total += _pcm_duration_seconds(part)
     return offsets

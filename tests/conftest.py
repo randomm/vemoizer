@@ -12,7 +12,6 @@ transcript outputs into the actual working directory (the repo root).
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -29,30 +28,26 @@ def _repo_root() -> Path:
 def _snapshot_root() -> set[str]:
     """Names of existing files in the repo root that have a transcript-output ext."""
     root = _repo_root()
-    result = set()
-    for entry in os.listdir(root):
-        p = root / entry
-        if p.is_file() and p.suffix in _OUTPUT_EXTS:
-            result.add(entry)
-    return result
-
-
-# Snapshot taken at import time (before any test runs).
-_ROOT_FILES_BEFORE = _snapshot_root()
+    return {p.name for p in root.iterdir() if p.is_file() and p.suffix in _OUTPUT_EXTS}
 
 
 @pytest.fixture(autouse=True, scope="session")
 def _guard_no_repo_root_output_files():
-    """Assert no new untracked transcript-output files appeared in the repo root.
+    """Assert no new transcript-output files appeared in the repo root.
 
-    Run after all tests (yield is session-scoped).
+    The snapshot is taken inside the fixture setup (before ``yield``), so
+    it reflects the repo state at the start of the session — not at
+    import time, when collection-time module imports could still run.
     """
+    before = _snapshot_root()
     yield
     after = _snapshot_root()
-    new_files = after - _ROOT_FILES_BEFORE
+    new_files = after - before
     if new_files:
         pytest.fail(
-            f"Session guard: new untracked output file(s) in repo root: "
-            f"{sorted(new_files)}. A test wrote transcript outputs to the "
-            f"CWD instead of monkeypatch.chdir(tmp_path)."
+            f"Session guard: new file(s) appeared in repo root during the "
+            f"test session: {sorted(new_files)}. A test may have written "
+            f"transcript outputs to the CWD instead of "
+            f"monkeypatch.chdir(tmp_path) (or the file pre-existed and "
+            f"the snapshot missed it)."
         )

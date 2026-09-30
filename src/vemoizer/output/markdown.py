@@ -21,9 +21,8 @@ from typing import Any
 def _part_markers(transcript: dict[str, Any]) -> list[dict[str, Any]]:
     """``transcript["part_markers"]`` when present, else ``[]``.
 
-    The sole producer is ``run_batch``, which always builds
-    ``{"offset": float, "label": str}`` dicts from the typed
-    ``PartOffset`` dataclass — non-dict entries (``None``, a stray
+    The dicts are built by ``run_batch`` from the ``PartOffset`` fields
+    (``offset`` / ``label``) — non-dict entries (``None``, a stray
     string) cannot be rendered as markers and are dropped rather than
     crashing the render path with an ``AttributeError`` (``m.get`` on a
     non-dict).

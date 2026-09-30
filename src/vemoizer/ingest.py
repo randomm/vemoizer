@@ -103,3 +103,71 @@ def ingest_audio(path: Path | str) -> np.ndarray:
 def duration_seconds(audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> float:
     """Return the duration in seconds of a mono float32 array."""
     return len(audio) / sample_rate
+
+
+def pcm_duration_seconds(path: Path | str, timeout: float = 300.0) -> float:
+    """Duration in seconds of *path*'s decoded PCM, without materialising it.
+
+    Same contract as :func:`ingest_audio` (the :data:`_FFMPEG_AUDIO_ARGS`
+    argv, raw f32le on stdout — byte count, never ffprobe or container
+    metadata), but the decoded stream is read in bounded chunks and only
+    the byte count is kept: a 1-hour memo costs ~1 MB of transient memory
+    instead of ~2.4 GB of float32 PCM (part offsets only need the length).
+    A generous *timeout* bounds the decode.
+
+    Returns exactly what ``duration_seconds(ingest_audio(path))`` would.
+
+    Raises:
+        IngestError: ffmpeg is missing, the file is unreadable/corrupt,
+            ffmpeg exits non-zero, or the decode times out.
+    """
+    p = Path(path)
+    if not p.is_file():
+        raise IngestError(f"audio file not found: {p}")
+
+    argv = ["ffmpeg", *_FFMPEG_AUDIO_ARGS, "-i", str(p)]
+
+    try:
+        with subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ) as proc:
+            if proc.stdout is None or proc.stderr is None:
+                # Unreachable: both pipes are set explicitly above. Guard
+                # keeps ty quiet without changing behaviour.
+                raise IngestError(
+                    f"internal error: ffmpeg pipes not available for {p}",
+                    returncode=None,
+                )
+            total = 0
+            try:
+                while chunk := proc.stdout.read(1 << 20):
+                    total += len(chunk)
+            finally:
+                # proc.stdout is still open here, so proc has not been
+                # reaped — enforce the bound before the join (a wedged
+                # decode must not hang part offsets for hours).
+                try:
+                    proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    raise IngestError(
+                        f"ffmpeg timed out after {timeout:.0f}s decoding {p}",
+                        returncode=None,
+                    ) from None
+                stderr = proc.stderr.read().decode("utf-8", errors="replace").strip()
+    except FileNotFoundError:
+        raise IngestError(
+            "ffmpeg not found on PATH; install ffmpeg (e.g. `brew install ffmpeg`)"
+        ) from None
+
+    if proc.returncode != 0:
+        stderr = " ".join(stderr.split())
+        raise IngestError(
+            f"ffmpeg failed to decode {p} (exit {proc.returncode}): {stderr}",
+            returncode=proc.returncode,
+        )
+
+    n = total // 4
+    return n / SAMPLE_RATE if n else 0.0
