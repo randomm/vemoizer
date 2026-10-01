@@ -124,7 +124,9 @@ def _persist_speaker_names(
     ``os.replace``-s it over the sidecar. All other keys are preserved
     verbatim.
     """
-    sidecar.setdefault("speaker_names", {})
+    existing = sidecar.get("speaker_names")
+    if not isinstance(existing, dict):
+        sidecar["speaker_names"] = {}
     sidecar["speaker_names"].update(names)
 
     payload = json.dumps(sidecar, ensure_ascii=False, indent=2) + "\n"

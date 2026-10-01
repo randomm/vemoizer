@@ -257,6 +257,36 @@ class TestStrictValidation:
         assert cfg is not None
         assert cfg.model == "test-model"
 
+    def test_people_top_level_key_loads_without_error(self, tmp_path: Path) -> None:
+        # issue #93: a config containing both [llm] and a top-level
+        # ``people`` list-of-strings loads cleanly (``people`` is in
+        # ``_KNOWN_TOP_LEVEL_KEYS``); the value is ignored by llm.
+        # ``people`` must come BEFORE the [llm] section to be top-level.
+        _write_section(
+            tmp_path / "home" / ".vemoizer" / "config.toml",
+            'people = ["Mikko", "Aino"]\n' + _VALID_SECTION,
+        )
+        cfg = _search_in(tmp_path)
+        assert cfg is not None
+        assert cfg.model == "test-model"
+
+    def test_people_as_table_or_scalar_raises(self, tmp_path: Path) -> None:
+        # issue #93: ``people`` must be a top-level list. A
+        # ``[people]`` table (a dict) and a scalar ``people`` are both
+        # rejected by strict load.
+        _write_section(
+            tmp_path / "home" / ".vemoizer" / "config.toml",
+            "[people]\nx = 1\n" + _VALID_SECTION,
+        )
+        with pytest.raises(ConfigError, match=r"top-level 'people' must be a list"):
+            _search_in(tmp_path)
+        _write_section(
+            tmp_path / "home" / ".vemoizer" / "config.toml",
+            'people = "Mikko"\n' + _VALID_SECTION,
+        )
+        with pytest.raises(ConfigError, match=r"top-level 'people' must be a list"):
+            _search_in(tmp_path)
+
     def test_bad_toml_on_strict_path_raises(self, tmp_path: Path) -> None:
         _write_section(
             tmp_path / "home" / ".vemoizer" / "config.toml",

@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import vemoizer.llm as llm_module
 import vemoizer.pipeline as pipeline_module
 
 
@@ -55,9 +56,21 @@ def isolate_home(
     project layer written into the test are the only candidates.
 
     ``Path.home`` honours ``$HOME`` on POSIX, so the env patch is
-    sufficient — no monkeypatching of ``Path.home`` needed.
+    sufficient for the ``~/.vemoizer`` layer. The legacy layer is NOT
+    covered by the env patch: ``llm._LEGACY_CONFIG_PATHS`` is a
+    module-level tuple computed at import time from the real
+    ``Path.home()`` (issue #93, R1), so it is monkeypatched to the fake
+    home as well.
     """
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(
+        llm_module,
+        "_LEGACY_CONFIG_PATHS",
+        (
+            home / ".config" / "vemoizer" / "config.toml",
+            home / ".vemoizer.toml",
+        ),
+    )
     monkeypatch.chdir(chdir_to if chdir_to is not None else tmp_path)

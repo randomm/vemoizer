@@ -34,6 +34,7 @@ from vemoizer.battery import on_battery
 from vemoizer.diarization import SpeakerCount
 from vemoizer.eval_cli import register_eval
 from vemoizer.low_memory import apply_low_memory_mode, default_low_memory
+from vemoizer.names_cli import register_names
 from vemoizer.render_cli import register_render
 
 app = typer.Typer(
@@ -49,6 +50,7 @@ models_app = typer.Typer(
 app.add_typer(models_app, name="models")
 register_eval(app)
 register_render(app)
+register_names(app)
 
 
 def _warn_on_battery() -> None:

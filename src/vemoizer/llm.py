@@ -278,8 +278,10 @@ LEGACY_DEPRECATION_NOTICE: str = (
     "move it to ~/.vemoizer/config.toml"
 )
 
-#: Known top-level and [llm] keys for strict validation.
-_KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset({LLM_CONFIG_SECTION})
+#: Known top-level and [llm] keys for strict validation. ``people`` is a
+#: top-level list (issue #93) that ``llm`` itself ignores; items that are
+#: not strings are filtered at read time, not validated here.
+_KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset({LLM_CONFIG_SECTION, "people"})
 _KNOWN_LLM_KEYS: frozenset[str] = frozenset(
     {"base_url", "model", "api_key_env", "timeout_seconds"}
 )
@@ -367,15 +369,31 @@ def _strict_load(path: Path) -> LLMConfig:
     if raw is None:
         raise ConfigError(f"config file not found or unreadable: {path}")
 
-    for key in raw:
+    for key, value in raw.items():
         if key not in _KNOWN_TOP_LEVEL_KEYS:
             raise ConfigError(f"unknown top-level key or section {key!r} in {path}")
+        if isinstance(value, dict):
+            # Only ``[llm]`` is a table; ``people`` must be a top-level
+            # list (issue #93), not a table.
+            if key != LLM_CONFIG_SECTION:
+                raise ConfigError(
+                    f"top-level key {key!r} must not be a table in {path}; "
+                    "top-level 'people' must be a list"
+                )
+            continue
 
     section = raw.get(LLM_CONFIG_SECTION)
     if not isinstance(section, dict):
         raise ConfigError(
             f"missing or malformed {LLM_CONFIG_SECTION!r} section in {path}"
         )
+
+    people = raw.get("people")
+    if people is not None and not isinstance(people, list):
+        # Covers both a ``[people]`` table (a dict) and a scalar value;
+        # only a top-level list is valid (issue #93). Items are not
+        # validated here: non-string items are filtered at read time.
+        raise ConfigError(f"top-level 'people' must be a list in {path}")
 
     for key in section:
         if key not in _KNOWN_LLM_KEYS:
