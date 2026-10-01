@@ -309,6 +309,23 @@ def format_md(transcript: dict[str, Any], language: str = "fi") -> str:
         parts = marker_lines + ([body] if body else [])
         if parts:
             lines.append("\n\n".join(parts))
+
+    # M6 (issue #75): the end-of-run quality report, embedded as a
+    # ``<details>`` block after the transcript section. The string is
+    # computed BEFORE this block (CLI/batch layer, before the warnings
+    # pop) so a report failure degrades to an omitted block (fail-open,
+    # invariant #5) — the transcript document always renders. Absent key
+    # → no block, no behaviour change for pre-M6 run dicts.
+    report = transcript.get("quality_report")
+    if isinstance(report, str) and report.strip():
+        lines.append("")
+        lines.append("<details>")
+        lines.append("<summary>Laadunseuranta</summary>")
+        lines.append("")
+        lines.append(report.strip())
+        lines.append("")
+        lines.append("</details>")
+
     lines.append("")
 
     return "\n".join(lines)
