@@ -22,6 +22,7 @@ import glob
 import io
 import sys
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,9 @@ def _config_path(tmp_path: Path) -> Path:
     return d / "config.toml"
 
 
-def _capture_stderr(fn, *args, **kwargs) -> tuple[Any, str]:
+def _capture_stderr(
+    fn: Callable[..., Any], *args: Any, **kwargs: Any
+) -> tuple[Any, str]:
     old_stderr = sys.stderr
     sys.stderr = io.StringIO()
     try:
@@ -56,6 +59,40 @@ def _layout_warnings(stderr_text: str) -> list[str]:
         for line in stderr_text.strip().splitlines()
         if "unsupported config layout" in line
     ]
+
+
+# --- Comment / table-nested lines are never the top-level people line ---
+
+
+class TestPeopleLineScope:
+    def test_commented_out_people_line_is_not_treated_as_top_level(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A commented-out ``people = [...]`` line is never treated as
+        the top-level people line: the surgical insert places the new
+        people line at the start of the file, and the comment is
+        preserved byte-for-byte."""
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        config = _config_path(tmp_path)
+        original = '# people = ["commented out"]\nx = 1\n[llm]\nmodel = "m"\n'
+        config.write_text(original, encoding="utf-8")
+
+        write_people_list(config, ["Mikko"])
+
+        text = config.read_text(encoding="utf-8")
+        # The commented-out line is preserved; the new people line is
+        # inserted at the very start, before the comment.
+        assert text == (
+            'people = ["Mikko"]\n'
+            '# people = ["commented out"]\n'
+            "x = 1\n"
+            "[llm]\n"
+            'model = "m"\n'
+        )
+        loaded = tomllib.loads(text)
+        assert loaded["people"] == ["Mikko"]
+        assert loaded["x"] == 1
+        assert loaded["llm"] == {"model": "m"}
 
 
 # --- Surgical path: insert when no top-level people ---
@@ -126,6 +163,41 @@ class TestSurgicalInsert:
 
 
 class TestSurgicalReplace:
+    def test_second_read_failure_falls_back_to_refusal_not_traceback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """When the config file disappears between the parse and the
+        surgical re-read, no traceback escapes: the write is refused,
+        one warning is emitted, and the (absent) file is never created."""
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        config = _config_path(tmp_path)
+        # A config where BOTH the surgical path and the re-emit fail:
+        # - table-nested people makes the surgical re-parse check fail
+        #   (intended drops the nested key, but the inserted text keeps it)
+        # - nested empty table [a.b] makes the re-emit fail (it emits
+        #   `b = ""` which re-parses to {"a": {"b": ""}} not {"a": {"b": {}}})
+        config.write_text('[llm]\npeople = ["stale"]\n[a]\n\n[a.b]\n', encoding="utf-8")
+
+        original_read_text = Path.read_text
+        first_call = [False]
+
+        def _read_text_delete(self: Path, *args: Any, **kwargs: Any) -> str:
+            """First read succeeds and deletes the file; second read raises."""
+            if first_call[0]:
+                raise OSError(2, "No such file")
+            first_call[0] = True
+            result = original_read_text(self, *args, **kwargs)
+            self.unlink()
+            return result
+
+        monkeypatch.setattr(Path, "read_text", _read_text_delete)
+
+        _, stderr = _capture_stderr(write_people_list, config, ["Mikko"])
+
+        assert not config.exists()
+        assert len(_layout_warnings(stderr)) == 1
+        assert "unsupported config layout" in stderr
+
     def test_single_line_people_replaced_with_comment_kept(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -170,6 +242,37 @@ class TestSurgicalReplace:
         loaded = tomllib.loads(config.read_text(encoding="utf-8"))
         assert loaded["people"] == ["Top", "New"]
         assert "people" not in loaded["llm"]
+
+
+# --- Unsupported layout: surgical impossible, file refused unchanged ---
+
+
+class TestUnsupportedLayoutRefusal:
+    def test_unexpressible_layout_is_refused_with_one_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A config with a multi-line people array and a nested empty
+        table cannot be expressed by either the surgical path (can't
+        handle multi-line people) or the minimal TOML serializer (can't
+        round-trip nested empty tables), so the write is refused: the
+        file stays byte-identical and exactly one ``unsupported config
+        layout`` warning line is emitted."""
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        config = _config_path(tmp_path)
+        # The multi-line people array defeats the surgical replace (the
+        # regex only matches single-line arrays), and the nested empty
+        # table [a.b] defeats the re-emit (it would emit `b = ""` under
+        # [a], which re-parses to {"a": {"b": ""}} not {"a": {"b": {}}}).
+        original = 'people = [\n    "Old",\n]\n[a]\n\n[a.b]\n'
+        config.write_text(original, encoding="utf-8")
+
+        _, stderr = _capture_stderr(write_people_list, config, ["Mikko"])
+
+        assert config.read_text(encoding="utf-8") == original
+        assert _layout_warnings(stderr) == [
+            "warning: could not update people in "
+            f"{config}: unsupported config layout (config left unchanged)"
+        ]
 
 
 # --- Fallback path: re-emit when surgical does not apply ---

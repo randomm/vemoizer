@@ -6,10 +6,12 @@ config it cannot parse or express. Write-back prefers a surgical text
 edit (insert a ``people = [...]`` line at the top, or replace an
 existing single-line top-level ``people`` array in place) so comments,
 blank lines, array-of-tables, dotted keys and inline tables survive
-untouched; only configs the surgical path cannot express are re-emitted
-with a minimal TOML serializer — and only if the result re-parses to
-exactly the intended data. Anything else is left byte-identical with a
-one-line warning.
+untouched. Configs the surgical path cannot express (dotted keys,
+array-of-tables, or nested-table layouts) are NOT adoptable by the
+minimal-serializer fallback either: they are refused with a one-line
+warning and left byte-identical — the file is never modified. Only
+flat configs (top-level scalars plus simple tables) are re-emitted, and
+only when the result re-parses to exactly the intended data.
 """
 
 from __future__ import annotations
@@ -110,14 +112,16 @@ def _read_people_raw(config_path: Path) -> tuple[dict[str, Any] | None, str | No
 def write_people_list(config_path: Path, new_people: list[str]) -> None:
     """Atomically write *new_people* as the top-level ``people`` key.
 
-    A valid config is updated in place: the surgical text path preserves
-    every other byte (comments, blank lines, array-of-tables, dotted
-    keys, inline tables); a config the surgical path cannot express is
-    re-emitted only when the result re-parses to the intended data.
-    Any pre-existing ``people`` key inside a table (e.g. under
-    ``[llm]``) is dropped from the re-emitted text: a ``people`` key is
-    only valid top-level, and a stale nested one would fail the next
-    strict config load (issue #93).
+    A valid config is updated in place. The surgical text path preserves
+    every other byte of the file (comments, blank lines, array-of-tables,
+    dotted keys, inline tables). Layouts it cannot express are re-emitted
+    by the minimal TOML serializer only when the result re-parses to
+    exactly the intended data (this is only ever true for flat configs —
+    top-level scalars plus simple tables); anything else is left
+    byte-identical with one warning line. Any pre-existing ``people`` key
+    inside a table (e.g. under ``[llm]``) is dropped from the re-emitted
+    text: a ``people`` key is only valid top-level, and a stale nested
+    one would fail the next strict config load (issue #93).
 
     Best-effort: an existing config that cannot be read or parsed, or a
     layout that cannot be expressed without data loss, is left
@@ -170,10 +174,15 @@ def _surgical_people_edit(config_path: Path, intended: dict[str, Any]) -> str | 
 
     Returns the new full text, or ``None`` when no surgical edit applies
     (multi-line people array, ``[people]`` table, scalar people, a
-    table-nested stale ``people`` that only the re-emit can drop, or a
-    re-parse mismatch).
+    table-nested stale ``people`` that only the re-emit can drop, a
+    re-parse mismatch, or the file disappearing/going unreadable between
+    the parse and this read — the caller then falls through to the
+    refuse-with-warning path, never a traceback).
     """
-    text = config_path.read_text(encoding="utf-8")
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
     replacement = f"people = {_toml_value(intended['people'])}"
 
     match = _SINGLE_LINE_PEOPLE.search(text)

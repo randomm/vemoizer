@@ -327,16 +327,16 @@ def run_names(
 # ---------------------------------------------------------------------------
 
 
-def register_names(app) -> None:
+def register_names(app: typer.Typer) -> None:
     """Attach the ``names`` command to *app* (the main Typer instance)."""
 
     @app.command("names")
-    def names(  # noqa: A001, A002
-        sidecar_path: Path = typer.Argument(  # noqa: B008
+    def names(  # noqa: A001, A002 - mirrors vemoizer CLI subcommand name
+        sidecar_path: Path = typer.Argument(  # noqa: B008 - typer argument default
             ...,
             help="The .json sidecar written by a meeting or memo run.",
         ),
-        no_play: bool = typer.Option(  # noqa: B008
+        no_play: bool = typer.Option(  # noqa: B008 - typer option default
             False,
             "--no-play",
             help="Skip clip extraction and playback (quotes only).",
