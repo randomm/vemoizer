@@ -67,6 +67,7 @@ def _write_temp_glossary(lines: list[str]) -> str:
 from vemoizer.batch_output import (  # noqa: F401,E402
     PRESET_FORMATS,
     _call_write_seam,
+    _check_and_write,
     _check_result,
     _process_result,
     _write_output,
@@ -260,15 +261,15 @@ def _run_plain(
                 exit_code = 1
                 continue
             if write_group_fn is not None:
-                if _check_result(
+                # The preset write seam (issue #87): shared _check_and_write
+                # helper so both run_batch loops keep one implementation.
+                if not _check_and_write(
+                    write_group_fn,
                     file,
                     result,
                     diarize=options.diarize,
                     diarize_label="diarize",
                 ):
-                    exit_code = 1
-                    continue
-                if not _call_write_seam(write_group_fn, file, result):
                     exit_code = 1
                 continue
             if not _process_result(
@@ -471,19 +472,17 @@ def run_batch(
                 label = "+".join(p.name for p in group)
 
             if write_group_fn is not None:
-                # Preset write seam (issue #87): shared _check_result so
-                # the fail-loud contract matches _process_result; an
-                # unexpected seam exception degrades per-group via
-                # _call_write_seam (clean one-line error, keep going).
-                if _check_result(
+                # Preset write seam (issue #87): shared _check_and_write
+                # helper — fail-loud _check_result first, then the seam
+                # (an unexpected seam exception degrades per-group via
+                # _call_write_seam: clean one-line error, keep going).
+                if not _check_and_write(
+                    write_group_fn,
                     label,
                     result,
                     diarize=options.diarize,
                     diarize_label="diarize",
                 ):
-                    exit_code = 1
-                    continue
-                if not _call_write_seam(write_group_fn, label, result):
                     exit_code = 1
                 continue
             if not _process_result(

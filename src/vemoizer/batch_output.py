@@ -1,7 +1,8 @@
 """Output-writing and temp-glossary helpers for batch transcription.
 
 Split from ``batch.py`` so the orchestration loops (``transcribe_batch``,
-``run_batch``, ``run_preset``) have a single responsibility: the
+``run_batch`` in :mod:`vemoizer.batch`, ``run_preset`` in
+:mod:`vemoizer.batch_preset`) have a single responsibility: the
 transcribe → check → write pipeline. The output-format rendering,
 collision-free path selection, and temp-glossary file management live
 here.
@@ -136,6 +137,34 @@ def _call_write_seam(
         typer.echo(f"error: {label}: could not write output: {e}", err=True)
         return False
     return True
+
+
+def _check_and_write(
+    write_group_fn: Callable[[Path | str, dict[str, Any]], object] | None,
+    label: Path | str,
+    result: dict[str, Any],
+    *,
+    diarize: bool,
+    diarize_label: str = "--diarize",
+) -> bool:
+    """The preset write-seam block shared by both of ``run_batch``'s loops.
+
+    When *write_group_fn* is set: first the fail-loud result checks
+    (``_check_result``), then the seam via ``_call_write_seam``; returns
+    True on success, False when the caller must set exit 1 and keep
+    going (``None`` when no seam is set). Byte-identical to the inline
+    blocks it replaced (issue #87 lens review: one implementation).
+    """
+    if write_group_fn is None:
+        return True
+    if _check_result(
+        label,
+        result,
+        diarize=diarize,
+        diarize_label=diarize_label,
+    ):
+        return False
+    return _call_write_seam(write_group_fn, label, result)
 
 
 def _write_temp_glossary(lines: list[str]) -> str:
