@@ -79,16 +79,31 @@ def _read_people_list(config_path: Path | None) -> list[str]:
         return []
     if not isinstance(raw, dict):
         return []
+    value = _top_level_people(raw)
+    return value if value is not None else []
+
+
+def _top_level_people(raw: dict[str, Any]) -> list[str] | None:
+    """The top-level ``people`` value, or ``None`` when it is not a list.
+
+    In TOML, a bare ``people`` key placed after a ``[table]`` header belongs
+    to that table, so only a top-level value (``raw["people"]``) is a valid
+    ``people`` list. A ``people`` value nested inside a table is ignored here
+    and stripped by :func:`_write_people_list`.
+    """
     value = raw.get("people")
     if not isinstance(value, list):
-        return []
+        return None
     return [s for s in value if isinstance(s, str)]
 
 
 def _write_people_list(config_path: Path, new_people: list[str]) -> None:
-    """Atomically write *new_people* as the ``people`` key, preserving all.
+    """Atomically write *new_people* as the top-level ``people`` key.
 
-    All other keys are preserved verbatim.
+    All other keys are preserved verbatim. Any pre-existing ``people`` key
+    *inside* a table (e.g. under ``[llm]``) is dropped: a ``people`` key is
+    only valid as a top-level list of strings, and leaving a stale one inside
+    a table would make the next strict config load fail (issue #93).
     """
     raw: dict[str, Any] = {}
     if config_path.is_file():
@@ -100,6 +115,9 @@ def _write_people_list(config_path: Path, new_people: list[str]) -> None:
         if isinstance(loaded, dict):
             raw = loaded
 
+    for table in raw.values():
+        if isinstance(table, dict):
+            table.pop("people", None)
     raw["people"] = new_people
 
     lines = _emit_toml(raw)
@@ -204,19 +222,21 @@ def _resolve_source_entry(
 # ---------------------------------------------------------------------------
 
 
-def _install_completer(names: list[str]) -> bool:
+def _install_completer(names: list[str]) -> Callable[[], None] | None:
     """Install a readline completer offering *names*.
 
     Only when ``readline`` is importable AND both stdin and stdout are TTYs.
-    Returns ``True`` when the completer was installed (the caller must
-    then call :func:`_restore_completer`).
+    Returns an undo callable (restoring the previous completer) when the
+    completer was installed, or ``None`` when it was not.
     """
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        return False
+        return None
     try:
         import readline
     except ImportError:
-        return False
+        return None
+
+    previous = readline.get_completer()
 
     def _completer(text: str, state: int) -> str | None:
         options = [n for n in names if n.lower().startswith(text.lower())]
@@ -226,17 +246,11 @@ def _install_completer(names: list[str]) -> bool:
 
     readline.set_completer(_completer)
     readline.parse_and_bind("tab: complete")
-    return True
 
+    def _restore() -> None:
+        readline.set_completer(previous)
 
-def _restore_completer() -> None:
-    """Restore readline's completer to the default (no-op if not installed)."""
-    try:
-        import readline
-    except ImportError:
-        return
-    none_completer: Callable[[str, int], str | None] | None = None
-    readline.set_completer(none_completer)
+    return _restore
 
 
 # ---------------------------------------------------------------------------
@@ -314,8 +328,9 @@ def run_names(
     new_names: dict[str, str] = {}
 
     with clip_session() as tmp_dir:
-        # Install readline completer (if applicable)
-        completer_installed = _install_completer(people_list)
+        # Install readline completer (if applicable); restores the previous
+        # completer on every exit path, including KeyboardInterrupt.
+        restore_completer = _install_completer(people_list)
         try:
             for label in sorted(shares, key=lambda x: shares[x], reverse=True):
                 share = shares[label]
@@ -360,8 +375,8 @@ def run_names(
                             new_people.append(answer)
                         _write_people_list(config_path, new_people)
         finally:
-            if completer_installed:
-                _restore_completer()
+            if restore_completer is not None:
+                restore_completer()
 
     # --- Persist names (only after loop completes) ---
     if new_names:

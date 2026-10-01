@@ -372,10 +372,9 @@ def _strict_load(path: Path) -> LLMConfig:
         if key not in _KNOWN_TOP_LEVEL_KEYS:
             raise ConfigError(f"unknown top-level key or section {key!r} in {path}")
         if isinstance(value, dict):
+            # Only ``[llm]`` is a table; ``people`` must be a top-level list
+            # of strings (issue #93), not a table.
             if key != LLM_CONFIG_SECTION:
-                # Only ``[llm]`` is a table; every other known key (e.g.
-                # the ``people`` string) is a scalar — a table is a
-                # structural error.
                 raise ConfigError(
                     f"top-level key {key!r} must not be a table in {path}"
                 )
@@ -386,6 +385,12 @@ def _strict_load(path: Path) -> LLMConfig:
         raise ConfigError(
             f"missing or malformed {LLM_CONFIG_SECTION!r} section in {path}"
         )
+
+    people = raw.get("people")
+    if people is not None and not isinstance(people, list):
+        # Covers both a ``[people]`` table (a dict) and a scalar value;
+        # only a top-level list of strings is valid (issue #93).
+        raise ConfigError(f"top-level 'people' must be a list of strings in {path}")
 
     for key in section:
         if key not in _KNOWN_LLM_KEYS:
