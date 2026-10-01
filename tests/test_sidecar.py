@@ -303,6 +303,14 @@ def test_sha256_over_files_missing_file(tmp_path: Path) -> None:
     assert sha256_over_files([str(f)]) is None
 
 
+def test_sha256_over_files_non_utf8_file_hashes_bytes(tmp_path: Path) -> None:
+    """A non-UTF-8 glossary still hashes its raw bytes (never raises)."""
+    f = tmp_path / "g.txt"
+    f.write_bytes(b"\xff\xfe\x00bad")
+    expected = hashlib.sha256(b"\xff\xfe\x00bad").hexdigest()
+    assert sha256_over_files([str(f)]) == expected
+
+
 def test_sha256_over_files_deterministic(tmp_path: Path) -> None:
     """Same files in same order produce the same hash."""
     f = tmp_path / "g.txt"

@@ -99,7 +99,11 @@ def _load_corrections(files: list[Path]) -> dict[str, str]:
     for path in files:
         try:
             file_corrections = load_corrections(path)
-        except OSError:
+        except (OSError, UnicodeDecodeError) as e:
+            typer.echo(
+                f"warning: could not read glossary {path}: {e} (proceeding without)",
+                err=True,
+            )
             continue
         # Later files (lower priority) only fill in keys not already set.
         for k, v in file_corrections.items():

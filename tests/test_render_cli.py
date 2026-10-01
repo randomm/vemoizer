@@ -204,6 +204,21 @@ def test_render_missing_glossary_warns_and_proceeds(
     assert len(md_files) == 1
 
 
+def test_render_non_utf8_glossary_warns_and_proceeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-UTF-8 --glossary warns to stderr and proceeds (exit 0)."""
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    g = tmp_path / "glossary.txt"
+    g.write_bytes(b"\xff\xfe\x00bad")
+    sc = _write_sidecar(tmp_path, _sidecar())
+    result = runner.invoke(app, ["render", str(sc), "--glossary", str(g)])
+    assert result.exit_code == 0
+    assert "warning: could not read glossary" in result.stderr
+    md_files = list(tmp_path.glob("*.md"))
+    assert len(md_files) == 1
+
+
 def test_render_layered_glossary_missing_file_warns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

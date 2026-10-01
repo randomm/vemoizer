@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,7 @@ import typer
 
 from vemoizer.batch_output import PRESET_FORMATS, _check_result, _write_preset_output
 from vemoizer.diarization import SpeakerCount
+from vemoizer.ingest import IngestError
 from vemoizer.llm import ConfigError
 from vemoizer.output.naming import nfc_stem_and_suffix
 from vemoizer.presets import RunOptions, resolve_options
@@ -186,11 +188,11 @@ def _run_preset_groups(
         # M5a: stash the group's per-part PCM durations (fail-open) and
         # the real per-part source paths, then build the sidecar keys
         # before the seam writes the .md + .json pair.
-        from contextlib import suppress
-
         from vemoizer.sidecar import build_sidecar, group_durations, group_part_paths
 
-        with suppress(Exception):  # fail-open: skip durations on ffmpeg error
+        with suppress(
+            OSError, IngestError
+        ):  # fail-open: skip durations on ffmpeg error
             result["_source_durations"] = group_durations(label)
         build_sidecar(
             result,
@@ -426,13 +428,10 @@ def run_preset(
                 # M5a: stash this file's PCM duration (fail-open) and
                 # build the sidecar keys before the seam writes the
                 # .md + .json pair.
-                from contextlib import suppress
-
+                from vemoizer.ingest import pcm_duration_seconds
                 from vemoizer.sidecar import build_sidecar
 
-                with suppress(Exception):  # fail-open: skip on ffmpeg error
-                    from vemoizer.ingest import pcm_duration_seconds
-
+                with suppress(OSError, IngestError):  # fail-open: skip on ffmpeg error
                     result["_source_durations"] = [pcm_duration_seconds(file)]
                 build_sidecar(
                     result,

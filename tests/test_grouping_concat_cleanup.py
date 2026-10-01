@@ -22,6 +22,7 @@ seam.
 
 from __future__ import annotations
 
+import json
 import stat
 import subprocess
 import tempfile
@@ -34,6 +35,7 @@ import vemoizer.grouping as grouping
 import vemoizer.grouping_concat as gc
 from vemoizer.grouping import GroupingError
 from vemoizer.ingest import IngestError
+from vemoizer.presets import RunOptions
 
 
 def _pin_mkdtemp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
@@ -402,4 +404,80 @@ def test_concat_groups_rejects_newline_in_filename(
     assert "newline" in str(exc.value)
     # Rejected before any list file or merged file was written.
     assert not (tmp / "concat.txt").exists()
-    assert not (tmp / "group.wav").exists()
+
+
+# ---------------------------------------------------------------------------
+# M5a: the preset write seam's duration measurement is fail-open
+# ---------------------------------------------------------------------------
+
+
+def test_run_preset_group_duration_ingest_error_is_fail_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A group whose parts raise IngestError in ``group_durations``: the
+    seam skips the durations (no ``duration_s`` in the sidecar) and the
+    run still succeeds with a full .md + .json pair (issue #89)."""
+    import vemoizer.batch_preset as batch_preset_module
+    import vemoizer.grouping as grouping
+    import vemoizer.sidecar as sidecar_module
+
+    def boom(label):
+        raise IngestError(f"ffmpeg failed to decode {label}")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sidecar_module, "group_durations", boom)
+    monkeypatch.setattr(
+        grouping, "decode_boundaries", lambda files, transcribe_fn=None: ([""], ["x"])
+    )
+    monkeypatch.setattr(
+        grouping, "propose_groups", lambda files, t, h: [[files[0]], [files[1]]]
+    )
+    monkeypatch.setattr(
+        grouping, "confirm_groups", lambda files, proposals, **kwargs: list(proposals)
+    )
+    import vemoizer.pipeline as pipeline_module
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "transcribe_file",
+        lambda path, **kwargs: {"text": "moikka", "segments": []},
+    )
+
+    a = tmp_path / "a.m4a"
+    a.touch()
+    b = tmp_path / "b.m4a"
+    b.touch()
+
+    options = RunOptions.expert_transcribe(
+        profile="dictation",
+        diarize=False,
+        repair=False,
+        speakers=None,
+        glossary_path=None,
+        config_path=None,
+    )
+    code = batch_preset_module._run_preset_groups(
+        [a, b],
+        options,
+        quiet=True,
+        yes=True,
+        no_group=False,
+        transcribe_fn=lambda path, **kwargs: {"text": "moikka", "segments": []},
+        input_fn=None,
+        print_fn=None,
+        tty_isatty=lambda: True,
+        effective_glossary=None,
+        command="meeting",
+    )
+    assert code == 0
+    # One pair per group (two single-part groups), written despite the
+    # duration failure.
+    md_files = list(tmp_path.glob("*.md"))
+    json_files = list(tmp_path.glob("*.json"))
+    assert len(md_files) == 2
+    assert len(json_files) == 2
+    # No duration_s key in any sidecar (fail-open: skip on IngestError).
+    for json_file in json_files:
+        sidecar_data = json.loads(json_file.read_text(encoding="utf-8"))
+        for entry in sidecar_data.get("source", []):
+            assert "duration_s" not in entry

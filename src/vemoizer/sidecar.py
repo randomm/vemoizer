@@ -238,6 +238,6 @@ def sha256_over_files(files: list[str] | list[Path]) -> str | None:
     for f in files:
         try:
             h.update(Path(f).read_bytes())
-        except OSError:
+        except OSError:  # fail-open: unreadable file -> no hash
             return None
     return h.hexdigest()
