@@ -11,6 +11,35 @@ from pathlib import Path
 
 import pytest
 
+import vemoizer.pipeline as pipeline_module
+
+
+def touch_files(names: list[str], tmp_path: Path) -> list[Path]:
+    """Create zero-byte files in *tmp_path* and return their paths."""
+    files = [tmp_path / n for n in names]
+    for f in files:
+        f.touch()
+    return files
+
+
+def fake_transcribe(
+    monkeypatch: pytest.MonkeyPatch,
+    record: list[str],
+    title: str | None = None,
+) -> None:
+    """Patch ``pipeline.transcribe_file`` with a fake that records the
+    transcribed files; the result carries a per-file or fixed title."""
+
+    def fake_transcribe(path, **kwargs):
+        record.append(Path(path).name)
+        return {
+            "text": "moikka maailma",
+            "segments": [],
+            "notes": {"title": title if title is not None else Path(path).stem.upper()},
+        }
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
+
 
 def isolate_home(
     monkeypatch: pytest.MonkeyPatch,

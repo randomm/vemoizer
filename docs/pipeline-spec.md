@@ -303,6 +303,14 @@ LLM repair pass on by default. Output is `.md` + `.json` to the CWD
 with a dated, sanitized title and NFC collision suffix; one `wrote
 <relative path>` line per file is printed at the end.
 
+With 2+ files, the M3 split-recording grouping flow runs (issue #87):
+natural sort, boundary decodes, continuation/break proposals, confirmation
+(`--yes` / `--no-group` / interactive), ffmpeg concat, one decode per
+group, part markers. A non-TTY invocation without `--yes`/`--no-group`
+fails immediately (exit 2) before any decode. The dated output name uses
+the first source file's **modification date** (not `creation_time`, which
+on iOS exports is the copy/export time).
+
 The glossary is the merged result of `~/.vemoizer/glossary.txt` and
 the nearest `./.vemoizer/glossary.txt` (project layer winning, M0
 token budget applied when the prompt is built — see Glossary layers
@@ -320,6 +328,8 @@ search entirely.
 | `--repair` / `--no-repair` | on | LLM repair pass over the final paragraphs |
 | `--speakers` | 2-6 | diarization bounds (`N` or `MIN-MAX`) |
 | `--no-diarize` | off (diarize on) | skip speaker diarization |
+| `--yes` | off | group mode for 2+ files: run the boundary decodes and accept every continuation proposal without a prompt (mutually exclusive with `--no-group`) |
+| `--no-group` | off | skip split-recording grouping entirely — each file is transcribed standalone (no boundary decode, no concat, no part markers); mutually exclusive with `--yes` |
 | `--low-memory` / `--no-low-memory` | auto | low-memory model-loading mode |
 
 ### `vemoizer memo FILES... [options]` (issue #82)
