@@ -133,7 +133,12 @@ def _toml_value(value: Any) -> str:
     if isinstance(value, float):
         return repr(value)
     if isinstance(value, str):
-        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        escaped = (
+            value.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+            .replace("\t", "\\t")
+        )
         return f'"{escaped}"'
     if isinstance(value, list):
         return "[" + ", ".join(_toml_value(item) for item in value) + "]"
@@ -180,10 +185,11 @@ def _resolve_source_entry(
 
 
 def _install_completer(names: list[str]) -> bool:
-    """Install a readline completer offering *names*; returns True if installed.
+    """Install a readline completer offering *names*.
 
     Only when ``readline`` is importable AND both stdin and stdout are TTYs.
-    Returns the previous completer function for restoration.
+    Returns ``True`` when the completer was installed (the caller must
+    then call :func:`_restore_completer`).
     """
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return False
@@ -207,10 +213,10 @@ def _restore_completer() -> None:
     """Restore readline's completer to the default (no-op if not installed)."""
     try:
         import readline
-
-        readline.set_completer(None)  # type: ignore[arg-type]
     except ImportError:
-        pass
+        return
+    none_completer: Callable[[str, int], str | None] | None = None
+    readline.set_completer(none_completer)
 
 
 # ---------------------------------------------------------------------------

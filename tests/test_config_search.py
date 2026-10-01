@@ -259,12 +259,12 @@ class TestStrictValidation:
 
     def test_people_top_level_key_loads_without_error(self, tmp_path: Path) -> None:
         # issue #93: a config containing both [llm] and a top-level
-        # ``people`` string loads cleanly (``people`` is in
+        # ``people`` list-of-strings loads cleanly (``people`` is in
         # ``_KNOWN_TOP_LEVEL_KEYS``); the value is ignored by llm.
         # ``people`` must come BEFORE the [llm] section to be top-level.
         _write_section(
             tmp_path / "home" / ".vemoizer" / "config.toml",
-            'people = "Mikko"\n' + _VALID_SECTION,
+            'people = ["Mikko", "Aino"]\n' + _VALID_SECTION,
         )
         cfg = _search_in(tmp_path)
         assert cfg is not None

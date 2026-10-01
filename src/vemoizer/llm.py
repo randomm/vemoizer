@@ -279,7 +279,7 @@ LEGACY_DEPRECATION_NOTICE: str = (
 )
 
 #: Known top-level and [llm] keys for strict validation. ``people`` is a
-#: top-level string (issue #93) that ``llm`` itself ignores.
+#: top-level list of strings (issue #93) that ``llm`` itself ignores.
 _KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset({LLM_CONFIG_SECTION, "people"})
 _KNOWN_LLM_KEYS: frozenset[str] = frozenset(
     {"base_url", "model", "api_key_env", "timeout_seconds"}
