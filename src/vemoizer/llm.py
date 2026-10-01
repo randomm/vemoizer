@@ -376,7 +376,8 @@ def _strict_load(path: Path) -> LLMConfig:
             # of strings (issue #93), not a table.
             if key != LLM_CONFIG_SECTION:
                 raise ConfigError(
-                    f"top-level key {key!r} must not be a table in {path}"
+                    f"top-level key {key!r} must not be a table in {path}; "
+                    "top-level 'people' must be a list of strings"
                 )
             continue
 
