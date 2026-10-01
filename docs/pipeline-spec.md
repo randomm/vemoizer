@@ -421,6 +421,17 @@ below), with `@`-prefixed terms LLM-only. `--glossary` replaces both
 layers entirely (no merge). `--config` replaces the layered config
 search entirely.
 
+End-of-meeting naming prompt (issue #95): after an interactive `meeting`
+run finishes (single file, the `--no-group` loop, or the grouped run —
+after the `wrote <path>` lines), the run asks `Name the speakers now?
+[y/N]` once; on yes it runs the existing `vemoizer names` flow on each
+written sidecar (`.json` resolved against the CWD) that has 2+ labelled
+speakers. The prompt is skipped entirely — no output, no prompt — for
+`memo` (never prompts), `--yes`, and non-interactive (non-TTY stdin or
+stdout) runs, and when no written sidecar is eligible. The hook never
+changes the run's exit code, and a per-sidecar naming failure only warns
+(`warning: naming failed for <name>: <ExcClassName>`) before continuing.
+
 | Flag | Default | Meaning |
 |---|---|---|
 | `files` (positional, 1+) | — | audio file paths |

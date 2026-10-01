@@ -46,6 +46,7 @@ from vemoizer.batch_output import PRESET_FORMATS, _check_result, _write_preset_o
 from vemoizer.diarization import SpeakerCount
 from vemoizer.ingest import IngestError
 from vemoizer.llm import ConfigError
+from vemoizer.naming_hook import ask_naming_hook
 from vemoizer.output.naming import nfc_stem_and_suffix
 from vemoizer.presets import RunOptions, resolve_options
 
@@ -205,6 +206,12 @@ def _run_preset_groups(
     for name in written:
         if not quiet:
             typer.echo(f"wrote {name}")
+    # End-of-meeting naming hook (issue #95): the prompt is the last
+    # interactive output (after the wrote lines); the command guard
+    # (meeting only — memo never prompts) is enforced at this call
+    # site; the hook never alters the run's exit code.
+    if command == "meeting":
+        ask_naming_hook(written, yes=yes, input_fn=input_fn, tty_isatty=tty_isatty)
     return max(code, exit_code)
 
 
@@ -429,6 +436,11 @@ def run_preset(
         for name in written:
             if not quiet:
                 typer.echo(f"wrote {name}")
+        # End-of-meeting naming hook (issue #95): memo never prompts
+        # (the command guard lives in the hook's call site), and the
+        # hook never alters the run's exit code.
+        if command == "meeting":
+            ask_naming_hook(written, yes=yes, input_fn=input_fn, tty_isatty=tty_isatty)
         return exit_code
     except OSError as e:
         # Temp-glossary write failure: clean error, non-zero exit, no
