@@ -16,12 +16,13 @@ The stage is pure subprocess + numpy — no model loading, no network.
 from __future__ import annotations
 
 import contextlib
-import io
 import subprocess
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -115,8 +116,25 @@ def duration_seconds(audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> float
 _STDERR_EXCERPT_CHARS = 200
 
 
+@dataclass
+class _DrainState:
+    """The drain's reader-thread handoff (written only by the reader).
+
+    The reader thread records how many bytes it saw on stdout
+    (``total``) and the exception it hit, if any (``error``). The
+    reader never raises into the main thread directly: a read failure
+    (broken pipe, interrupt) is stored here so the caller thread —
+    waiting on the reader join — can re-raise it instead of hanging.
+    """
+
+    total: int = 0
+    error: BaseException | None = None
+
+
 def _drain_ffmpeg_pcm(
-    proc: subprocess.Popen[bytes], stderr_file: io.BufferedIOBase, timeout: float
+    proc: Any,
+    stderr_file: Any,
+    timeout: float,
 ) -> tuple[int, str]:
     """Stream *proc*'s stdout in bounded chunks, enforcing *timeout* mid-drain.
 
@@ -138,8 +156,7 @@ def _drain_ffmpeg_pcm(
     """
     deadline = time.monotonic() + timeout
 
-    # Shared state: [total bytes, reader-side exception or None]
-    state: list[object] = [0, None]
+    state = _DrainState()
 
     def _reader() -> None:
         assert proc.stdout is not None
@@ -153,11 +170,11 @@ def _drain_ffmpeg_pcm(
             # (stuck in reader.join) would never wake up. Store the
             # exception so the drain loop can handle it via its
             # except-BaseException handler.
-            state[0] = total
-            state[1] = e
+            state.total = total
+            state.error = e
             return
-        state[0] = total
-        state[1] = None
+        state.total = total
+        state.error = None
 
     reader = threading.Thread(target=_reader, daemon=True)
     reader.start()
@@ -171,9 +188,8 @@ def _drain_ffmpeg_pcm(
             else:
                 # The reader finished (or died): check for a stored
                 # reader-side exception before waiting on the process.
-                reader_exc = state[1]
-                if reader_exc is not None and isinstance(reader_exc, BaseException):
-                    raise reader_exc
+                if state.error is not None:
+                    raise state.error
                 proc.wait(timeout=remaining)
                 break
     except BaseException:
@@ -187,11 +203,7 @@ def _drain_ffmpeg_pcm(
         raise
     stderr_file.seek(0)
     stderr = stderr_file.read()
-    # state[0] is always an int (the byte count); the isinstance check
-    # satisfies the type checker.
-    if not isinstance(state[0], int):
-        raise RuntimeError("internal error: drain state corrupted")
-    return state[0], _bounded_stderr(stderr)
+    return state.total, _bounded_stderr(stderr)
 
 
 def _bounded_stderr(stderr: bytes) -> str:
@@ -253,6 +265,13 @@ def pcm_duration_seconds(path: Path | str, timeout: float = 300.0) -> float:
         except subprocess.TimeoutExpired:
             raise IngestError(
                 f"ffmpeg timed out after {timeout:.0f}s decoding {p}",
+                returncode=None,
+            ) from None
+        except OSError as e:
+            # A reader-side failure (broken pipe / interrupted read on
+            # the stdout drain) is an ingest failure, not a crash.
+            raise IngestError(
+                f"ffmpeg stdout drain failed while decoding {p}: {e}",
                 returncode=None,
             ) from None
     finally:

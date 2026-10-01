@@ -30,6 +30,7 @@ from vemoizer.output.naming import (
     collision_free_paths,
     nfc_stem_and_suffix,
 )
+from vemoizer.presets import RunOptions
 
 
 def dated_basename(title: str, **kwargs) -> str:
@@ -133,9 +134,18 @@ def _check_result(
     returns 0 when the result looks like a real transcript. The messages
     are pinned by tests — both ``transcribe_batch`` and ``run_preset`` go
     through here (one implementation); ``diarize_label`` preserves each
-    entry point's pre-M2 wording for the no-labels line.
+    entry point's pre-M2 wording for the no-labels line. The ``warnings``
+    channel is defensively normalised: a lone string becomes a
+    one-element list (``_part_markers``'s same contract), anything else
+    non-list-like is treated as no warnings — never a TypeError.
     """
-    for warning in result.pop("warnings", []):
+    raw = result.pop("warnings", [])
+    warnings: list[str] = []
+    if isinstance(raw, str):
+        warnings = [raw]
+    elif isinstance(raw, (list, tuple)):
+        warnings = [str(w) for w in raw]
+    for warning in warnings:
         typer.echo(warning, err=True)
     if "error" in result:
         typer.echo(f"error: {result['error']}", err=True)
@@ -158,6 +168,67 @@ def _check_result(
         )
         return 1
     return 0
+
+
+def _process_result(
+    label: Path | str,
+    result: dict,
+    *,
+    formats: list[str],
+    out: Path | None,
+    quiet: bool,
+    options: RunOptions | None,
+    diarize: bool | None = None,
+) -> bool:
+    """One decoded result's M1 checks + output write + quiet echo.
+
+    The single per-file/per-group core shared by ``transcribe_batch``
+    (options=None — ``--copy`` is honored, one ``wrote transcript`` echo
+    per file; ``diarize`` passed explicitly from the function parameter)
+    and ``run_batch``/``_run_plain`` (a ``RunOptions`` — no ``--copy`` on
+    the group path; ``diarize`` read from the options). The output target
+    mirrors the old ``_write_group_outputs`` contract: an explicit *out*
+    gets only the first format (``-`` = stdout); otherwise every format
+    is written from the first path's stem. Returns True when the result
+    passed ``_check_result`` AND every write succeeded — False means the
+    caller must set exit 1. The ``--diarize`` no-labels wording is the
+    pre-refactor wording for every path (pinned by tests); the preset
+    path (``run_preset``) keeps its own ``diarize_label="diarize"``
+    call to ``_check_result`` directly.
+    """
+    effective_diarize = (
+        diarize if diarize is not None else (options.diarize if options else False)
+    )
+    if _check_result(
+        label,
+        result,
+        diarize=effective_diarize,
+    ):
+        return False
+    if out is not None:
+        ok = _write_output(out, result, formats[0] if formats else "txt")
+    else:
+        from vemoizer.output.formatters import FORMAT_EXTENSIONS
+
+        stem, _ = nfc_stem_and_suffix(Path(str(label)))
+        ok = all(
+            [
+                _write_output(Path(f"{stem}{FORMAT_EXTENSIONS[fmt]}"), result, fmt)
+                for fmt in formats
+            ]
+        )
+    if not ok:
+        return False
+    if options is None:
+        # The transcribe_batch loop honors --copy (the group path does
+        # not — one clipboard per group is not a sensible contract).
+        from vemoizer.copy import copy_to_clipboard
+
+        copy_to_clipboard(result["text"])
+    if not quiet:
+        name = label.name if isinstance(label, Path) else label
+        typer.echo(f"wrote transcript for {name}")
+    return True
 
 
 def run_preset(

@@ -80,6 +80,7 @@ def _write_temp_glossary(lines: list[str]) -> str:
 from vemoizer.batch_output import (  # noqa: F401,E402
     PRESET_FORMATS,
     _check_result,
+    _process_result,
     _write_output,
     _write_preset_output,
     run_preset,
@@ -171,32 +172,21 @@ def transcribe_batch(
                 glossary_path=glossary_path,
                 speakers=speakers,
             )
-            if _check_result(file, result, diarize=diarize, diarize_label="--diarize"):
+            if not _process_result(
+                file,
+                result,
+                formats=list(formats),
+                out=out,
+                quiet=quiet,
+                # options=None is the transcribe_batch path: --copy is
+                # honored here (and not on the group path). The diarize
+                # flag comes from the function parameter (not from a
+                # RunOptions), so pass it explicitly.
+                options=None,
+                diarize=diarize,
+            ):
                 exit_code = 1
                 continue
-            stem, _suffix = nfc_stem_and_suffix(file)
-            if out is not None:
-                ok = _write_output(out, result, formats[0] if formats else "txt")
-            else:
-                from vemoizer.output.formatters import FORMAT_EXTENSIONS
-
-                ok = all(
-                    [
-                        _write_output(
-                            Path(f"{stem}{FORMAT_EXTENSIONS[fmt]}"), result, fmt
-                        )
-                        for fmt in formats
-                    ]
-                )
-            if not ok:
-                exit_code = 1
-                continue
-            if copy:
-                from vemoizer.copy import copy_to_clipboard
-
-                copy_to_clipboard(result["text"])
-            if not quiet:
-                typer.echo(f"wrote transcript for {file.name}")
     return exit_code
 
 
@@ -229,33 +219,6 @@ def _transcribe_one(file: Path, options: RunOptions) -> dict[str, Any]:
     )
 
 
-def _write_group_outputs(
-    group: list[Path],
-    result: dict,
-    *,
-    formats: list[str],
-    out: Path | None,
-) -> bool:
-    """Write one group's outputs; True on success.
-
-    The ``--out`` override applies only for single-group runs (or stdout,
-    where each group streams in order) — a multi-group run with an explicit
-    file target is rejected up front in :func:`run_batch` before any
-    decode, so it never reaches this loop.
-    """
-    if out is not None:
-        return _write_output(out, result, formats[0] if formats else "txt")
-    stem, _ = nfc_stem_and_suffix(group[0])
-    from vemoizer.output.formatters import FORMAT_EXTENSIONS
-
-    return all(
-        [
-            _write_output(Path(f"{stem}{FORMAT_EXTENSIONS[fmt]}"), result, fmt)
-            for fmt in formats
-        ]
-    )
-
-
 def _run_plain(
     ordered: list[Path],
     options: RunOptions,
@@ -277,19 +240,16 @@ def _run_plain(
     with caffeinate_context():
         for file in ordered:
             result = _transcribe_one(file, options)
-            if _check_result(file, result, diarize=options.diarize):
-                exit_code = 1
-                continue
-            if not _write_group_outputs(
-                [file],
+            if not _process_result(
+                file,
                 result,
                 formats=list(formats),
                 out=out,
+                quiet=quiet,
+                options=options,
             ):
                 exit_code = 1
                 continue
-            if not quiet:
-                typer.echo(f"wrote transcript for {file.name}")
     return exit_code
 
 
@@ -374,7 +334,18 @@ def run_batch(
     # in tests patches the name that run_batch actually calls.
     from .grouping import decode_boundaries as _db
 
-    tail_texts, head_texts = _db(ordered, transcribe_fn)
+    # The boundary decode owns the default WhisperTranscriber's lazy
+    # model load (a download): _edge_text degrades per-EDGE failures
+    # (IngestError/RuntimeError/OSError) to "", but a model LOAD failure
+    # can be any exception type (HuggingFace/network) — none of those
+    # may escape as a raw traceback. KeyboardInterrupt still propagates.
+    try:
+        tail_texts, head_texts = _db(ordered, transcribe_fn)
+    except KeyboardInterrupt:
+        raise
+    except Exception as e:  # noqa: BLE001 - intentional: any load failure -> clean line
+        typer.echo(f"error: could not decode boundaries: {e}", err=True)
+        return 1
     proposals = propose_groups(ordered, tail_texts, head_texts)
     try:
         groups = confirm_groups(
@@ -452,17 +423,14 @@ def run_batch(
                     result["part_markers"] = markers
                 label = "+".join(p.name for p in group)
 
-            if _check_result(label, result, diarize=options.diarize):
-                exit_code = 1
-                continue
-            if not _write_group_outputs(
-                group,
+            if not _process_result(
+                label,
                 result,
                 formats=list(formats),
                 out=out,
+                quiet=quiet,
+                options=options,
             ):
                 exit_code = 1
                 continue
-            if not quiet:
-                typer.echo(f"wrote transcript for {label}")
     return exit_code
