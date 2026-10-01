@@ -50,9 +50,7 @@ def _find_people_config_path(
 
     Same order as ``llm._default_search``: nearest ``./.vemoizer`` →
     ``~/.vemoizer`` → legacy. ``None`` when nothing exists. ``legacy_paths``
-    is injectable so tests can isolate from a real dev-machine legacy
-    config (``llm._LEGACY_CONFIG_PATHS`` is computed at import time from
-    the real ``Path.home()`` and would otherwise leak into tests).
+    is injectable so tests can isolate from a real dev-machine legacy config.
     """
     from vemoizer.llm import _LEGACY_CONFIG_PATHS, _find_nearest_vemoizer_config
 
@@ -86,17 +84,16 @@ def _read_people_list(config_path: Path | None) -> list[str]:
         return []
     if not isinstance(raw, dict):
         return []
-    value = _top_level_people(raw)
-    return value if value is not None else []
+    return _top_level_people(raw) or []
 
 
 def _top_level_people(raw: dict[str, Any]) -> list[str] | None:
     """The top-level ``people`` value, or ``None`` when it is not a list.
 
     In TOML, a bare ``people`` key placed after a ``[table]`` header belongs
-    to that table, so only a top-level value (``raw["people"]``) is a valid
-    ``people`` list. A ``people`` value nested inside a table is ignored here
-    and stripped by :func:`_write_people_list`.
+    to that table, so only a top-level value is a valid ``people`` list.
+    A ``people`` value nested inside a table is ignored here and stripped
+    by :func:`_write_people_list`.
     """
     value = raw.get("people")
     if not isinstance(value, list):
@@ -108,9 +105,9 @@ def _write_people_list(config_path: Path, new_people: list[str]) -> None:
     """Atomically write *new_people* as the top-level ``people`` key.
 
     All other keys are preserved verbatim. Any pre-existing ``people`` key
-    *inside* a table (e.g. under ``[llm]``) is dropped: a ``people`` key is
-    only valid as a top-level list of strings, and leaving a stale one inside
-    a table would make the next strict config load fail (issue #93).
+    inside a table (e.g. under ``[llm]``) is dropped: a ``people`` key is
+    only valid as a top-level list of strings, and leaving a stale one would
+    make the next strict config load fail (issue #93).
     """
     raw: dict[str, Any] = {}
     if config_path.is_file():
@@ -126,7 +123,6 @@ def _write_people_list(config_path: Path, new_people: list[str]) -> None:
         if isinstance(table, dict):
             table.pop("people", None)
     raw["people"] = new_people
-
     lines = _emit_toml(raw)
     tmp = config_path.with_name(f"{config_path.name}.tmp-{os.getpid()}")
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -145,8 +141,7 @@ def _emit_toml(raw: dict[str, Any]) -> str:
             out.append(f"{key} = {_toml_value(value)}")
     for name, table in tables.items():
         out.append(f"[{name}]")
-        for key, value in table.items():
-            out.append(f"{key} = {_toml_value(value)}")
+        out.extend(f"{k} = {_toml_value(v)}" for k, v in table.items())
     return "\n".join(out) + ("\n" if out else "")
 
 
@@ -184,9 +179,8 @@ def _toml_value(value: Any) -> str:
         return f'"{_escape_basic_string(value)}"'
     if isinstance(value, list):
         return "[" + ", ".join(_toml_value(item) for item in value) + "]"
-    # ``tomllib`` only yields str/int/float/bool/list; this is unreachable
-    # via the config round-trip (``_read_people_list`` / ``_write_people_list``)
-    # and kept as an explicit empty string rather than an invalid TOML blob.
+    # ``tomllib`` only yields str/int/float/bool/list; unreachable via the
+    # config round-trip. Kept as an explicit empty string, not invalid TOML.
     return '""'
 
 
@@ -299,13 +293,14 @@ def run_names(
         return 1
 
     # --- Locate the people config (nearest layered config) ---
-    # The ``_NOT_FOUND`` sentinel (not ``None``) distinguishes "caller did
-    # not inject a path" from "caller injected an isolated path".
     if config_path is _NOT_FOUND:
         resolved_config: Path | None = _find_people_config_path()
     else:
         assert not isinstance(config_path, _NotFound)  # narrows the union
         resolved_config = config_path
+
+    raw_sn = data.get("speaker_names")
+    stored_names: dict[str, str] = raw_sn if isinstance(raw_sn, dict) else {}
 
     paragraphs: list[dict[str, Any]] = data.get("paragraphs") or []
     segments: list[dict[str, Any]] = data.get("segments") or []
@@ -349,12 +344,15 @@ def run_names(
 
     # --- Prompt loop (inside clip_session for temp dir cleanup) ---
     new_names: dict[str, str] = {}
+    prompt_aborted = False
+    prompt_fn = input_fn if input_fn is not None else input
 
-    # Stored names (existing sidecar speaker_names). A label with a stored
-    # name shows it as the prompt default; an empty answer keeps it, a
-    # non-empty answer replaces it. A kept stored name never triggers the
-    # Add-to-people prompt. (issue #93, decision 4.)
-    stored_names: dict[str, str] = data.get("speaker_names") or {}
+    def _ask(prompt_text: str) -> str | _NotFound:
+        """Call the input function; treat EOFError as an abort sentinel."""
+        try:
+            return prompt_fn(prompt_text)
+        except EOFError:
+            return _NotFound()
 
     with clip_session() as tmp_dir:
         # Install readline completer (if applicable); restores the previous
@@ -381,13 +379,16 @@ def run_names(
 
                 # Prompt for name. A label with a stored name shows it as a
                 # bracketed default; empty keeps it, non-empty replaces.
-                prompt_fn = input_fn if input_fn is not None else input
                 stored = stored_names.get(label)
                 if stored:
                     prompt = f"Name for {label} [{stored}]: "
                 else:
                     prompt = f"Name for {label} (empty to skip): "
-                answer = prompt_fn(prompt).strip()
+                result = _ask(prompt)
+                if isinstance(result, _NotFound):
+                    prompt_aborted = True
+                    break
+                answer = result.strip()
 
                 if stored:
                     if not answer:
@@ -401,13 +402,13 @@ def run_names(
                         cfg_display = (
                             str(resolved_config) if resolved_config else "(no config)"
                         )
-                        yes = (
-                            prompt_fn(
-                                f"Add {answer} to people in {cfg_display}? [y/N] "
-                            )
-                            .strip()
-                            .lower()
+                        add_result = _ask(
+                            f"Add {answer} to people in {cfg_display}? [y/N] "
                         )
+                        if isinstance(add_result, _NotFound):
+                            prompt_aborted = True
+                            break
+                        yes = add_result.strip().lower()
                         if yes == "y" and resolved_config is not None:
                             new_people = list(people_list)
                             if answer not in new_people:
@@ -422,13 +423,13 @@ def run_names(
                         cfg_display = (
                             str(resolved_config) if resolved_config else "(no config)"
                         )
-                        yes = (
-                            prompt_fn(
-                                f"Add {answer} to people in {cfg_display}? [y/N] "
-                            )
-                            .strip()
-                            .lower()
+                        add_result = _ask(
+                            f"Add {answer} to people in {cfg_display}? [y/N] "
                         )
+                        if isinstance(add_result, _NotFound):
+                            prompt_aborted = True
+                            break
+                        yes = add_result.strip().lower()
                         if yes == "y" and resolved_config is not None:
                             new_people = list(people_list)
                             if answer not in new_people:
@@ -437,6 +438,10 @@ def run_names(
         finally:
             if restore_completer is not None:
                 restore_completer()
+
+    # --- EOFError mid-prompt: stop cleanly, persist what was entered ---
+    if prompt_aborted:
+        typer.echo("input ended (Ctrl-D); persisting names entered so far", err=True)
 
     # --- Persist names (only after loop completes) ---
     if new_names:
@@ -463,10 +468,8 @@ def run_names(
 
     # --- One aggregate notice for degraded clips ---
     if degraded and not no_play:
-        typer.echo(
-            "note: some voice clips were unavailable; quotes only for those spans",
-            err=True,
-        )
+        notice = "note: some voice clips were unavailable; quotes only for those spans"
+        typer.echo(notice, err=True)
 
     return 0
 
