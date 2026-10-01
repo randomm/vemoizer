@@ -37,10 +37,11 @@ from .glossary import (
     load_glossary,
 )
 from .ingest import IngestError, ingest_audio
-from .llm import LLMClient, LLMConfig, load_default_config
+from .llm import LLMClient, LLMConfig, load_default_config, load_language
 from .llm_tail import apply_llm_tail
 from .notes import generate_notes  # noqa: F401
 from .parakeet_transcriber import ParakeetTranscriber
+from .presets import _normalize_language
 from .progress import StageProgress, format_duration
 from .readability import paragraphs, splice_verdicts, tidy_paragraphs
 from .redecode import WhisperReDecodeTranscriber
@@ -103,9 +104,8 @@ def _find_spans(
 ) -> list[Span]:
     """Disputed spans between the decodes, guardrailed; ``[]`` = no consensus.
 
-    The dispute unit is the VAD slice (real bounds, no synthetic
-    timestamps): a slice is disputed when its normalized A/B texts diverge
-    below the slice-similarity threshold. The
+    The dispute unit is the VAD slice: disputed when its normalized A/B
+    texts diverge below the slice-similarity threshold. The
     ``VEMOIZER_DISABLE_CONSENSUS=1`` kill-switch and every failure path
     land on ``[]`` — the run ships decode A alone (fail-open).
     """
@@ -203,13 +203,11 @@ def _assemble(
     ``speaker_segments`` (when given) is a list of ``(start, end, speaker)``
     triples from the diarization stage; each adjudicated segment is labelled
     with the speaker whose segment overlaps the disputed span the most. The
-    ``speaker`` key is omitted when no speaker segment overlaps, so downstream
-    formatters can render the label only when it is actually known.
+    ``speaker`` key is omitted when no speaker segment overlaps.
 
     The adjudicated verdicts are spliced INTO decode A's sentence segments
-    (full coverage), so the transcript files stay whole instead of
-    collapsing to the disputed fragments. With zero disputed spans the
-    output text is byte-identical to decode A's.
+    (full coverage); with zero disputed spans the output text is
+    byte-identical to decode A's.
     """
     base = result_a or result_b
     if base is None:
@@ -310,23 +308,20 @@ def transcribe_file(
     """Run the full consensus pipeline over one audio file.
 
     Args:
-        path: Path to the audio file (any ffmpeg-readable container).
-        config_path: Optional user config file with an ``[llm]`` section.
-            When omitted, ``~/.config/vemoizer/config.toml`` and
-            ``~/.vemoizer.toml`` are probed; when no config is found the LLM
-            stage is skipped (fail-open).
-        diarize: When True, run the pyannote speaker-diarization stage
-            (opt-in, off by default) and label each disputed segment with
-            the speaker whose segment overlaps it the most. Any diarization
-            failure (missing token, model unavailable, inference error) is
-            swallowed: the run continues without speaker labels (fail-open).
+        path: Audio file path (any ffmpeg-readable container).
+        config_path: Optional ``[llm]`` config file; omitted → layered
+            search (``~/.vemoizer``, legacy paths), fail-open.
+        diarize: Run the pyannote diarization stage (opt-in, off by
+            default) and label each disputed segment with the speaker whose
+            segment overlaps it the most; any failure is swallowed
+            (fail-open, no speaker labels).
 
     Returns:
         ``{"text": str, "segments": list[dict]}`` — the full transcript
-        (decode A preferred) plus one segment per disputed span with its
-        adjudicated text. Each segment dict gains an optional ``speaker``
-        key when the diarization stage was enabled and produced a matching
-        speaker for that span.
+        (decode A preferred) plus one segment per disputed span, each with
+        an optional ``speaker`` key when diarization labelled it. M6 also
+        returns ``duration_s`` (decoded-audio seconds, never ffprobe) and
+        ``language`` (``"fi"`` / ``"en"`` from the config layer).
     """
     if profile not in PROFILES:
         known = ", ".join(PROFILES)
@@ -349,6 +344,12 @@ def transcribe_file(
     )
 
     llm_config = load_default_config(config_path)
+    # M6 (issue #75): duration (decoded-audio, never ffprobe) and section
+    # language ride on the run dict — format_md / the report read them.
+    result: dict[str, Any] = {
+        "duration_s": len(audio) / SAMPLE_RATE,
+        "language": _normalize_language(load_language(config_path)),
+    }
     logger.info(
         "LLM adjudication: %s", "configured" if llm_config is not None else "disabled"
     )
@@ -424,20 +425,20 @@ def transcribe_file(
     # still ship the merged slices.
     if result_a is None:
         logger.error("decode A produced no output for any of %d slices", len(slices))
-        return {
-            "text": "",
-            "segments": [],
-            "error": (
-                "decode A produced no output for any of "
-                + str(len(slices))
-                + " slices (model may have failed to load)"
-            ),
-        }
+        result["text"] = ""
+        result["segments"] = []
+        result["error"] = (
+            "decode A produced no output for any of "
+            + str(len(slices))
+            + " slices (model may have failed to load)"
+        )
+        return result
 
     logger.info("assemble: adjudicating spans")
-    result = _assemble(
+    assembled = _assemble(
         result_a, result_b, redecoded, llm_config, speaker_segments, spans=spans
     )
+    result.update(assembled)
     if corrections and result.get("paragraphs"):
         # Deterministic known-garble replacement: "Blacksit" -> "Flagship"
         # must never depend on a model's judgment.
@@ -471,7 +472,6 @@ def transcribe_file(
         repair_paragraphs_fn=repair_paragraphs,
         llm_client_cls=LLMClient,
     )
-
     logger.info(
         "transcribe: done in %s — %d chars, %d segments",
         format_duration(time.monotonic() - run_start),

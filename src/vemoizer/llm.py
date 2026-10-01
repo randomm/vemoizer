@@ -450,6 +450,36 @@ def _default_search(
     return _legacy_search(legacy_paths)
 
 
+def load_language(path: str | None = None) -> str:
+    """The section-language setting (``"fi"`` / ``"en"``) for one run.
+
+    M6 (issue #75): the Markdown header and the end-of-run report render
+    their headings in the configured language. The value is a top-level
+    ``language = "fi" | "en"`` key in the project/global config layer
+    (M2), with ``"fi"`` as the default. Same seam as
+    :func:`load_default_config`: an explicit path is read directly (the
+    ``"os.devnull"`` sentinel yields the default); otherwise the nearest
+    ``./.vemoizer/config.toml`` (walk-up) is read, falling back to the
+    default. Missing files, unparseable TOML, and absent/non-string values
+    all yield ``"fi"`` — the language is cosmetic, so the read is
+    fail-open, never an error.
+    """
+    if path is not None and path != DEVNULL_SENTINEL:
+        raw = _read_toml(Path(path))
+    elif path is not None:
+        # "os.devnull" sentinel: no config at all → default.
+        return "fi"
+    else:
+        candidate = _find_nearest_vemoizer_config(Path.cwd())
+        raw = _read_toml(candidate) if candidate is not None else None
+    if not isinstance(raw, dict):
+        return "fi"
+    value = raw.get("language")
+    if not isinstance(value, str):
+        return "fi"
+    return "en" if value.strip().lower() == "en" else "fi"
+
+
 def load_default_config(path: str | None = None) -> LLMConfig | None:
     """Load LLM config from *path* or the layered search.
 

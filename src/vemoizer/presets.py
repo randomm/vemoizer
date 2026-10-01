@@ -114,6 +114,18 @@ class RunOptions:
         )
 
 
+def _normalize_language(language: str) -> str:
+    """Coerce a config ``language`` value to ``"fi"`` or ``"en"``.
+
+    ``"en"`` (case-insensitive) selects the English heading language; any
+    other value (including the default ``"fi"`` and malformed input) is
+    Finnish. The M2 config layer (``llm.load_language``) is the only
+    producer; the md header and the end-of-run report both read the
+    normalized value off the run dict (issue #75, M6).
+    """
+    return "en" if str(language).strip().lower() == "en" else "fi"
+
+
 def _split_terms(terms: list[str]) -> tuple[list[str], list[str]]:
     """Split merged terms into (whisper prompt terms, LLM-only terms).
 

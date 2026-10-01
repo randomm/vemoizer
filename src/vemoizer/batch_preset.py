@@ -146,6 +146,14 @@ def _run_preset_groups(
     from vemoizer.sidecar import resolve_run_glossary_files
 
     gfiles = resolve_run_glossary_files(command, options.glossary_path)
+    # M6 (issue #75): the report-only glossary provenance, stashed on each
+    # group's run dict before the seam writes (see run_preset's plain loop
+    # for the full contract).
+    glossary_terms = list(options.whisper_prompt) + ["@" + t for t in options.llm_terms]
+    if gfiles:
+        glossary_source = ", ".join(gfiles) + f" ({len(glossary_terms)} terms)"
+    else:
+        glossary_source = None
 
     def write_group(label: Path | str, result: dict[str, Any]) -> None:
         # One dated pair per group. The date is the first part's mtime
@@ -171,6 +179,12 @@ def _run_preset_groups(
             glossary_files=gfiles,
             source_paths=parts,
         )
+        # M6: stash the glossary provenance (report-only; the run dict is
+        # the interface — never stored on the pipeline result, which
+        # transcribe_file never sees).
+        if glossary_source is not None:
+            result["glossary_source"] = glossary_source
+            result["glossary_terms"] = glossary_terms
         # The first part's path: the label's own path (single-part) or its
         # first name resolved against the original files (the group is
         # built over natural_sort(files), so the first part is a member).
@@ -421,6 +435,21 @@ def run_preset(
                     glossary_files=gfiles,
                     source_paths=[file],
                 )
+                # M6 (issue #75): stash the report-only glossary provenance
+                # before the seam writes. Source = the real layer file path(s)
+                # the run read (never the composed temp file — deleted in the
+                # finally) or the explicit --glossary; term count = the
+                # resolved merged terms (whisper prompt + @-LLM terms). Absent
+                # when the run read no glossary at all — then the md header
+                # and the report omit the line, never a blank one.
+                if gfiles:
+                    result["glossary_source"] = (", ".join(gfiles)) + (
+                        f" ({len(options.whisper_prompt) + len(options.llm_terms)}"
+                        " terms)"
+                    )
+                    result["glossary_terms"] = list(options.whisper_prompt) + [
+                        "@" + t for t in options.llm_terms
+                    ]
                 pair = _write_preset_output(
                     result,
                     first_stem,

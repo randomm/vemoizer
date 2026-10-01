@@ -253,6 +253,65 @@ absent) plus the paragraphed, speaker-labelled transcript. Subtitle cue timestam
 1-based), VTT uses `HH:MM:SS.mmm -->` (dot) under a `WEBVTT` header.
 Filenames are NFC-normalized (macOS APFS stores NFD).
 
+#### 12b. M6 reader-ready Markdown and quality report (issue #75)
+
+The `md` format is the reader-facing deliverable. M6 adds, all via the
+run dict (the seam the CLI/batch layer controls — `format_md` stays a
+pure function of the dict):
+
+- **Header block above `# {title}`** — date, duration
+  (`[hh:mm:ss]`, from `transcript["duration_s"]`), parts count (from
+  `part_markers`), a speaker legend with talk share (derived from
+  `transcript["paragraphs"]` start/end/speaker), and glossary
+  provenance (`transcript["glossary_source"]`). Each line is omitted
+  when its input is absent.
+- **`[hh:mm:ss]` per-paragraph prefix** — from `para["start"]`; omitted
+  when the key is missing (no placeholder).
+- **Labelled suspect prefix** — `suspect="garble"` → `⚠ epäselvä`,
+  `suspect="number"` → `⚠ luku` (replaces the old bare `⚠ ` prefix).
+- **Section language** — `format_md(transcript, language=...)` selects
+  Finnish (default) or English headings; the value rides on the run
+  dict as `transcript["language"]` (loaded by
+  `llm.load_language` from the config layer's top-level `language`
+  key, `"fi"` default).
+- **`<details>` quality-report block** — the string stored on
+  `transcript["quality_report"]` (computed by the CLI/batch layer via
+  `report.build_quality_report` BEFORE the destructive
+  `result.pop("warnings")`) renders after the transcript section;
+  absent/empty → no block (fail-open).
+
+**Run-dict keys added by the pipeline** (`transcribe_file`, stage 10):
+`duration_s` (decoded-audio seconds, `len(audio) / SAMPLE_RATE` — never
+ffprobe) and `language` (`"fi"` / `"en"`). The gate resolution for the
+original "pipeline.py is not touched" constraint is superseded: the
+decoded audio exists only inside `transcribe_file`, so the duration rides
+on the dict rather than being passed as a parameter.
+
+**Run-dict keys added by the batch layer** (`batch_output` / 
+`batch_preset`): `glossary_source` (the real layer file path(s) the run
+read, `"<paths> (N terms)"` — report/header provenance only, never
+stored by the pipeline) and `glossary_terms` (the resolved merged terms,
+popped by `batch_output._process_result` before output writing so it is
+the report's matching input, never mirrored into an output file).
+
+**The quality report** (`src/vemoizer/report.py`, `render_report` /
+`build_quality_report`) is a pure function of the run dict plus
+`diarize_requested` and the glossary provenance — it is NOT an output
+format (not in `OUTPUT_FORMATS`). The batch layer computes it per file
+BEFORE `_check_result` pops `result["warnings"]` (a report computed
+after the pop would see an empty warnings list), stores it on
+`transcript["quality_report"]` (the `md` embeds it as the `<details>`
+block), and prints it to stdout (suppressed by `--quiet`; still printed
+when `--format` excludes `md`). A report failure never breaks the md
+write (fail-open, invariant #5).
+
+**Warnings pre-pop contract** (issue #75): `batch_output._check_result`
+owns the `result.pop("warnings", [])` + stderr print for every batch
+path (expert `transcribe`, `run_batch` groups, the preset plain loop).
+The quality report is computed from the warnings list BEFORE that pop
+(`_render_quality_report` in `batch_output`), so the report's warnings
+section is populated in every real run.
+
 ### 12a. M5a JSON sidecar keys (issue #89)
 
 The dated `.json` written next to the `.md` by the `meeting` and `memo`
@@ -594,6 +653,7 @@ the API key. The key itself is never stored in the repo or the config file
 | `llm.model` | model ID to request |
 | `llm.api_key_env` | environment variable name holding the API key |
 | `llm.timeout_seconds` | request timeout; must be set (unset = hang) |
+| `language` | section language for the Markdown header and quality report: `"fi"` (default) or `"en"` (top-level key, issue #75) |
 
 When no config exists or the endpoint fails, every LLM call fails open and
 the un-adjudicated transcript is returned.

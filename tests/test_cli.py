@@ -585,3 +585,86 @@ def test_empty_then_healthy_batch_continues_and_exits_nonzero(
     # The healthy second file WAS written and its success line printed.
     assert (tmp_path / "b.txt").is_file()
     assert "wrote transcript for b.m4a" in result.stdout
+
+
+# -- M6 quality report wire (issue #75) ----------------------------------
+#
+# The quality report is computed per file by batch_output BEFORE the
+# warnings pop, printed to stdout (suppressed by --quiet), and still
+# printed when --format excludes md.
+
+
+def _report_result() -> dict:
+    """A result with a speaker and a warning → a non-empty report."""
+    return {
+        "text": "moikka maailma",
+        "segments": [
+            {"start": 0.0, "end": 1.0, "text": "moikka maailma", "speaker": "S1"}
+        ],
+        "paragraphs": [
+            {"start": 0.0, "end": 1.0, "text": "moikka maailma", "speaker": "S1"}
+        ],
+        "warnings": ["diarization failed; continuing without speaker labels"],
+    }
+
+
+def test_report_printed_per_file(tmp_path, monkeypatch) -> None:
+    """The quality report is printed to stdout after the wrote line."""
+    import vemoizer.pipeline as pipeline_module
+
+    monkeypatch.setattr(
+        pipeline_module, "transcribe_file", lambda path, **kw: _report_result()
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["transcribe", "a.m4a", "--format", "txt"])
+    assert result.exit_code == 0
+    # The report's speakers line is on stdout.
+    assert "Puhujat: 1 (S1)" in result.stdout
+    # And the warnings classification line too.
+    assert "diarization" in result.stdout
+
+
+def test_report_suppressed_by_quiet(tmp_path, monkeypatch) -> None:
+    """--quiet suppresses the report (and the wrote line)."""
+    import vemoizer.pipeline as pipeline_module
+
+    monkeypatch.setattr(
+        pipeline_module, "transcribe_file", lambda path, **kw: _report_result()
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["transcribe", "a.m4a", "--format", "txt", "--quiet"])
+    assert result.exit_code == 0
+    assert "Puhujat: 1 (S1)" not in result.stdout
+    assert "wrote transcript" not in result.stdout
+
+
+def test_report_printed_when_format_excludes_md(tmp_path, monkeypatch) -> None:
+    """The report is printed even when --format excludes md (txt only)."""
+    import vemoizer.pipeline as pipeline_module
+
+    monkeypatch.setattr(
+        pipeline_module, "transcribe_file", lambda path, **kw: _report_result()
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["transcribe", "a.m4a", "--format", "txt"])
+    assert result.exit_code == 0
+    assert "Puhujat: 1 (S1)" in result.stdout
+
+
+def test_report_computed_before_warnings_pop(tmp_path, monkeypatch) -> None:
+    """The report sees the warnings list BEFORE _check_result pops it.
+
+    A result with a diarization warning must produce a report that
+    classifies it — if the report were computed after the pop, the
+    warnings section would be empty."""
+    import vemoizer.pipeline as pipeline_module
+
+    monkeypatch.setattr(
+        pipeline_module, "transcribe_file", lambda path, **kw: _report_result()
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["transcribe", "a.m4a", "--format", "txt"])
+    assert result.exit_code == 0
+    # The report's warnings section must be populated (proves the report
+    # ran before the pop consumed the list).
+    assert "Varoitukset (diarization):" in result.stdout
