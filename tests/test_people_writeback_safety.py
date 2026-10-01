@@ -17,7 +17,8 @@ from typing import Any
 import pytest
 from _cli_helpers import isolate_home
 
-from vemoizer.names_cli import _write_people_list, run_names
+from vemoizer.names_cli import run_names
+from vemoizer.people_config import write_people_list
 
 # --- Helpers ---
 
@@ -86,7 +87,7 @@ def _warning_lines(stderr_text: str) -> list[str]:
     ]
 
 
-# --- _write_people_list direct: unparseable existing config ---
+# --- write_people_list direct: unparseable existing config ---
 
 
 class TestWritePeopleListDirect:
@@ -101,7 +102,7 @@ class TestWritePeopleListDirect:
         config.write_text(broken, encoding="utf-8")
         before = config.read_bytes()
 
-        rc, stderr = _capture_stderr(_write_people_list, config, ["Mikko"])
+        rc, stderr = _capture_stderr(write_people_list, config, ["Mikko"])
 
         assert rc is None
         assert config.read_bytes() == before
@@ -119,7 +120,7 @@ class TestWritePeopleListDirect:
         raw = b"people = [\xff\xfe\x00broken\n"
         config.write_bytes(raw)
 
-        rc, stderr = _capture_stderr(_write_people_list, config, ["Mikko"])
+        rc, stderr = _capture_stderr(write_people_list, config, ["Mikko"])
 
         assert rc is None
         assert config.read_bytes() == raw
@@ -136,7 +137,7 @@ class TestWritePeopleListDirect:
         config = tmp_path / "isolated" / "config.toml"
         assert not config.exists()
 
-        rc, stderr = _capture_stderr(_write_people_list, config, ["Mikko", "Aino"])
+        rc, stderr = _capture_stderr(write_people_list, config, ["Mikko", "Aino"])
 
         assert rc is None
         assert config.is_file()
@@ -155,7 +156,7 @@ class TestWritePeopleListDirect:
             encoding="utf-8",
         )
 
-        _write_people_list(config, ["Mikko"])
+        write_people_list(config, ["Mikko"])
 
         loaded = tomllib.loads(config.read_text(encoding="utf-8"))
         assert loaded == {

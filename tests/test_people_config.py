@@ -38,12 +38,11 @@ import pytest
 from _cli_helpers import isolate_home
 
 from vemoizer.llm import ConfigError, _default_search, load_default_config
-from vemoizer.names_cli import (
-    _find_people_config_path,
-    _install_completer,
-    _read_people_list,
-    _write_people_list,
-    run_names,
+from vemoizer.names_cli import _install_completer, run_names
+from vemoizer.people_config import (
+    find_people_config_path,
+    read_people_list,
+    write_people_list,
 )
 
 #: A minimal valid ``[llm]`` section (mirrors test_config_search).
@@ -198,7 +197,7 @@ class TestLayeredRead:
         """Nearest project config is returned when it exists."""
         p = _project_config(tmp_path)
         p.write_text('people = ["A"]\n', encoding="utf-8")
-        assert _find_people_config_path(cwd=tmp_path, home=tmp_path / "home") == p
+        assert find_people_config_path(cwd=tmp_path, home=tmp_path / "home") == p
 
     def test_people_project_beats_home(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -211,19 +210,19 @@ class TestLayeredRead:
         home_cfg.parent.mkdir(parents=True)
         home_cfg.write_text('people = ["Home"]\n', encoding="utf-8")
 
-        assert _read_people_list(_find_people_config_path()) == ["Proj"]
+        assert read_people_list(find_people_config_path()) == ["Proj"]
 
     def test_missing_config_empty_list(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``_read_people_list(None)`` -> empty list (fail-open). This is
+        """``read_people_list(None)`` -> empty list (fail-open). This is
         the fail-open contract: when no config path is found, reading yields
         an empty list with no error (the project/home layer search is
         covered by the other layer tests, which pin home/cwd explicitly)."""
         isolate_home(monkeypatch, tmp_path, tmp_path)
-        assert _read_people_list(None) == []
+        assert read_people_list(None) == []
         # A non-existent path is equally fail-open.
-        assert _read_people_list(tmp_path / "does-not-exist" / "config.toml") == []
+        assert read_people_list(tmp_path / "does-not-exist" / "config.toml") == []
 
     def test_non_list_people_fail_open(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -232,7 +231,7 @@ class TestLayeredRead:
         isolate_home(monkeypatch, tmp_path, tmp_path)
         p = _project_config(tmp_path)
         p.write_text('people = "Mikko"\n', encoding="utf-8")
-        assert _read_people_list(p) == []
+        assert read_people_list(p) == []
 
     def test_non_string_list_items_filtered(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -241,7 +240,7 @@ class TestLayeredRead:
         isolate_home(monkeypatch, tmp_path, tmp_path)
         p = _project_config(tmp_path)
         p.write_text("people = [1, 2]\n", encoding="utf-8")
-        assert _read_people_list(p) == []
+        assert read_people_list(p) == []
 
     def test_invalid_toml_fail_open(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -250,7 +249,7 @@ class TestLayeredRead:
         isolate_home(monkeypatch, tmp_path, tmp_path)
         p = _project_config(tmp_path)
         p.write_text("people = [\n", encoding="utf-8")
-        assert _read_people_list(p) == []
+        assert read_people_list(p) == []
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +265,7 @@ class TestWriteBack:
         top-level people key; it round-trips through tomllib."""
         isolate_home(monkeypatch, tmp_path, tmp_path)
         p = _project_config(tmp_path)
-        _write_people_list(p, ["Mikko", "Aino"])
+        write_people_list(p, ["Mikko", "Aino"])
         with p.open("rb") as f:
             raw = tomllib.load(f)
         assert raw == {"people": ["Mikko", "Aino"]}
@@ -278,7 +277,7 @@ class TestWriteBack:
         isolate_home(monkeypatch, tmp_path, tmp_path)
         p = _project_config(tmp_path)
         p.write_text(_VALID_SECTION, encoding="utf-8")
-        _write_people_list(p, ["Mikko"])
+        write_people_list(p, ["Mikko"])
         with p.open("rb") as f:
             raw = tomllib.load(f)
         assert raw["people"] == ["Mikko"]
@@ -305,7 +304,7 @@ class TestWriteBack:
             'people = ["old"]\n',
             encoding="utf-8",
         )
-        _write_people_list(p, ["a", "b"])
+        write_people_list(p, ["a", "b"])
         with p.open("rb") as f:
             raw = tomllib.load(f)
         # Exactly one top-level people, and [llm] no longer has a people key.
@@ -329,11 +328,11 @@ class TestWriteBack:
         isolate_home(monkeypatch, tmp_path, tmp_path)
         p = _project_config(tmp_path)
         p.write_text('people = ["Mikko"]\n', encoding="utf-8")
-        existing = _read_people_list(p)
+        existing = read_people_list(p)
         name = "Mikko"  # already present, different case below
         if name.lower() not in [x.lower() for x in existing]:
             existing.append(name)
-        _write_people_list(p, existing)
+        write_people_list(p, existing)
         with p.open("rb") as f:
             raw = tomllib.load(f)
         assert raw["people"] == ["Mikko"]
