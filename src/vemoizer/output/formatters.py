@@ -184,6 +184,22 @@ def format_json(transcript: dict[str, Any]) -> str:
     # the mirror-present-keys behaviour of the optional fields above.
     if "part_markers" in transcript and transcript["part_markers"]:
         out["part_markers"] = transcript["part_markers"]
+    # M5a (issue #89): the meeting/memo sidecar keys. Built by the preset
+    # write seam (vemoizer.sidecar.build_sidecar) onto the result before it
+    # reaches format_json, so they land in the .json next to the .md. Each
+    # is mirrored only when present, so the expert `transcribe` JSON (which
+    # never carries them) and old .json files without the keys are
+    # unaffected — no regeneration of the golden fixture required. No
+    # `clips` key is ever emitted here.
+    if transcript.get("notes"):
+        out["notes"] = transcript["notes"]
+    if isinstance(transcript.get("source"), list) and transcript["source"]:
+        out["source"] = transcript["source"]
+    if isinstance(transcript.get("options"), dict) and transcript["options"]:
+        out["options"] = transcript["options"]
+    sn = transcript.get("speaker_names")
+    if isinstance(sn, dict) and sn:
+        out["speaker_names"] = sn
     return json.dumps(out, ensure_ascii=False, indent=2) + "\n"
 
 

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,7 @@ import typer
 
 from vemoizer.batch_output import PRESET_FORMATS, _check_result, _write_preset_output
 from vemoizer.diarization import SpeakerCount
+from vemoizer.ingest import IngestError
 from vemoizer.llm import ConfigError
 from vemoizer.output.naming import nfc_stem_and_suffix
 from vemoizer.presets import RunOptions, resolve_options
@@ -105,24 +107,6 @@ def _transcribe_preset_file(
         return None
 
 
-def _first_part_path(label: Path | str, files: list[Path]) -> Path:
-    """The first part's path for a group label.
-
-    A single-part group's label IS the part's path (``run_batch`` passes
-    the group's ``Path``). A multi-part label joins part filenames with
-    '+'; the first part is matched by name against the original
-    *files* list (the group is built over ``natural_sort(files)``, so
-    the first part is always a member of *files*).
-    """
-    if isinstance(label, Path):
-        return label
-    first_name = label.split("+", 1)[0]
-    for f in files:
-        if f.name == first_name:
-            return f
-    return Path(first_name)
-
-
 def _run_preset_groups(
     files: list[Path],
     options: RunOptions,
@@ -135,6 +119,7 @@ def _run_preset_groups(
     print_fn: Callable[[str], None] | None,
     tty_isatty: Callable[[], bool] | None,
     effective_glossary: str | None,
+    command: str,
 ) -> int:
     """The meeting 2+ files path: the M3 flow via ``run_batch``.
 
@@ -155,12 +140,40 @@ def _run_preset_groups(
 
     written: list[str] = []
     exit_code = 0
+    # M5a: the real glossary files the run read (never the composed temp
+    # file — it is deleted in run_preset's finally).
+    from vemoizer.sidecar import resolve_run_glossary_files
+
+    gfiles = resolve_run_glossary_files(command, options.glossary_path)
 
     def write_group(label: Path | str, result: dict[str, Any]) -> None:
         # One dated pair per group. The date is the first part's mtime
         # (group[0] in natural-sort order); the fallback stem is the
         # same first part's stem (mirrors the plain loop's files[0]).
-        first = _first_part_path(label, files)
+        # M5a: stash the group's per-part PCM durations (fail-open) and
+        # the real per-part source paths, then build the sidecar keys
+        # before the seam writes the .md + .json pair.
+        from vemoizer.sidecar import (
+            build_sidecar,
+            group_durations,
+            group_part_paths,
+        )
+
+        parts = group_part_paths(label, files)
+        with suppress(
+            OSError, IngestError
+        ):  # fail-open: skip durations on ffmpeg error
+            result["_source_durations"] = group_durations(parts)
+        build_sidecar(
+            result,
+            command=command,
+            glossary_files=gfiles,
+            source_paths=parts,
+        )
+        # The first part's path: the label's own path (single-part) or its
+        # first name resolved against the original files (the group is
+        # built over natural_sort(files), so the first part is a member).
+        first = parts[0]
         stem, _ = nfc_stem_and_suffix(first)
         pair = _write_preset_output(
             result,
@@ -357,6 +370,7 @@ def run_preset(
                 print_fn=print_fn,
                 tty_isatty=tty_isatty,
                 effective_glossary=effective_glossary,
+                command=command,
             )
 
         # Plain per-file loop: single file (either preset), memo (always),
@@ -368,6 +382,10 @@ def run_preset(
         first_stem, _ = nfc_stem_and_suffix(files[0])
         exit_code = 0
         written: list[str] = []
+        # M5a: the glossary files the run used (for the sidecar hash).
+        from vemoizer.sidecar import resolve_run_glossary_files
+
+        gfiles = resolve_run_glossary_files(command, options.glossary_path)
         with caffeinate_context():
             for file in files:
                 result = _transcribe_preset_file(file, options, effective_glossary)
@@ -382,6 +400,20 @@ def run_preset(
                 ):
                     exit_code = 1
                     continue
+                # M5a: stash this file's PCM duration (fail-open) and
+                # build the sidecar keys before the seam writes the
+                # .md + .json pair.
+                from vemoizer.ingest import pcm_duration_seconds
+                from vemoizer.sidecar import build_sidecar
+
+                with suppress(OSError, IngestError):  # fail-open: skip on ffmpeg error
+                    result["_source_durations"] = [pcm_duration_seconds(file)]
+                build_sidecar(
+                    result,
+                    command=command,
+                    glossary_files=gfiles,
+                    source_paths=[file],
+                )
                 pair = _write_preset_output(
                     result,
                     first_stem,

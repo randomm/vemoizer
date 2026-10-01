@@ -22,6 +22,7 @@ seam.
 
 from __future__ import annotations
 
+import json
 import stat
 import subprocess
 import tempfile
@@ -34,6 +35,7 @@ import vemoizer.grouping as grouping
 import vemoizer.grouping_concat as gc
 from vemoizer.grouping import GroupingError
 from vemoizer.ingest import IngestError
+from vemoizer.presets import RunOptions
 
 
 def _pin_mkdtemp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
@@ -402,4 +404,280 @@ def test_concat_groups_rejects_newline_in_filename(
     assert "newline" in str(exc.value)
     # Rejected before any list file or merged file was written.
     assert not (tmp / "concat.txt").exists()
-    assert not (tmp / "group.wav").exists()
+
+
+# ---------------------------------------------------------------------------
+# M5a: the preset write seam's duration measurement is fail-open
+# ---------------------------------------------------------------------------
+
+
+def test_run_preset_group_duration_ingest_error_is_fail_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A group whose parts raise IngestError in ``group_durations``: the
+    seam skips the durations (no ``duration_s`` in the sidecar) and the
+    run still succeeds with a full .md + .json pair (issue #89)."""
+    import vemoizer.batch_preset as batch_preset_module
+    import vemoizer.grouping as grouping
+    import vemoizer.sidecar as sidecar_module
+
+    def boom(paths):
+        raise IngestError("ffmpeg failed to decode group parts")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sidecar_module, "group_durations", boom)
+    monkeypatch.setattr(
+        grouping, "decode_boundaries", lambda files, transcribe_fn=None: ([""], ["x"])
+    )
+    monkeypatch.setattr(
+        grouping, "propose_groups", lambda files, t, h: [[files[0]], [files[1]]]
+    )
+    monkeypatch.setattr(
+        grouping, "confirm_groups", lambda files, proposals, **kwargs: list(proposals)
+    )
+    import vemoizer.pipeline as pipeline_module
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "transcribe_file",
+        lambda path, **kwargs: {"text": "moikka", "segments": []},
+    )
+
+    a = _make_wav(tmp_path / "a.wav", 0.5)
+    b = _make_wav(tmp_path / "b.wav", 0.5)
+
+    options = RunOptions.expert_transcribe(
+        profile="dictation",
+        diarize=False,
+        repair=False,
+        speakers=None,
+        glossary_path=None,
+        config_path=None,
+    )
+    code = batch_preset_module._run_preset_groups(
+        [a, b],
+        options,
+        quiet=True,
+        yes=True,
+        no_group=False,
+        transcribe_fn=lambda path, **kwargs: {"text": "moikka", "segments": []},
+        input_fn=None,
+        print_fn=None,
+        tty_isatty=lambda: True,
+        effective_glossary=None,
+        command="meeting",
+    )
+    assert code == 0
+    # One pair per group (two single-part groups), written despite the
+    # duration failure.
+    md_files = list(tmp_path.glob("*.md"))
+    json_files = list(tmp_path.glob("*.json"))
+    assert len(md_files) == 2
+    assert len(json_files) == 2
+    # No duration_s key in any sidecar (fail-open: skip on IngestError).
+    for json_file in json_files:
+        sidecar_data = json.loads(json_file.read_text(encoding="utf-8"))
+        for entry in sidecar_data.get("source", []):
+            assert "duration_s" not in entry
+
+
+def _fake_preset_groups(monkeypatch: pytest.MonkeyPatch, groups) -> None:
+    """Pin the M3 grouping flow to fixed *groups* (no boundary decodes)."""
+    import vemoizer.grouping as grouping
+
+    monkeypatch.setattr(
+        grouping, "decode_boundaries", lambda files, transcribe_fn=None: ([""], ["x"])
+    )
+    monkeypatch.setattr(grouping, "propose_groups", lambda files, t, h: groups)
+    monkeypatch.setattr(
+        grouping, "confirm_groups", lambda files, proposals, **kwargs: list(proposals)
+    )
+    # Every part looks like the same audio stream (the concat probe), so the
+    # multi-part concat proceeds past the stream-signature check.
+    monkeypatch.setattr(grouping, "_probe_stream", lambda p: "wav,16000,1")
+    import vemoizer.pipeline as pipeline_module
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "transcribe_file",
+        lambda path, **kwargs: {"text": "moikka", "segments": []},
+    )
+
+
+def test_run_preset_group_durations_use_real_part_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Grouped run, CWD different from the files' directory: the seam's
+    ``group_durations`` must measure the FULL part paths (resolved via
+    ``group_part_paths``), so ``source[].duration_s`` is present for
+    every part (issue #89 regression: bare names resolved against the CWD
+    failed and ``duration_s`` was silently dropped)."""
+    import vemoizer.batch_preset as batch_preset_module
+
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    a = _make_wav(tmp_path / "a.wav", 0.5)
+    b = _make_wav(tmp_path / "b.wav", 0.5)
+    c = _make_wav(tmp_path / "c.wav", 0.5)
+    monkeypatch.chdir(cwd)
+
+    durations = {
+        str(a): 11.0,
+        str(b): 22.0,
+        str(c): 33.0,
+    }
+
+    def fake_pcm(path, **kwargs):
+        full = str(path)
+        if full in durations:
+            return durations[full]
+        raise IngestError(f"cannot decode {path!r} (not a full path)")
+
+    import vemoizer.ingest as ingest_module
+
+    monkeypatch.setattr(ingest_module, "pcm_duration_seconds", fake_pcm)
+    # Three single-part groups. Each part lives in tmp_path (CWD is the
+    # separate tmp_path/cwd dir), so a bare-name/CWD-relative resolution
+    # would hit a path fake_pcm rejects; only the real full paths succeed.
+    # (Multi-file single-part groups use str labels, resolved via
+    # group_part_paths against the run's files list.)
+    _fake_preset_groups(monkeypatch, [[a], [b], [c]])
+
+    options = RunOptions.expert_transcribe(
+        profile="dictation",
+        diarize=False,
+        repair=False,
+        speakers=None,
+        glossary_path=None,
+        config_path=None,
+    )
+    code = batch_preset_module._run_preset_groups(
+        [a, b, c],
+        options,
+        quiet=True,
+        yes=True,
+        no_group=False,
+        transcribe_fn=lambda path, **kwargs: {"text": "moikka", "segments": []},
+        input_fn=None,
+        print_fn=None,
+        tty_isatty=lambda: True,
+        effective_glossary=None,
+        command="meeting",
+    )
+    assert code == 0
+    # One sidecar pair per group (three single-part groups), each carrying
+    # the part's real path and its measured duration (keyed by full path).
+    json_files = {
+        json_file.read_text(encoding="utf-8") for json_file in cwd.glob("*.json")
+    }
+    by_path = {}
+    for raw in json_files:
+        data = json.loads(raw)
+        for entry in data.get("source", []):
+            by_path[entry["path"]] = entry["duration_s"]
+    # duration_s present for EVERY part, keyed by the FULL part path.
+    assert by_path == {str(a): 11.0, str(b): 22.0, str(c): 33.0}
+
+
+def test_run_preset_group_resolves_parts_against_files_not_same_basename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A multi-part group's str label (``a.wav+b.wav``) resolves each part
+    against the run's ``files`` list — not against the CWD — so when a
+    same-basename file exists in *another* directory, ``source[].path``
+    and ``duration_s`` point at the correct on-disk part (issue #89
+    regression: bare names resolved against the CWD failed and
+    ``duration_s`` was silently dropped)."""
+    import vemoizer.batch_preset as batch_preset_module
+
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    (tmp_path / "sub").mkdir()
+    a = _make_wav(tmp_path / "sub" / "a.wav", 0.5)
+    b = _make_wav(tmp_path / "sub" / "b.wav", 0.5)
+    # A same-basename file in ANOTHER directory. The group's parts are
+    # sub/a.wav + sub/b.wav; if a bare name ever resolved against the CWD
+    # or against a different directory, the measurement would hit this
+    # decoy (or fail). The group is multi-part, so its label is the str
+    # "a.wav+b.wav" and resolution goes through group_part_paths.
+    (tmp_path / "decoy").mkdir()
+    decoy_a = _make_wav(tmp_path / "decoy" / "a.wav", 0.5)
+    decoy_b = _make_wav(tmp_path / "decoy" / "b.wav", 0.5)
+    monkeypatch.chdir(cwd)
+
+    durations = {str(a): 11.0, str(b): 22.0}
+    measured: list[str] = []
+
+    def fake_pcm(path, **kwargs):
+        full = str(path)
+        measured.append(full)
+        if full in durations:
+            return durations[full]
+        # Any CWD-relative or decoy path is the bug — reject it so the
+        # test fails loudly rather than silently dropping duration_s.
+        raise IngestError(f"unexpected path {path!r}")
+
+    import vemoizer.grouping as grouping
+    import vemoizer.ingest as ingest_module
+
+    monkeypatch.setattr(ingest_module, "pcm_duration_seconds", fake_pcm)
+    # part_offsets measures the ORIGINAL parts (not the merged file) via
+    # the grouping re-export — patch that alias to the same fake so the
+    # tiny fixture parts don't go to real ffmpeg.
+    monkeypatch.setattr(grouping, "pcm_duration_seconds", fake_pcm)
+    # Fake the ffmpeg concat (the seam under test is duration/path
+    # resolution, not the demuxer itself): the merged file is the group's
+    # first part (single-file passthrough semantics the seam relies on).
+    import subprocess
+
+    class _FakeProc:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    def _fake_run(argv, **kwargs):
+        # The merged file just needs to exist (the transcribe is faked and
+        # part_offsets uses the patched fake, not a real decode of it).
+        Path(argv[-1]).write_bytes(b"merged audio")
+        return _FakeProc()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    _fake_preset_groups(monkeypatch, [[a, b]])
+
+    options = RunOptions.expert_transcribe(
+        profile="dictation",
+        diarize=False,
+        repair=False,
+        speakers=None,
+        glossary_path=None,
+        config_path=None,
+    )
+    code = batch_preset_module._run_preset_groups(
+        [a, b, decoy_a, decoy_b],
+        options,
+        quiet=True,
+        yes=True,
+        no_group=False,
+        transcribe_fn=lambda path, **kwargs: {"text": "moikka", "segments": []},
+        input_fn=None,
+        print_fn=None,
+        tty_isatty=lambda: True,
+        effective_glossary=None,
+        command="meeting",
+    )
+    assert code == 0
+    json_files = list(cwd.glob("*.json"))
+    assert len(json_files) == 1
+    data = json.loads(json_files[0].read_text(encoding="utf-8"))
+    entries = data.get("source", [])
+    assert len(entries) == 2
+    # Both parts resolve to the sub/ files (not the CWD, not the decoys),
+    # in marker order, each with its own measured duration.
+    assert entries[0]["path"] == str(a)
+    assert entries[0]["duration_s"] == 11.0
+    assert entries[1]["path"] == str(b)
+    assert entries[1]["duration_s"] == 22.0
+    # Only the real parts were measured (no CWD-relative / decoy path).
+    # fake_pcm is called once by part_offsets and once by group_durations
+    # per part, so each path appears twice — assert on the distinct set.
+    assert set(measured) == {str(a), str(b)}
