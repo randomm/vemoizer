@@ -5,7 +5,7 @@ Covers the ``people`` list-of-strings key in the layered
 
 - ``llm._strict_load`` accepts a top-level ``people`` list and ignores it
   (the value is never used by the LLM), but rejects a ``people`` table or
-  scalar (it must be a list of strings) — locking in the
+  scalar (it must be a top-level list) — locking in the
   ``_KNOWN_TOP_LEVEL_KEYS`` extension that otherwise breaks the next
   meeting run with ``ConfigError``.
 - Layered read: nearest ``./.vemoizer`` beats ``~/.vemoizer``; fail-open to
@@ -155,7 +155,7 @@ class TestStrictLoadPeople:
         assert cfg.model == "test-model"
 
     def test_people_table_raises(self, tmp_path: Path) -> None:
-        # A ``[people]`` table (a dict) is not a list of strings.
+        # A ``[people]`` table (a dict) is not a list.
         proj = tmp_path / "proj"
         proj.mkdir()
         proj_cfg = proj / ".vemoizer" / "config.toml"
@@ -171,7 +171,7 @@ class TestStrictLoadPeople:
             )
 
     def test_people_scalar_raises(self, tmp_path: Path) -> None:
-        # A scalar ``people`` is not a list of strings: strict load rejects.
+        # A scalar ``people`` is not a list: strict load rejects.
         proj = tmp_path / "proj"
         proj.mkdir()
         proj_cfg = proj / ".vemoizer" / "config.toml"

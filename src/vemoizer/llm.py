@@ -279,7 +279,8 @@ LEGACY_DEPRECATION_NOTICE: str = (
 )
 
 #: Known top-level and [llm] keys for strict validation. ``people`` is a
-#: top-level list of strings (issue #93) that ``llm`` itself ignores.
+#: top-level list (issue #93) that ``llm`` itself ignores; items that are
+#: not strings are filtered at read time, not validated here.
 _KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset({LLM_CONFIG_SECTION, "people"})
 _KNOWN_LLM_KEYS: frozenset[str] = frozenset(
     {"base_url", "model", "api_key_env", "timeout_seconds"}
@@ -372,12 +373,12 @@ def _strict_load(path: Path) -> LLMConfig:
         if key not in _KNOWN_TOP_LEVEL_KEYS:
             raise ConfigError(f"unknown top-level key or section {key!r} in {path}")
         if isinstance(value, dict):
-            # Only ``[llm]`` is a table; ``people`` must be a top-level list
-            # of strings (issue #93), not a table.
+            # Only ``[llm]`` is a table; ``people`` must be a top-level
+            # list (issue #93), not a table.
             if key != LLM_CONFIG_SECTION:
                 raise ConfigError(
                     f"top-level key {key!r} must not be a table in {path}; "
-                    "top-level 'people' must be a list of strings"
+                    "top-level 'people' must be a list"
                 )
             continue
 
@@ -390,8 +391,9 @@ def _strict_load(path: Path) -> LLMConfig:
     people = raw.get("people")
     if people is not None and not isinstance(people, list):
         # Covers both a ``[people]`` table (a dict) and a scalar value;
-        # only a top-level list of strings is valid (issue #93).
-        raise ConfigError(f"top-level 'people' must be a list of strings in {path}")
+        # only a top-level list is valid (issue #93). Items are not
+        # validated here: non-string items are filtered at read time.
+        raise ConfigError(f"top-level 'people' must be a list in {path}")
 
     for key in section:
         if key not in _KNOWN_LLM_KEYS:

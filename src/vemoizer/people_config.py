@@ -1,19 +1,30 @@
 """People-config read/write for ``vemoizer names`` (issue #93).
 
-The ``people`` list-of-strings key in the layered ``.vemoizer/config.toml``:
-layered path search, fail-open reads, and write-back that never destroys a
-config it cannot parse. Serialisation is a minimal TOML emitter for the
-round-tripped ``tomllib`` data (scalars top-level, dicts as tables).
+The ``people`` list in the layered ``.vemoizer/config.toml``: layered
+path search, fail-open reads, and write-back that never destroys a
+config it cannot parse or express. Write-back prefers a surgical text
+edit (insert a ``people = [...]`` line at the top, or replace an
+existing single-line top-level ``people`` array in place) so comments,
+blank lines, array-of-tables, dotted keys and inline tables survive
+untouched; only configs the surgical path cannot express are re-emitted
+with a minimal TOML serializer — and only if the result re-parses to
+exactly the intended data. Anything else is left byte-identical with a
+one-line warning.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
 
 import typer
+
+#: Matches a single-line top-level ``people = [...]`` array, optionally
+#: followed by whitespace and a comment, on its own line.
+_SINGLE_LINE_PEOPLE = re.compile(r"^people\s*=\s*\[[^\]]*\]\s*(#.*)?$", re.MULTILINE)
 
 
 def find_people_config_path(
@@ -49,7 +60,12 @@ def find_people_config_path(
 
 
 def read_people_list(config_path: Path | None) -> list[str]:
-    """Read the ``people`` key as a list of strings; fail-open to []."""
+    """Read the top-level ``people`` list; fail-open to ``[]``.
+
+    A top-level ``people`` that is not a list is read as ``[]``; items
+    in a list that are not strings are filtered out at read time (the
+    key itself is not validated).
+    """
     if config_path is None:
         return []
     raw, _ = _read_people_raw(config_path)
@@ -94,15 +110,19 @@ def _read_people_raw(config_path: Path) -> tuple[dict[str, Any] | None, str | No
 def write_people_list(config_path: Path, new_people: list[str]) -> None:
     """Atomically write *new_people* as the top-level ``people`` key.
 
-    All other keys are preserved verbatim. Any pre-existing ``people`` key
-    inside a table (e.g. under ``[llm]``) is dropped: a ``people`` key is
-    only valid as a top-level list of strings, and leaving a stale one would
-    make the next strict config load fail (issue #93).
+    A valid config is updated in place: the surgical text path preserves
+    every other byte (comments, blank lines, array-of-tables, dotted
+    keys, inline tables); a config the surgical path cannot express is
+    re-emitted only when the result re-parses to the intended data.
+    Any pre-existing ``people`` key inside a table (e.g. under
+    ``[llm]``) is dropped from the re-emitted text: a ``people`` key is
+    only valid top-level, and a stale nested one would fail the next
+    strict config load (issue #93).
 
-    Write-back is best-effort: an existing config that cannot be read or
-    parsed is left byte-identical with one warning line (rewriting it with
-    only ``people`` would destroy unreadable keys); a missing config is
-    still created (issue #93).
+    Best-effort: an existing config that cannot be read or parsed, or a
+    layout that cannot be expressed without data loss, is left
+    byte-identical with one warning line; a missing config is still
+    created (issue #93).
     """
     raw, exc_name = _read_people_raw(config_path)
     if exc_name is not None:
@@ -113,17 +133,90 @@ def write_people_list(config_path: Path, new_people: list[str]) -> None:
         )
         return
     if raw is None:
-        raw = {}
+        # Missing file: create it with just the people list.
+        _atomic_write(config_path, _people_line(new_people) + "\n")
+        return
 
-    for table in raw.values():
+    intended = dict(raw)
+    for table in intended.values():
         if isinstance(table, dict):
             table.pop("people", None)
-    raw["people"] = new_people
-    lines = _emit_toml(raw)
+    intended["people"] = new_people
+
+    lines = _surgical_people_edit(config_path, intended)
+    if lines is None:
+        emitted = _emit_toml(intended)
+        lines = emitted if _parses_to(emitted, intended) else None
+    if lines is None:
+        typer.echo(
+            f"warning: could not update people in {config_path}: "
+            "unsupported config layout (config left unchanged)",
+            err=True,
+        )
+        return
+    _atomic_write(config_path, lines)
+
+
+def _surgical_people_edit(config_path: Path, intended: dict[str, Any]) -> str | None:
+    """Minimal text edit that changes only the top-level ``people`` key.
+
+    Two shapes qualify, both verified by re-parsing the result and
+    requiring it to equal *intended* exactly:
+
+    - a single-line top-level ``people = [...]`` array on its own line:
+      that line is replaced in place (a trailing ``# comment`` is kept);
+    - no top-level ``people`` key: one ``people = [...]`` line is
+      inserted at the very start of the file, before any table header.
+
+    Returns the new full text, or ``None`` when no surgical edit applies
+    (multi-line people array, ``[people]`` table, scalar people, a
+    table-nested stale ``people`` that only the re-emit can drop, or a
+    re-parse mismatch).
+    """
+    text = config_path.read_text(encoding="utf-8")
+    replacement = f"people = {_toml_value(intended['people'])}"
+
+    match = _SINGLE_LINE_PEOPLE.search(text)
+    if match is not None:
+        lines = text.splitlines(keepends=True)
+        line_no = text[: match.start()].count("\n")
+        if line_no >= len(lines):
+            return None
+        kept_comment = match.group(1)
+        new_line = (
+            f"people = {_toml_value(intended['people'])}"
+            + (f" {kept_comment}" if kept_comment else "")
+            + ("\n" if lines[line_no].endswith("\n") else "")
+        )
+        lines[line_no] = new_line
+        new_text = "".join(lines)
+    else:
+        if text and not text.endswith("\n"):
+            text += "\n"
+        new_text = f"{replacement}\n{text}"
+
+    return new_text if _parses_to(new_text, intended) else None
+
+
+def _parses_to(text: str, intended: dict[str, Any]) -> bool:
+    """True when *text* parses as TOML and equals *intended* exactly."""
+    try:
+        parsed = tomllib.loads(text)
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError):
+        return False
+    return isinstance(parsed, dict) and parsed == intended
+
+
+def _atomic_write(config_path: Path, lines: str) -> None:
+    """Write *lines* atomically: tmp file in the same directory + replace."""
     tmp = config_path.with_name(f"{config_path.name}.tmp-{os.getpid()}")
     config_path.parent.mkdir(parents=True, exist_ok=True)
     tmp.write_text(lines, encoding="utf-8")
     os.replace(str(tmp), str(config_path))
+
+
+def _people_line(new_people: list[str]) -> str:
+    return "people = " + _toml_value(new_people)
 
 
 def _emit_toml(raw: dict[str, Any]) -> str:

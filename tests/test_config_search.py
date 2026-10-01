@@ -271,7 +271,7 @@ class TestStrictValidation:
         assert cfg.model == "test-model"
 
     def test_people_as_table_or_scalar_raises(self, tmp_path: Path) -> None:
-        # issue #93: ``people`` must be a top-level list of strings. A
+        # issue #93: ``people`` must be a top-level list. A
         # ``[people]`` table (a dict) and a scalar ``people`` are both
         # rejected by strict load.
         _write_section(

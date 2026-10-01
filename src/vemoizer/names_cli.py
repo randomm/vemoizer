@@ -24,11 +24,13 @@ from typing import Any
 
 import typer
 
+from vemoizer.output.naming import collision_free_path
 from vemoizer.people_config import (
     find_people_config_path,
     read_people_list,
     write_people_list,
 )
+from vemoizer.render import render_markdown
 from vemoizer.render_cli import _persist_speaker_names, _read_sidecar
 from vemoizer.speaker_clips import (
     ClipWindow,
@@ -203,22 +205,16 @@ def run_names(
     sidecar_dir = sidecar_path.parent
     cwd = Path.cwd()
     resolved_source: list[dict[str, Any]] = []
-    degraded = False
     for entry in raw_source:
-        if not isinstance(entry, dict):
-            degraded = True
-            continue
-        resolved = _resolve_source_entry(entry, sidecar_dir, cwd)
-        if resolved is not None:
-            resolved_source.append(resolved)
-        else:
-            degraded = True
+        if isinstance(entry, dict):
+            resolved = _resolve_source_entry(entry, sidecar_dir, cwd)
+            if resolved is not None:
+                resolved_source.append(resolved)
 
-    if not raw_source:
-        has_clips = False
-        degraded = True
-    else:
-        has_clips = True
+    # ``degraded`` encodes the no-clips state (True when no source entry
+    # resolved); clip playback gates on ``not degraded`` rather than a
+    # separate ``has_clips`` flag.
+    degraded = not resolved_source
 
     # --- Prompt loop (inside clip_session for temp dir cleanup) ---
     new_names: dict[str, str] = {}
@@ -247,7 +243,7 @@ def run_names(
                     typer.echo(f'  "{w.quote}"')
 
                 # Play clips (skipped under --no-play; quotes only then)
-                if has_clips and not no_play and label_clips:
+                if not degraded and not no_play and label_clips:
                     clip_map = extract_clips(resolved_source, label_clips[:3], tmp_dir)
                     for w in label_clips[:3]:
                         path = clip_map.get(w)
@@ -307,9 +303,6 @@ def run_names(
             return 1
 
         # --- Re-render Markdown ---
-        from vemoizer.output.naming import collision_free_path
-        from vemoizer.render import render_markdown
-
         markdown = render_markdown(data, corrections={}, speaker_names=new_names)
         md_path = collision_free_path(sidecar_path.parent, sidecar_path.stem, ".md")
         try:
