@@ -42,6 +42,21 @@ from vemoizer.speaker_clips import (
 )
 
 # ---------------------------------------------------------------------------
+# TTY probe (monkeypatchable seam for the meeting naming hook, issue #95)
+# ---------------------------------------------------------------------------
+
+
+def _stdout_isatty() -> bool:
+    """The hook's stdout-TTY probe.
+
+    A module global rather than an inlined ``sys.stdout.isatty()`` so the
+    end-of-meeting naming hook can gate on it and tests can monkeypatch it
+    without touching ``sys.stdout``.
+    """
+    return sys.stdout.isatty()
+
+
+# ---------------------------------------------------------------------------
 # source path resolution
 # ---------------------------------------------------------------------------
 

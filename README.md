@@ -63,6 +63,10 @@ timeout_seconds = 30
 weights: accept the license on HuggingFace and provide an access token
 before first use. Attribution is printed whenever the stage runs.
 
+An interactive `vemoizer meeting` run asks one final question at the end —
+`Name the speakers now? [y/N]` — and, on yes, names the speakers via
+`vemoizer names` on each recorded meeting.
+
 ## Commands
 
 | Task | Command |
