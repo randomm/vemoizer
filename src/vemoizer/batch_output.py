@@ -190,22 +190,30 @@ def _process_result(
     quiet: bool,
     options: RunOptions | None,
     diarize: bool | None = None,
+    copy: bool = False,
 ) -> bool:
     """One decoded result's M1 checks + output write + quiet echo.
 
     The single per-file/per-group core shared by ``transcribe_batch``
-    (options=None — ``--copy`` is honored, one ``wrote transcript`` echo
-    per file; ``diarize`` passed explicitly from the function parameter)
-    and ``run_batch``/``_run_plain`` (a ``RunOptions`` — no ``--copy`` on
-    the group path; ``diarize`` read from the options). The output target
-    mirrors the old ``_write_group_outputs`` contract: an explicit *out*
-    gets only the first format (``-`` = stdout); otherwise every format
-    is written from the first path's stem. Returns True when the result
-    passed ``_check_result`` AND every write succeeded — False means the
-    caller must set exit 1. The ``--diarize`` no-labels wording is the
-    pre-refactor wording for every path (pinned by tests); the preset
-    path (``run_preset``) keeps its own ``diarize_label="diarize"``
-    call to ``_check_result`` directly.
+    (the expert ``transcribe`` loop; ``diarize``/``copy`` come from the
+    function parameters) and ``run_batch``/``_run_plain``/``run_preset``
+    (the group/preset paths; a ``RunOptions`` is passed, ``copy`` is
+    never set, ``diarize`` is read from the options).
+
+    ``--copy`` is honored ONLY by the expert ``transcribe`` loop
+    (``copy=True``, passed by ``transcribe_batch``). The group path
+    intentionally never copies: one clipboard per group is not a
+    sensible multi-file contract, so it passes ``copy=False`` (the
+    CLI warns when ``--copy`` is combined with 2+ files).
+
+    The output target mirrors the old ``_write_group_outputs`` contract:
+    an explicit *out* gets only the first format (``-`` = stdout);
+    otherwise every format is written from the first path's stem. Returns
+    True when the result passed ``_check_result`` AND every write
+    succeeded — False means the caller must set exit 1. The ``--diarize``
+    no-labels wording is the pre-refactor wording for every path (pinned
+    by tests); the preset path (``run_preset``) keeps its own
+    ``diarize_label="diarize"`` call to ``_check_result`` directly.
     """
     effective_diarize = (
         diarize if diarize is not None else (options.diarize if options else False)
@@ -230,9 +238,9 @@ def _process_result(
         )
     if not ok:
         return False
-    if options is None:
-        # The transcribe_batch loop honors --copy (the group path does
-        # not — one clipboard per group is not a sensible contract).
+    if copy:
+        # Only the expert transcribe loop passes copy=True; the group path
+        # never copies (see docstring).
         from vemoizer.copy import copy_to_clipboard
 
         copy_to_clipboard(result["text"])

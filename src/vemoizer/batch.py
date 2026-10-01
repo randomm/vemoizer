@@ -163,27 +163,37 @@ def transcribe_batch(
                 # with run_preset: stop the batch, no sibling files.
                 typer.echo(f"error: {e}", err=True)
                 return 1
-            result = transcribe_file(
-                file,
-                diarize=diarize,
-                config_path=config_path,
-                profile=profile,
-                repair=repair,
-                glossary_path=glossary_path,
-                speakers=speakers,
-            )
+            try:
+                result = transcribe_file(
+                    file,
+                    diarize=diarize,
+                    config_path=config_path,
+                    profile=profile,
+                    repair=repair,
+                    glossary_path=glossary_path,
+                    speakers=speakers,
+                )
+            except (ConfigError, KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as e:
+                # A per-file decode/write failure is a clean one-line
+                # error (like the grouping path's _transcribe_one), not a
+                # traceback mid-batch: mark the file failed, keep going.
+                typer.echo(f"error: {file.name}: {e}", err=True)
+                exit_code = 1
+                continue
             if not _process_result(
                 file,
                 result,
                 formats=list(formats),
                 out=out,
                 quiet=quiet,
-                # options=None is the transcribe_batch path: --copy is
-                # honored here (and not on the group path). The diarize
-                # flag comes from the function parameter (not from a
-                # RunOptions), so pass it explicitly.
+                # The expert transcribe loop: --copy is honored here (the
+                # group path never copies); the diarize flag comes from the
+                # function parameter, so both are passed explicitly.
                 options=None,
                 diarize=diarize,
+                copy=copy,
             ):
                 exit_code = 1
                 continue
@@ -247,6 +257,7 @@ def _run_plain(
                 out=out,
                 quiet=quiet,
                 options=options,
+                diarize=options.diarize,
             ):
                 exit_code = 1
                 continue
@@ -430,6 +441,7 @@ def run_batch(
                 out=out,
                 quiet=quiet,
                 options=options,
+                diarize=options.diarize,
             ):
                 exit_code = 1
                 continue

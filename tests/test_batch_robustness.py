@@ -341,7 +341,13 @@ def test_process_result_writes_all_formats_and_echoes(
     label = "Uusi äänitys 425.m4a"
     result = {"text": "hei", "segments": []}
     ok = batch._process_result(
-        label, result, formats=["txt", "json"], out=None, quiet=False, options=None
+        label,
+        result,
+        formats=["txt", "json"],
+        out=None,
+        quiet=False,
+        options=None,
+        copy=False,
     )
     assert ok
     assert (tmp_path / "Uusi äänitys 425.txt").exists()
@@ -363,6 +369,7 @@ def test_process_result_out_overrides_and_first_format_only(
         out=out,
         quiet=False,
         options=None,
+        copy=False,
     )
     assert ok
     assert out.exists()
@@ -374,15 +381,22 @@ def test_process_result_stdout_target(tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.chdir(tmp_path)
     result = {"text": "hei maailma", "segments": []}
     ok = batch._process_result(
-        "x.m4a", result, formats=["txt"], out=Path("-"), quiet=False, options=None
+        "x.m4a",
+        result,
+        formats=["txt"],
+        out=Path("-"),
+        quiet=False,
+        options=None,
+        copy=False,
     )
     assert ok
     assert "hei maailma" in capsys.readouterr().out
 
 
 def test_process_result_copy_is_batch_only(tmp_path, monkeypatch) -> None:
-    """``--copy`` is honored only by transcribe_batch (options=None): the
-    clipboard seam is called there and not on the group path."""
+    """``--copy`` is honored only by transcribe_batch (``copy=True``):
+    the clipboard seam is called there and not on the group path
+    (``copy=False``)."""
     import vemoizer.copy as copy_mod
 
     copied: list[str] = []
@@ -392,13 +406,105 @@ def test_process_result_copy_is_batch_only(tmp_path, monkeypatch) -> None:
     options = _options()
     # Group path: no copy.
     ok = batch._process_result(
-        "x.m4a", result, formats=["txt"], out=None, quiet=True, options=options
+        "x.m4a",
+        result,
+        formats=["txt"],
+        out=None,
+        quiet=True,
+        options=options,
+        copy=False,
     )
     assert ok
     assert copied == []
-    # Batch path (options=None): copy.
+    # Batch path: copy.
     ok = batch._process_result(
-        "x.m4a", result, formats=["txt"], out=None, quiet=True, options=None
+        "x.m4a",
+        result,
+        formats=["txt"],
+        out=None,
+        quiet=True,
+        options=None,
+        copy=True,
     )
     assert ok
     assert copied == ["hei"]
+
+
+def test_transcribe_batch_transcribe_failure_is_clean_and_continues(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """An unexpected exception from ``transcribe_file`` in
+    ``transcribe_batch`` (first of two files) degrades to a clean one-line
+    error, exit 1, and the second file is still written — no traceback
+    (mirrors the grouping path's per-file degradation)."""
+
+    def fake_transcribe_file(path, **kwargs):
+        if path.name == "a.m4a":
+            raise RuntimeError("decoder exploded")
+        return {"text": "hei", "segments": []}
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.setattr(batch, "_resolve_llm_config", lambda p: None)
+    files = [tmp_path / "a.m4a", tmp_path / "b.m4a"]
+    _touch(files)
+    code = batch.transcribe_batch(
+        files,
+        formats=["txt"],
+        config_path=None,
+        profile="dictation",
+        repair=False,
+        glossary_path=None,
+        speakers=None,
+        diarize=False,
+        copy=False,
+    )
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "error: a.m4a: decoder exploded" in err
+    assert "Traceback" not in err
+    # The second file's output was written; the first was not.
+    assert (tmp_path / "b.txt").exists()
+    assert not (tmp_path / "a.txt").exists()
+
+
+def test_transcribe_batch_keyboard_interrupt_still_propagates(
+    tmp_path, monkeypatch
+) -> None:
+    """A ``KeyboardInterrupt`` from ``transcribe_file`` must still
+    propagate — it is not one of the per-file failures that degrade to
+    a clean error line."""
+
+    def fake_transcribe_file(path, **kwargs):
+        raise KeyboardInterrupt()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.setattr(batch, "_resolve_llm_config", lambda p: None)
+    files = [tmp_path / "a.m4a"]
+    _touch(files)
+    with pytest.raises(KeyboardInterrupt):
+        batch.transcribe_batch(
+            files,
+            formats=["txt"],
+            config_path=None,
+            profile="dictation",
+            repair=False,
+            glossary_path=None,
+            speakers=None,
+            diarize=False,
+            copy=False,
+        )
+
+
+def test_parse_partition_ambiguity_escapes_control_chars_in_stem() -> None:
+    """The ambiguity message renders each stem with ``repr``, so a stem
+    containing an ESC byte (``\x1b``) is escaped and never printed as a
+    raw control byte — repr is deliberately safer than the raw name."""
+    import vemoizer.grouping as grouping
+
+    with pytest.raises(grouping.GroupingError) as exc:
+        grouping.parse_partition("42", ["Uusi\x1b äänitys42", "B-42"])
+    msg = str(exc.value)
+    assert "\\x1b" in msg
+    assert b"\x1b" not in msg.encode("utf-8")
