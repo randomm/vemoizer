@@ -278,8 +278,9 @@ LEGACY_DEPRECATION_NOTICE: str = (
     "move it to ~/.vemoizer/config.toml"
 )
 
-#: Known top-level and [llm] keys for strict validation.
-_KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset({LLM_CONFIG_SECTION})
+#: Known top-level and [llm] keys for strict validation. ``people`` is a
+#: top-level string (issue #93) that ``llm`` itself ignores.
+_KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset({LLM_CONFIG_SECTION, "people"})
 _KNOWN_LLM_KEYS: frozenset[str] = frozenset(
     {"base_url", "model", "api_key_env", "timeout_seconds"}
 )
@@ -367,9 +368,13 @@ def _strict_load(path: Path) -> LLMConfig:
     if raw is None:
         raise ConfigError(f"config file not found or unreadable: {path}")
 
-    for key in raw:
+    for key, value in raw.items():
         if key not in _KNOWN_TOP_LEVEL_KEYS:
             raise ConfigError(f"unknown top-level key or section {key!r} in {path}")
+        if isinstance(value, dict):
+            # TOML section (e.g. [llm], or a known top-level dict such as
+            # a future table) — validated separately below when known.
+            continue
 
     section = raw.get(LLM_CONFIG_SECTION)
     if not isinstance(section, dict):
