@@ -13,6 +13,7 @@ that section).
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -61,7 +62,7 @@ def _read(home: Path, cwd: Path, legacy: tuple[Path, ...]) -> str:
     return read_people(home=lambda: home, cwd=lambda: cwd, legacy_paths=legacy)
 
 
-def _add(name: str, home: Path, cwd: Path, legacy: tuple[Path, ...]) -> Path | None:
+def _add(name: str, home: Path, cwd: Path, legacy: tuple[Path, ...]) -> Path:
     return add_person(name, home=lambda: home, cwd=lambda: cwd, legacy_paths=legacy)
 
 
@@ -102,6 +103,16 @@ class TestStrictLoadPeople:
     def test_unknown_scalar_key_still_rejected(self, tmp_path: Path) -> None:
         path = _write(tmp_path / "config.toml", "nonsense = 1\n" + _VALID_SECTION)
         with pytest.raises(ConfigError, match=r"unknown top-level"):
+            _strict_load(path)
+
+    def test_people_as_table_is_rejected(self, tmp_path: Path) -> None:
+        # A ``[people]`` section (table) is a structural error — strict
+        # load must reject it, not skip-continue it (adversarial #3).
+        path = _write(
+            tmp_path / "config.toml",
+            "[people]\nx = 1\n" + _VALID_SECTION,
+        )
+        with pytest.raises(ConfigError, match=r"must not be a table"):
             _strict_load(path)
 
 
@@ -275,6 +286,109 @@ class TestAddPerson:
         assert 'api_key_env = "TEST_KEY"' in raw
         assert "timeout_seconds = 5.0" in raw
         assert 'people = "New"' in raw
+
+
+class TestAddPersonRoundTripStructures:
+    """Write-back must be lossless for the TOML structures ``tomllib``
+    can produce: nested tables, arrays of tables, inline tables, and
+    non-ASCII or control-character string values (adversarial #1/#2).
+    """
+
+    def test_nested_table_round_trips(self, tmp_path: Path) -> None:
+        home, proj = _home_proj(tmp_path)
+        cfg_path = proj / ".vemoizer" / "config.toml"
+        _write(
+            cfg_path,
+            'people = "Mikko"\n[glossary.en-us]\nlabel = "english"\n' + _VALID_SECTION,
+        )
+
+        _add("Jonna", home, proj, _legacy(home))
+
+        with cfg_path.open("rb") as f:
+            raw = tomllib.load(f)
+        assert raw["people"] == "Jonna"
+        assert raw["glossary"]["en-us"]["label"] == "english"
+        assert raw["llm"]["model"] == "test-model"
+
+    def test_array_of_tables_round_trips(self, tmp_path: Path) -> None:
+        home, proj = _home_proj(tmp_path)
+        cfg_path = proj / ".vemoizer" / "config.toml"
+        _write(
+            cfg_path,
+            'people = "Mikko"\n[[clips]]\nlabel = "A"\n'
+            '[[clips]]\nlabel = "B"\n' + _VALID_SECTION,
+        )
+
+        _add("Jonna", home, proj, _legacy(home))
+
+        with cfg_path.open("rb") as f:
+            raw = tomllib.load(f)
+        assert raw["clips"] == [{"label": "A"}, {"label": "B"}]
+        assert raw["people"] == "Jonna"
+        assert raw["llm"]["model"] == "test-model"
+
+    def test_inline_table_round_trips(self, tmp_path: Path) -> None:
+        home, proj = _home_proj(tmp_path)
+        cfg_path = proj / ".vemoizer" / "config.toml"
+        _write(cfg_path, 'people = "Mikko"\ntags = {a = 1, b = "x"}\n' + _VALID_SECTION)
+
+        _add("Jonna", home, proj, _legacy(home))
+
+        with cfg_path.open("rb") as f:
+            raw = tomllib.load(f)
+        assert raw["tags"] == {"a": 1, "b": "x"}
+
+    def test_name_with_newline_and_tab_escapes(self, tmp_path: Path) -> None:
+        home, proj = _home_proj(tmp_path)
+        cfg_path = proj / ".vemoizer" / "config.toml"
+        _write(cfg_path, 'people = "Old"\n')
+
+        _add("Jonna\nOjala\tJr", home, proj, _legacy(home))
+
+        with cfg_path.open("rb") as f:
+            raw = tomllib.load(f)
+        assert raw["people"] == "Jonna\nOjala\tJr"
+
+    def test_name_with_backslash_and_quote_escapes(self, tmp_path: Path) -> None:
+        home, proj = _home_proj(tmp_path)
+        cfg_path = proj / ".vemoizer" / "config.toml"
+        _write(cfg_path, 'people = "Old"\n')
+
+        _add('A\\B"C', home, proj, _legacy(home))
+
+        with cfg_path.open("rb") as f:
+            raw = tomllib.load(f)
+        assert raw["people"] == 'A\\B"C'
+
+    def test_name_with_non_ascii_round_trips(self, tmp_path: Path) -> None:
+        home, proj = _home_proj(tmp_path)
+        cfg_path = proj / ".vemoizer" / "config.toml"
+        _write(cfg_path, 'people = "Old"\n')
+
+        _add("Jönna Öljälä", home, proj, _legacy(home))
+
+        with cfg_path.open("rb") as f:
+            raw = tomllib.load(f)
+        assert raw["people"] == "Jönna Öljälä"
+
+    def test_rewritten_file_reloads_as_valid_toml(self, tmp_path: Path) -> None:
+        # The rewritten file must be valid TOML that parses back to the
+        # same structure (strict load rejects ``[glossary]`` as an
+        # unknown top-level key, so parse directly instead).
+        home, proj = _home_proj(tmp_path)
+        cfg_path = proj / ".vemoizer" / "config.toml"
+        _write(
+            cfg_path,
+            'people = "Mikko"\n[glossary.en-us]\nlabel = "english"\n' + _VALID_SECTION,
+        )
+
+        _add("Jonna", home, proj, _legacy(home))
+
+        with cfg_path.open("rb") as f:
+            raw = tomllib.load(f)
+        assert raw["glossary"]["en-us"]["label"] == "english"
+        assert raw["people"] == "Jonna"
+        assert raw["llm"]["model"] == "test-model"
 
 
 # ---------------------------------------------------------------------------

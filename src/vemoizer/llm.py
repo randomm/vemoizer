@@ -372,8 +372,13 @@ def _strict_load(path: Path) -> LLMConfig:
         if key not in _KNOWN_TOP_LEVEL_KEYS:
             raise ConfigError(f"unknown top-level key or section {key!r} in {path}")
         if isinstance(value, dict):
-            # TOML section (e.g. [llm], or a known top-level dict such as
-            # a future table) — validated separately below when known.
+            if key != LLM_CONFIG_SECTION:
+                # Only ``[llm]`` is a table; every other known key (e.g.
+                # the ``people`` string) is a scalar — a table is a
+                # structural error.
+                raise ConfigError(
+                    f"top-level key {key!r} must not be a table in {path}"
+                )
             continue
 
     section = raw.get(LLM_CONFIG_SECTION)

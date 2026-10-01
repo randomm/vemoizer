@@ -4,7 +4,8 @@
 ``.vemoizer/config.toml`` (the same layered search order as
 ``vemoizer.llm``: nearest ``./.vemoizer/config.toml`` walking up from
 CWD → ``~/.vemoizer/config.toml`` → legacy). The value is a single
-name string — the most recently added person.
+name string (this workstream's config seam: the most recently added
+person; a full people list arrives with ``names_cli``).
 
 The key is read fail-open (missing file, unparseable TOML, missing
 ``people`` key, or non-string value → empty string, never a warning).
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import tomllib
 from collections.abc import Callable
 from pathlib import Path
@@ -25,6 +27,32 @@ from typing import Any
 
 #: Top-level key carrying the people name in the layered config.
 PEOPLE_KEY: str = "people"
+
+#: Valid TOML bare key parts (letters, digits, ``-``, ``_``).
+_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _key_part(key: str) -> str:
+    """Render *key* as one dotted-key part (quoted when not bare-key safe,
+    or when it embeds a dot)."""
+    if _BARE_KEY_RE.fullmatch(key) and "." not in key:
+        return key
+    escaped = key.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _dotted_key(key: str) -> str:
+    """Render *key* as a dotted key, quoting/escaping each segment.
+
+    A literal dot in *key* is treated as a path separator (matching how
+    the emitter calls this per nesting level); any other non-bare-key
+    character (or an embedded dot) forces a quoted, escaped part.
+    """
+    if "." in key:
+        parts = [part for part in key.split(".") if part]
+        if len(parts) > 1:
+            return ".".join(_key_part(part) for part in parts)
+    return _key_part(key)
 
 
 def find_people_config_path(
@@ -93,7 +121,7 @@ def add_person(
     home: Callable[[], Path] | None = None,
     cwd: Callable[[], Path] | None = None,
     legacy_paths: tuple[Path, ...] | None = None,
-) -> Path | None:
+) -> Path:
     """Set *name* as the ``people`` value atomically; return the config path.
 
     The project config is written if one exists, else the home config
@@ -133,20 +161,60 @@ def add_person(
 
 
 def _emit_toml(raw: dict[str, Any]) -> str:
-    """Serialize *raw* as TOML: scalar values as top-level lines, dict
-    values as ``[table]`` blocks."""
+    """Serialize *raw* as valid TOML: top-level scalars/lists first, then
+    every table (nested levels as ``[a.b]``) and array-of-tables.
+
+    Only the scalar values ``tomllib`` can produce are emitted (str, int,
+    float, bool, list); anything else is skipped rather than emitted as
+    invalid TOML (``tomllib`` never yields such values).
+    """
     out: list[str] = []
-    tables: dict[str, Any] = {}
+    for key, value in raw.items():
+        if isinstance(value, dict) or _is_table_list(value):
+            continue
+        out.append(f"{_dotted_key(key)} = {_toml_value(value)}")
     for key, value in raw.items():
         if isinstance(value, dict):
-            tables[key] = value
-        else:
-            out.append(f"{key} = {_toml_value(value)}")
-    for name, table in tables.items():
-        out.append(f"[{name}]")
-        for key, value in table.items():
-            out.append(f"{key} = {_toml_value(value)}")
+            _emit_table(out, [_dotted_key(key)], value)
+        elif _is_table_list(value):
+            for table in value:
+                out.append(f"[[{_dotted_key(key)}]]")
+                _emit_table_body(out, table)
     return "\n".join(out) + ("\n" if out else "")
+
+
+def _is_table_list(value: Any) -> bool:
+    """True when *value* is a non-empty list of tables (array-of-tables)."""
+    return (
+        isinstance(value, list)
+        and len(value) > 0
+        and all(isinstance(item, dict) for item in value)
+    )
+
+
+def _emit_table(out: list[str], quoted_path: list[str], table: dict[str, Any]) -> None:
+    """Emit ``[path]`` (path parts already quoted/escaped) with its scalar
+    members, then recurse into nested tables/arrays-of-tables."""
+    header = quoted_path[0] if len(quoted_path) == 1 else ".".join(quoted_path)
+    out.append(f"[{header}]")
+    for key, value in table.items():
+        if not isinstance(value, dict) and not _is_table_list(value):
+            out.append(f"{_dotted_key(key)} = {_toml_value(value)}")
+    for key, value in table.items():
+        child = quoted_path + [_dotted_key(key)]
+        if isinstance(value, dict):
+            _emit_table(out, child, value)
+        elif _is_table_list(value):
+            for item in value:
+                out.append(f"[[{'.'.join(child)}]]")
+                _emit_table_body(out, item)
+
+
+def _emit_table_body(out: list[str], table: dict[str, Any]) -> None:
+    """Emit the scalar members of one array-of-tables entry."""
+    for key, value in table.items():
+        if not isinstance(value, dict) and not _is_table_list(value):
+            out.append(f"{_dotted_key(key)} = {_toml_value(value)}")
 
 
 def _toml_value(value: Any) -> str:
@@ -157,8 +225,31 @@ def _toml_value(value: Any) -> str:
     if isinstance(value, float):
         return repr(value)
     if isinstance(value, str):
-        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-        return f'"{escaped}"'
+        return f'"{_escape_basic_string(value)}"'
     if isinstance(value, list):
         return "[" + ", ".join(_toml_value(item) for item in value) + "]"
-    return repr(value)
+    # ``tomllib`` only yields the types above; anything else is skipped
+    # by the emitters, so this should be unreachable.
+    return '""'
+
+
+def _escape_basic_string(value: str) -> str:
+    """Escape *value* for a TOML basic string (backslash, quote, all
+    control characters, including ``U+007F``)."""
+    out: list[str] = []
+    for ch in value:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ord(ch) < 0x20 or ch == "\x7f":
+            out.append(f"\\u{ord(ch):04x}")
+        else:
+            out.append(ch)
+    return "".join(out)
