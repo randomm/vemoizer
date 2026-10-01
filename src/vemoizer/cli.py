@@ -346,6 +346,24 @@ def meeting(
         "--no-diarize",
         help="Skip speaker diarization (on by default for meetings).",
     ),
+    yes: bool = typer.Option(  # noqa: B008
+        False,
+        "--yes",
+        help=(
+            "Group mode for 2+ files: run the boundary decodes and accept "
+            "every continuation proposal without a prompt (mutually "
+            "exclusive with --no-group)."
+        ),
+    ),
+    no_group: bool = typer.Option(  # noqa: B008
+        False,
+        "--no-group",
+        help=(
+            "Skip split-recording grouping entirely (each file is "
+            "transcribed standalone; no boundary decode, no concat, no "
+            "part markers). Mutually exclusive with --yes."
+        ),
+    ),
 ) -> None:
     """Transcribe a meeting: whisper decode, diarization, repair, .md+.json."""
     lm = _resolve_low_memory(low_memory)
@@ -367,6 +385,8 @@ def meeting(
         diarize=False if no_diarize else None,
         speakers=speaker_count,
         quiet=quiet,
+        yes=yes,
+        no_group=no_group,
     )
     if exit_code:
         raise typer.Exit(code=exit_code)

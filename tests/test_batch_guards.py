@@ -114,7 +114,9 @@ def test_run_batch_single_part_group_keyboard_interrupt_still_propagates(
 # (batch_output._guarded_transcribe) — not a fourth handler copy.
 
 
-def _run_preset_guard_case(tmp_path, monkeypatch, command: str) -> None:
+def _run_preset_guard_case(
+    tmp_path, monkeypatch, command: str, extra: list[str] | None = None
+) -> None:
     """Drive the *command* preset over a.m4a/b.m4a/c.m4a where the fake
     ``transcribe_file`` raises ``RuntimeError`` for the middle file.
 
@@ -141,7 +143,7 @@ def _run_preset_guard_case(tmp_path, monkeypatch, command: str) -> None:
     # distinct (the preset derives the base name from notes["title"]
     # with a fallback to the first file's stem).
     _touch([tmp_path / n for n in ("a.m4a", "b.m4a", "c.m4a")])
-    result = runner.invoke(app, [command, "a.m4a", "b.m4a", "c.m4a"])
+    result = runner.invoke(app, [command, "a.m4a", "b.m4a", "c.m4a", *(extra or [])])
     assert result.exit_code == 1
     err = result.stderr
     assert err.count("error:") == 1
@@ -165,7 +167,7 @@ def test_run_preset_meeting_middle_failure_is_clean(tmp_path, monkeypatch) -> No
     (tmp_path / ".vemoizer" / "glossary.txt").write_text("Nordea\n", encoding="utf-8")
     files = [tmp_path / n for n in ("a.m4a", "b.m4a", "c.m4a")]
     _touch(files)
-    _run_preset_guard_case(tmp_path, monkeypatch, "meeting")
+    _run_preset_guard_case(tmp_path, monkeypatch, "meeting", extra=["--no-group"])
 
 
 def test_run_preset_memo_middle_failure_is_clean(tmp_path, monkeypatch) -> None:

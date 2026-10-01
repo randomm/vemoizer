@@ -37,6 +37,8 @@ def test_meeting_help_lists_flags() -> None:
         "--no-repair",
         "--speakers",
         "--no-diarize",
+        "--yes",
+        "--no-group",
     ):
         assert flag in result.stdout
     assert "files" in result.stdout

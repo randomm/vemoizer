@@ -80,14 +80,18 @@ def _write_preset_output(
     result: dict[str, Any],
     first_stem: str,
     out_dir: Path,
+    *,
+    date_str: str | None = None,
 ) -> list[str]:
     """Write the meeting/memo output pair (``.md`` + ``.json``) to *out_dir*.
 
     The base name is ``YYYY-MM-DD <title>`` where *title* comes from
     ``result["notes"]["title"]`` and falls back to *first_stem* (the
-    first source file's stem) when the LLM produced no title.  Collision
-    suffixes `` (2)``, `` (3)``, … are checked against the real
-    filesystem via ``collision_free_path``.
+    first source file's stem) when the LLM produced no title.  The date
+    is *date_str* when given (issue #87: the first source file's
+    modification date), else today.  Collision suffixes `` (2)``,
+    `` (3)``, … are checked against the real filesystem via
+    ``collision_free_path``.
 
     Returns the list of written relative paths (for the ``wrote <path>``
     summary lines).
@@ -99,7 +103,7 @@ def _write_preset_output(
         if isinstance(t, str) and t.strip():
             title = t
 
-    base = dated_basename(title, fallback_stem=first_stem)
+    base = dated_basename(title, fallback_stem=first_stem, date_str=date_str)
     # The .md/.json pair is probed as a unit so both files always share
     # one stem (never ``X.md`` + ``X (2).json``) — issue #82 review.
     paths = collision_free_paths(out_dir, base, [f".{fmt}" for fmt in PRESET_FORMATS])

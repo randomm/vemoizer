@@ -15,25 +15,11 @@ without duplicating the loop.
   title naming.
 
 Both presets call ``transcribe_file`` with the existing signature —
-no new pipeline parameter.  The layered glossary (``glossary_layers``:
-``load_layers`` → ``merge``) is composed into a temporary glossary file
-and passed through the existing ``glossary_path`` argument: for meeting
-the temp file carries the merged terms (bare + ``@`` lines) and merged
-correction pairs; for memo it carries the merged correction pairs only,
-so the whisper ``initial_prompt`` stays empty while
-``apply_corrections`` still fires on the deterministic pairs (issue #82,
-DESIGN DECISION "memo seam").  An explicit ``--glossary`` replaces the
-layers entirely for meeting (the file is passed straight through); for
-memo it is filtered to that file's correction pairs via a second temp
-file (the whisper prompt stays empty, mirroring the layered memo seam).
-Temp files are deleted after the run.
+no new pipeline parameter.  The layered glossary is composed into a
+temp file passed through ``glossary_path``; temp files deleted after.
 
-M3 split-recording grouping (issue #77): ``run_batch`` takes the
-M2-defined :class:`~vemoizer.presets.RunOptions` and, for 2+ input
-files, adds the grouping layer (``grouping`` module): natural sort,
-20 s boundary decodes, the confirm step (``--yes`` / ``--no-group`` /
-interactive), ffmpeg concat of multi-part groups, one decode per group
-(invariant 6), and the ``part_markers`` sidecar record.
+M3 grouping (issue #77): ``run_batch`` takes ``RunOptions`` and,
+for 2+ files, adds natural sort, boundary decodes, confirm, concat,
 
 The output-writing helpers (``_write_output``, ``_write_preset_output``,
 ``_write_temp_glossary``, ``_check_result``) live in
@@ -68,11 +54,9 @@ from vemoizer.presets import RunOptions
 
 
 def _write_temp_glossary(lines: list[str]) -> str:
-    """Indirection for :func:`batch_output._write_temp_glossary`.
-
-    Defined here (not imported) so that ``monkeypatch.setattr(batch,
-    "_write_temp_glossary", fake)`` in tests patches the name that
-    ``run_preset`` actually calls.
+    """Indirection for batch_output._write_temp_glossary so
+    monkeypatch.setattr(batch, "_write_temp_glossary", fake) patches
+    the name run_preset actually calls.
     """
     from vemoizer.batch_output import _write_temp_glossary as _wgt
 
@@ -87,6 +71,11 @@ from vemoizer.batch_output import (  # noqa: F401,E402
     _process_result,
     _write_output,
     _write_preset_output,
+)
+
+# Re-export run_preset from its new home (batch_preset.py, issue #87) so
+# existing imports from vemoizer.batch continue to work.
+from vemoizer.batch_preset import (  # noqa: F401,E402
     run_preset,
 )
 
@@ -120,12 +109,11 @@ def _resolve_llm_config(config_path: str | None) -> LLMConfig | None:
     """Resolve the LLM config for a batch run (issue #82 review).
 
     Explicit ``--config`` short-circuits to ``load_config`` (fail-open).
-    Without one, the strict layered search runs; its ``ConfigError``
-    (malformed ``./.vemoizer/config.toml``) is caught by the caller and
-    becomes a clean ``error: ...`` line — never a raw traceback (the
-    fail-open ``load_default_config`` is NOT used here, because its
-    ``except Exception`` swallows ``ConfigError`` silently, which would
-    hide a broken project config).``None`` (no config found) is fine.
+    Without one, the strict layered search runs; its ``ConfigError`` is
+    caught by the caller and becomes a clean error line — never a raw
+    traceback (the fail-open ``load_default_config`` is NOT used here,
+    because its ``except Exception`` swallows ``ConfigError`` silently).
+    ``None`` (no config found) is fine.
     """
     from vemoizer.llm import _default_search, load_config
 
@@ -158,13 +146,10 @@ def transcribe_batch(
     with caffeinate_context():
         for file in files:
             try:
-                # Fail loud on a malformed project config (issue #78):
-                # clean error line, never a traceback.
+                # Fail loud on a malformed project config (issue #78).
                 _resolve_llm_config(config_path)
             except ConfigError as e:
-                # A malformed .vemoizer/config.toml must fail loud with a
-                # clean error line, not a traceback (issue #78); consistent
-                # with run_preset: stop the batch, no sibling files.
+                # Consistent with run_preset: stop the batch, no siblings.
                 typer.echo(f"error: {e}", err=True)
                 return 1
             try:
@@ -178,14 +163,11 @@ def transcribe_batch(
                     speakers=speakers,
                 )
             except (KeyboardInterrupt, SystemExit):
-                # ConfigError is handled by the separate _resolve_llm_config
-                # try above (it cannot come from transcribe_file); only the
-                # two non-Exception control-flow signals need re-raising here.
+                # ConfigError is handled by the try above; only the two
+                # non-Exception control-flow signals need re-raising here.
                 raise
             except Exception as e:
-                # A per-file decode/write failure is a clean one-line
-                # error (like the grouping path's _transcribe_one), not a
-                # traceback mid-batch: mark the file failed, keep going.
+                # A per-file decode/write failure is a clean one-line error.
                 typer.echo(f"error: {file.name}: {e}", err=True)
                 exit_code = 1
                 continue
@@ -234,12 +216,10 @@ def _transcribe_guarded(
 def _transcribe_one(file: Path, options: RunOptions) -> dict[str, Any]:
     """One ``transcribe_file`` call with the fail-loud config check.
 
-    The return is ``TranscriptionResult``-shaped (``text`` required;
-    ``segments`` / ``part_markers`` / ``notes`` optional) — or the
-    ``{"text", "segments", "error"}`` triple when the project config
-    check fails. The ``error`` key is part of the contract: ``_check_result`
-    turns it into a clean ``error: ...`` line, so it must be visible in the
-    type, not elided (round 3 finding 2).
+    Returns ``TranscriptionResult``-shaped (``text`` required) — or the
+    ``{"text", "segments", "error"}`` triple when the config check fails.
+    The ``error`` key is contract: ``_check_result`` turns it into a clean
+    error line, so it must stay visible.
     """
     from vemoizer.pipeline import transcribe_file
 
@@ -267,15 +247,13 @@ def _run_plain(
     formats: Sequence[str],
     out: Path | None,
     quiet: bool,
+    write_group_fn: Callable[[Path | str, dict[str, Any]], None] | None = None,
 ) -> int:
-    """The plain per-file loop (single-file runs and --no-group groups).
+    """The plain per-file loop (single file / --no-group).
 
-    Note: intentionally diverges from ``transcribe_batch`` — no ``--copy``
-    support and per-file config-error continue (the batch loop honors
-    ``--copy`` and aborts the run on a malformed project config). The
-    divergence is deliberate: the plain loop feeds the grouping path
-    where ``--copy`` is a single-file-only concern and a broken config
-    should fail that file, not the whole multi-file run.
+    No --copy; per-file config-error continue. ``write_group_fn``
+    (issue #87): when set, each result goes through the preset seam
+    (one dated .md/.json pair per file) instead of _process_result.
     """
     exit_code = 0
     with caffeinate_context():
@@ -285,6 +263,17 @@ def _run_plain(
             # mark the file failed, keep going.
             if (result := _transcribe_guarded(file, options, file.name)) is None:
                 exit_code = 1
+                continue
+            if write_group_fn is not None:
+                if _check_result(
+                    file,
+                    result,
+                    diarize=options.diarize,
+                    diarize_label="diarize",
+                ):
+                    exit_code = 1
+                    continue
+                write_group_fn(file, result)
                 continue
             if not _process_result(
                 file,
@@ -313,35 +302,37 @@ def run_batch(
     input_fn: Callable[[str], str] | None = None,
     print_fn: Callable[[str], None] | None = None,
     tty_isatty: Callable[[], bool] | None = None,
+    write_group_fn: Callable[[Path | str, dict[str, Any]], None] | None = None,
 ) -> int:
     """Transcribe *files* with M3 split-recording grouping (issue #77).
 
     Takes the M2 :class:`~vemoizer.presets.RunOptions` (not an ad-hoc
-    kwargs dict). Single file: no grouping work at all (no boundary
-    slice, no Whisper boundary model load) — the plain per-file loop.
-    Multi-file: natural sort, then:
-
-    - ``--no-group``: each file transcribed standalone (no boundary
-      decode, no concat, no part markers);
-    - ``--yes``: the boundary decodes still run (they feed the proposal)
-      and every proposal is accepted without a prompt;
-    - interactive: one confirmation prompt per boundary (Enter accept,
-      ``e`` edit — any valid partition, ``q`` quit).
+    kwargs dict). Single file: no grouping work at all — the plain
+    per-file loop. Multi-file: natural sort, then ``--no-group``
+    (each file standalone), ``--yes`` (boundary decodes run, every
+    proposal accepted without a prompt), or interactive (Enter accept,
+    ``e`` edit, ``q`` quit).
 
     Multi-part groups are joined with the ffmpeg concat demuxer (``-c
-    copy``) into a temp file and decoded ONCE (invariant 6); the part
-    offsets (decoded-PCM, never ffprobe) become
-    ``transcript["part_markers"]`` so the JSON sidecar and Markdown
-    carry the ``— osa N (äänitys X) —`` markers. Single-part groups
-    carry no ``part_markers`` key at all.
+    copy``) and decoded ONCE (invariant 6); the part offsets (decoded
+    PCM, never ffprobe) become ``transcript["part_markers"]``. Single-part
+    groups carry no ``part_markers`` key.
 
-    ``--out`` with 2+ files is only honored when the run is a single
-    group (one combined transcript) — otherwise every group would
-    overwrite the same target, so the call fails up front (2) before
-    any decode (``--out -`` for stdout is always fine).
+    ``write_group_fn`` (issue #87) overrides the per-group write seam:
+    when set, called as ``write_group_fn(label, result)`` after the
+    result passes ``_check_result`` (instead of ``_process_result``).
+    The meeting preset uses it for one dated ``.md``/``.json`` pair per
+    group in the CWD; ``None`` keeps the expert behaviour. The seam runs
+    inside the ``caffeinate_context``. The ``_run_plain`` short-circuit
+    (single file / ``--no-group``) also honours it: each file's result
+    goes through the seam instead of ``_process_result``.
 
-    Returns 0 on success, 1 if any group failed, 2 on a bad
-    combination of group flags.
+    ``--out`` with 2+ files is only honored for a single group (else
+    every group would overwrite the same target — fail up front, 2)
+    except ``--out -`` (stdout).
+
+    Returns 0 on success, 1 if any group failed, 2 on a bad combination
+    of group flags.
     """
     from vemoizer.grouping import confirm_groups, propose_groups
 
@@ -363,6 +354,7 @@ def run_batch(
             formats=formats,
             out=out,
             quiet=quiet,
+            write_group_fn=write_group_fn,
         )
 
     # The TTY guard is BEFORE any boundary decode or model load, so a
@@ -425,9 +417,7 @@ def run_batch(
     with caffeinate_context():
         for group in groups:
             if len(group) == 1:
-                # A per-file decode/write failure is a clean one-line error
-                # (see _transcribe_guarded), not a traceback mid-batch:
-                # mark the file failed, keep going.
+                # A per-file decode/write failure is a clean one-line error.
                 result = _transcribe_guarded(group[0], options, group[0].name)
                 if result is None:
                     exit_code = 1
@@ -457,9 +447,9 @@ def run_batch(
                     continue
                 try:
                     # An unexpected per-group decode failure is a clean
-                    # one-line error (like the plain loop above), not a
-                    # traceback mid-batch: name the group's first part's
-                    # file, mark the group failed, keep going.
+                    # one-line error, not a traceback mid-batch: name the
+                    # group's first part's file, mark the group failed,
+                    # keep going.
                     result = _transcribe_guarded(
                         merged,
                         options,
@@ -477,12 +467,25 @@ def run_batch(
                 if "error" not in result:
                     # Multi-part groups only: single-part groups get no
                     # part_markers key at all (issue #77). with_part_markers
-                    # is the single place the batch layer attaches the marker
-                    # sidecar — it returns a NEW dict, so the pipeline's
-                    # result is never mutated in place.
+                    # returns a NEW dict, so the pipeline result is never
+                    # mutated in place.
                     result = with_part_markers(result, offsets)
                 label = "+".join(p.name for p in group)
 
+            if write_group_fn is not None:
+                # Preset write seam (issue #87): shared _check_result so
+                # the fail-loud contract matches _process_result; the
+                # caller writes the group's output itself.
+                if _check_result(
+                    label,
+                    result,
+                    diarize=options.diarize,
+                    diarize_label="diarize",
+                ):
+                    exit_code = 1
+                    continue
+                write_group_fn(label, result)
+                continue
             if not _process_result(
                 label,
                 result,
