@@ -421,8 +421,8 @@ def test_run_preset_group_duration_ingest_error_is_fail_open(
     import vemoizer.grouping as grouping
     import vemoizer.sidecar as sidecar_module
 
-    def boom(label, files):
-        raise IngestError(f"ffmpeg failed to decode {label}")
+    def boom(paths):
+        raise IngestError("ffmpeg failed to decode group parts")
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sidecar_module, "group_durations", boom)

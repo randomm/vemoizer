@@ -291,9 +291,9 @@ def test_group_part_paths_single_part_path_label_returns_label(tmp_path: Path):
     assert group_part_paths("a.m4a", [decoy]) == [decoy]
 
 
-def test_group_durations_single_part_path_label(tmp_path: Path, monkeypatch):
-    """``group_durations`` measures a Path label at its OWN path, not a
-    basename resolved against the CWD or files."""
+def test_group_durations_measures_each_resolved_path(tmp_path: Path, monkeypatch):
+    """``group_durations`` measures exactly the resolved paths it is given
+    (never re-resolves against the CWD or a files list)."""
     a = tmp_path / "sub" / "a.m4a"
     a.parent.mkdir()
 
@@ -305,12 +305,12 @@ def test_group_durations_single_part_path_label(tmp_path: Path, monkeypatch):
     import vemoizer.ingest as ingest_module
 
     monkeypatch.setattr(ingest_module, "pcm_duration_seconds", fake_pcm)
-    assert group_durations(a, [a]) == [7.5]
+    assert group_durations([a]) == [7.5]
 
 
-def test_group_durations_multi_part_resolves_against_files(tmp_path, monkeypatch):
-    """A multi-part label's bare names resolve against files, so each
-    measurement sees the real on-disk path (never a CWD-relative name)."""
+def test_group_durations_multi_part_paths(tmp_path, monkeypatch):
+    """Each resolved part path is measured at its real on-disk path
+    (never a CWD-relative name)."""
     a = tmp_path / "a.m4a"
     b = tmp_path / "b.m4a"
 
@@ -324,7 +324,7 @@ def test_group_durations_multi_part_resolves_against_files(tmp_path, monkeypatch
     import vemoizer.ingest as ingest_module
 
     monkeypatch.setattr(ingest_module, "pcm_duration_seconds", fake_pcm)
-    assert group_durations("a.m4a+b.m4a", [a, b]) == [1.0, 2.0]
+    assert group_durations([a, b]) == [1.0, 2.0]
 
 
 # ---------------------------------------------------------------------------

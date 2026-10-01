@@ -21,7 +21,7 @@ same filesystem (atomic on APFS and ext4 alike).
 Exit codes:
 - 0: success (output .md written)
 - 1: unreadable or malformed sidecar
-- 2: (none)
+- 2: malformed --name value
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ def _read_sidecar(path: Path) -> dict[str, Any] | None:
         return None
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError as e:
+    except (OSError, UnicodeDecodeError) as e:
         typer.echo(f"error: could not read {path}: {e}", err=True)
         return None
     try:
@@ -102,7 +102,8 @@ def _load_corrections(files: list[Path]) -> dict[str, str]:
             file_corrections = load_corrections(path)
         except (OSError, UnicodeDecodeError) as e:
             typer.echo(
-                f"warning: could not read glossary {path}: {e} (proceeding without)",
+                f"warning: could not read glossary {path}: "
+                f"{type(e).__name__} (proceeding without)",
                 err=True,
             )
             continue

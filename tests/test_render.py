@@ -355,8 +355,8 @@ def test_render_sidecar_with_string_entry_in_paragraphs_does_not_crash() -> None
 
     ``apply_corrections`` maps over dict entries (``para.get``); a
     corrupted sidecar can carry a string entry. ``_render_dict`` filters
-    to dict entries first (consistent with ``_blocks``) and leaves
-    non-dict entries verbatim.
+    to dict entries first (consistent with ``_blocks``) and DROPS the
+    non-dict entries.
     """
     sidecar = _sidecar()
     sidecar["paragraphs"].append("corrupted-string-entry")  # type: ignore[valid-type]

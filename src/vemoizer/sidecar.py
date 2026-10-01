@@ -232,20 +232,19 @@ def group_part_paths(label: Path | str, files: list[Path]) -> list[Path]:
     return parts
 
 
-def group_durations(label: Path | str, files: list[Path]) -> list[float]:
+def group_durations(paths: list[Path]) -> list[float]:
     """Per-part decoded-PCM durations for a group's sidecar ``source``.
 
-    Durations come from ``pcm_duration_seconds`` over the group's real
-    part paths (:func:`group_part_paths` — a single-part label's own
-    path; a multi-part label's names resolved against *files*), so each
-    measurement sees the file the run actually decoded (never a bare
-    name resolved against the process CWD). The same measurement the
-    sidecar's ``part_offset_s`` (derived from ``part_markers``) is based
-    on, so the two stay consistent.
+    *paths* are the group's real part paths (:func:`group_part_paths`),
+    so each measurement sees the file the run actually decoded (never a
+    bare name resolved against the process CWD) and the caller need not
+    resolve the label a second time. The same measurement the sidecar's
+    ``part_offset_s`` (derived from ``part_markers``) is based on, so
+    the two stay consistent.
     """
     from vemoizer.ingest import pcm_duration_seconds
 
-    return [pcm_duration_seconds(p) for p in group_part_paths(label, files)]
+    return [pcm_duration_seconds(p) for p in paths]
 
 
 def resolve_run_glossary_files(

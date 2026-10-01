@@ -260,6 +260,9 @@ prewrites carries four extra keys, assembled by
 `src/vemoizer/sidecar.py` (`build_sidecar`) before `format_json` mirrors
 them (present-only, so old JSON without the keys and the expert
 `transcribe` JSON are unaffected):
+`src/vemoizer/sidecar.py` (`build_sidecar`) before `format_json` mirrors
+them (present-only, so old JSON without the keys and the expert
+`transcribe` JSON are unaffected):
 
 - `notes` — the LLM notes verbatim (`{title, summary, key_points,
   action_items}`); the key is omitted when there were no notes (absent
@@ -281,12 +284,24 @@ them (present-only, so old JSON without the keys and the expert
   one stderr line when the two differ (new prompt terms need a
   re-transcribe).
 - `speaker_names` — `{label: name}` speaker-name map, `{}` by default
-  (the render command's `--name` persists into it later). A `clips` key
-  is never written.
+  (the render command's `--name` persists into it atomically — temp
+  file in the same directory + `os.replace`). A `clips` key is never
+  written.
+
+These keys let `vemoizer render` re-apply glossary corrections and
+speaker names without a re-transcribe; old `.json` files without them
+render unchanged (the `render` command is fail-open over missing keys).
 
 `format_json` mirrors each key only when present and non-empty (the
 `speaker_names` `{}` default is omitted), so the expert `transcribe`
 JSON and pre-M5 sidecars are byte-identical to before.
+
+The round-trip guarantee: `render` of its own JSON with the same
+glossary and no names produces a Markdown byte-identical to the
+Markdown the run wrote **iff** the current effective glossary's sha256
+equals the stored `options.glossary_sha256`. When they differ,
+corrections and names are still applied but byte-identity is not
+guaranteed (the hash-mismatch warning fires).
 
 ### 13. Dated output naming (issue #82)
 
@@ -310,38 +325,7 @@ existing NFC helpers:
 
 ### 13a. M5a JSON sidecar keys (issue #89)
 
-The meeting/memo `.json` written next to the `.md` carries four extra
-keys (built by `src/vemoizer/sidecar.py::build_sidecar`) that let
-`vemoizer render` re-apply glossary corrections and speaker names
-without a re-transcribe:
-
-- **`notes`** — the LLM notes dict verbatim (`{title, summary,
-  key_points, action_items}`), or omitted when the LLM stage failed
-  open. Never fabricated.
-- **`source`** — one entry per recorded part: `{path, part_offset_s,
-  duration_s?}`. Single-file runs have one entry with
-  `part_offset_s: 0.0`. Grouped runs have one entry per `part_markers`
-  part, with `part_offset_s` from the marker's cumulative decoded-PCM
-  offset. `duration_s` is omitted when no duration was measured.
-- **`options`** — `{command, glossary_files, glossary_sha256}`.
-  `glossary_files` is the list of layer files actually used (`[]` when
-  none). `glossary_sha256` is the single sha256 over the concatenated
-  raw bytes of those files in layer order (project first, then home),
-  or `null` when no glossary file existed at run time. An explicit
-  `--glossary` file is hashed as that single file.
-- **`speaker_names`** — `{} by default; `vemoizer render --name``
-  persists label→name entries into this dict atomically (temp file in
-  the same directory + `os.replace`).
-
-No `clips` key is ever emitted. Old `.json` files without these keys
-render unchanged (the `render` command is fail-open over missing keys).
-
-The round-trip guarantee: `render` of its own JSON with the same
-glossary and no names produces a Markdown byte-identical to the
-Markdown the run wrote **iff** the current effective glossary's sha256
-equals the stored `options.glossary_sha256`. When they differ,
-corrections and names are still applied but byte-identity is not
-guaranteed (the hash-mismatch warning fires).
+See section 12a — the single canonical sidecar-key contract lives there.
 
 ## Model manifest
 

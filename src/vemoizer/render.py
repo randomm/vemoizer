@@ -138,10 +138,17 @@ def _resolve_rename(result: dict[str, Any], names: dict[str, str]) -> dict[str, 
     # Merge rule: labels sharing a target name collapse to the earliest
     # label in time order; that canonical label keeps the given name, and
     # every other label in the group is rewritten to the canonical LABEL
-    # (so one speaker remains in the rendered output).
+    # (so one speaker remains in the rendered output). `by_target` is
+    # built ONCE up front (the old code rebuilt the sibling list per
+    # label); iteration stays over ``names.items()`` so the rename dict
+    # keeps dict insertion order (tests assert on it).
+    by_target: dict[str, list[str]] = {}
+    for label, name in names.items():
+        by_target.setdefault(name, []).append(label)
+
     rename: dict[str, str] = {}
     for label, name in names.items():
-        siblings = [lb for lb in names if names[lb] == name]
+        siblings = by_target[name]
         if len(siblings) == 1:
             rename[label] = name
             continue

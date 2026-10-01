@@ -163,7 +163,7 @@ def _run_preset_groups(
         with suppress(
             OSError, IngestError
         ):  # fail-open: skip durations on ffmpeg error
-            result["_source_durations"] = group_durations(label, files)
+            result["_source_durations"] = group_durations(parts)
         build_sidecar(
             result,
             command=command,

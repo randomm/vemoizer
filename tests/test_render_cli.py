@@ -191,6 +191,20 @@ def test_render_sidecar_missing(
     assert "not found" in result.stderr
 
 
+def test_render_non_utf8_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-UTF-8 (binary) sidecar exits 1 with a clean error line, not a
+    traceback."""
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    bad = tmp_path / "binary.json"
+    bad.write_bytes(b"\xff\xfe\x00bad")
+    result = runner.invoke(app, ["render", str(bad)])
+    assert result.exit_code == 1
+    assert "could not read" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_render_malformed_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A non-JSON file exits 1 with a clean error."""
     isolate_home(monkeypatch, tmp_path, tmp_path)
@@ -293,7 +307,9 @@ def test_render_non_utf8_glossary_warns_and_proceeds(
     sc = _write_sidecar(tmp_path, _sidecar())
     result = runner.invoke(app, ["render", str(sc), "--glossary", str(g)])
     assert result.exit_code == 0
+    # The warning names the exception class, not raw exception text.
     assert "warning: could not read glossary" in result.stderr
+    assert "UnicodeDecodeError" in result.stderr
     md_files = list(tmp_path.glob("*.md"))
     assert len(md_files) == 1
 
