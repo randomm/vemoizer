@@ -44,7 +44,13 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-__all__ = ["build_sidecar", "glossary_layer_files", "sha256_over_files"]
+__all__ = [
+    "build_sidecar",
+    "glossary_layer_files",
+    "group_durations",
+    "group_part_paths",
+    "sha256_over_files",
+]
 
 
 def build_sidecar(
@@ -180,6 +186,44 @@ def glossary_layer_files() -> list[Path]:
     if home.is_file():
         files.append(home)
     return files
+
+
+def group_durations(label: Path | str) -> list[float]:
+    """Per-part decoded-PCM durations for a group's sidecar ``source``.
+
+    A single-part group's label is that part's path; a multi-part label
+    (``a.m4a+b.m4a``) resolves each part's filename. Durations come from
+    ``pcm_duration_seconds`` — the same measurement the sidecar's
+    ``part_offset_s`` (derived from ``part_markers``) is based on, so the
+    two stay consistent.
+    """
+    from vemoizer.ingest import pcm_duration_seconds
+
+    parts = [label] if isinstance(label, Path) else [Path(n) for n in label.split("+")]
+    return [pcm_duration_seconds(p) for p in parts]
+
+
+def group_part_paths(label: Path | str, files: list[Path]) -> list[Path]:
+    """The group's per-part source paths, in label order.
+
+    A single-part group's label is that part's path; a multi-part label
+    (``a.m4a+b.m4a``) resolves each part's filename against the original
+    *files* list (the group is built over ``natural_sort(files)``, so each
+    part is a member of *files*). The sidecar's ``source[].path`` carries
+    these real on-disk paths (not the decorative marker label) so
+    ``render`` can re-apply per-part offsets to the actual files.
+    """
+    if isinstance(label, Path):
+        return [label]
+    parts: list[Path] = []
+    for name in label.split("+"):
+        for f in files:
+            if f.name == name:
+                parts.append(f)
+                break
+        else:
+            parts.append(Path(name))
+    return parts
 
 
 def sha256_over_files(files: list[str] | list[Path]) -> str | None:
