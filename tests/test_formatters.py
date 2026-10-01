@@ -229,6 +229,108 @@ def test_format_json_ends_with_newline() -> None:
     assert format_json({"text": "x"}).endswith("\n")
 
 
+def test_format_json_includes_notes_when_present() -> None:
+    """format_json mirrors notes when present on the result dict."""
+    result = {
+        "text": "hei",
+        "notes": {"title": "Test", "summary": "S"},
+    }
+    parsed = json.loads(format_json(result))
+    assert parsed["notes"] == {"title": "Test", "summary": "S"}
+
+
+def test_format_json_omits_notes_when_absent() -> None:
+    """format_json omits notes when absent (old JSON / expert transcribe)."""
+    parsed = json.loads(format_json({"text": "hei"}))
+    assert "notes" not in parsed
+
+
+def test_format_json_omits_notes_when_none() -> None:
+    """format_json omits notes when None (LLM fail-open)."""
+    parsed = json.loads(format_json({"text": "hei", "notes": None}))
+    assert "notes" not in parsed
+
+
+def test_format_json_includes_source_when_present() -> None:
+    """format_json mirrors source when present and non-empty."""
+    source = [{"path": "a.m4a", "part_offset_s": 0.0, "duration_s": 5.0}]
+    parsed = json.loads(format_json({"text": "hei", "source": source}))
+    assert parsed["source"] == source
+
+
+def test_format_json_omits_source_when_absent() -> None:
+    """format_json omits source when absent."""
+    parsed = json.loads(format_json({"text": "hei"}))
+    assert "source" not in parsed
+
+
+def test_format_json_omits_source_when_empty() -> None:
+    """format_json omits source when empty list (mirror-present-keys)."""
+    parsed = json.loads(format_json({"text": "hei", "source": []}))
+    assert "source" not in parsed
+
+
+def test_format_json_includes_options_when_present() -> None:
+    """format_json mirrors options when present and non-empty."""
+    options = {"command": "meeting", "glossary_files": [], "glossary_sha256": None}
+    parsed = json.loads(format_json({"text": "hei", "options": options}))
+    assert parsed["options"] == options
+
+
+def test_format_json_omits_options_when_absent() -> None:
+    """format_json omits options when absent."""
+    parsed = json.loads(format_json({"text": "hei"}))
+    assert "options" not in parsed
+
+
+def test_format_json_includes_speaker_names_when_present() -> None:
+    """format_json mirrors speaker_names when present and non-empty."""
+    sn = {"SPEAKER_01": "Mats"}
+    parsed = json.loads(format_json({"text": "hei", "speaker_names": sn}))
+    assert parsed["speaker_names"] == sn
+
+
+def test_format_json_omits_speaker_names_when_empty() -> None:
+    """format_json omits speaker_names when empty (default {})."""
+    parsed = json.loads(format_json({"text": "hei", "speaker_names": {}}))
+    assert "speaker_names" not in parsed
+
+
+def test_format_json_sidecar_keys_do_not_break_golden_fixture() -> None:
+    """The golden fixture (no sidecar keys) is unchanged — new keys are
+    mirror-optional and absent in the TRANSCRIPT fixture."""
+    parsed = json.loads(format_json(TRANSCRIPT))
+    # None of the four new sidecar keys are present in the golden fixture.
+    assert "notes" not in parsed
+    assert "source" not in parsed
+    assert "options" not in parsed
+    assert "speaker_names" not in parsed
+    # No clips key ever.
+    assert "clips" not in parsed
+
+
+def test_format_json_full_sidecar_result() -> None:
+    """A full meeting result with all four sidecar keys renders correctly."""
+    result = {
+        "text": "moikka",
+        "segments": [{"start": 0.0, "end": 1.0, "text": "moikka"}],
+        "notes": {"title": "Sync", "summary": "Good sync."},
+        "source": [{"path": "a.m4a", "part_offset_s": 0.0, "duration_s": 3.0}],
+        "options": {
+            "command": "meeting",
+            "glossary_files": ["g.txt"],
+            "glossary_sha256": "abc123",
+        },
+        "speaker_names": {"SPEAKER_01": "Mats"},
+    }
+    parsed = json.loads(format_json(result))
+    assert parsed["notes"] == {"title": "Sync", "summary": "Good sync."}
+    assert parsed["source"][0]["path"] == "a.m4a"
+    assert parsed["options"]["command"] == "meeting"
+    assert parsed["speaker_names"]["SPEAKER_01"] == "Mats"
+    assert "clips" not in parsed
+
+
 # ---------------------------------------------------------------------------
 # SRT timestamp formatting
 # ---------------------------------------------------------------------------
