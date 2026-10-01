@@ -42,12 +42,17 @@ from vemoizer.speaker_clips import (
 
 
 def _find_people_config_path(
-    home: Path | None = None, cwd: Path | None = None
+    home: Path | None = None,
+    cwd: Path | None = None,
+    legacy_paths: tuple[Path, ...] | None = None,
 ) -> Path | None:
     """Nearest layered config path for the ``people`` key.
 
     Same order as ``llm._default_search``: nearest ``./.vemoizer`` →
-    ``~/.vemoizer`` → legacy. ``None`` when nothing exists.
+    ``~/.vemoizer`` → legacy. ``None`` when nothing exists. ``legacy_paths``
+    is injectable so tests can isolate from a real dev-machine legacy
+    config (``llm._LEGACY_CONFIG_PATHS`` is computed at import time from
+    the real ``Path.home()`` and would otherwise leak into tests).
     """
     from vemoizer.llm import _LEGACY_CONFIG_PATHS, _find_nearest_vemoizer_config
 
@@ -55,6 +60,8 @@ def _find_people_config_path(
         cwd = Path.cwd()
     if home is None:
         home = Path.home()
+    if legacy_paths is None:
+        legacy_paths = _LEGACY_CONFIG_PATHS
 
     nearest = _find_nearest_vemoizer_config(cwd)
     if nearest is not None:
@@ -62,7 +69,7 @@ def _find_people_config_path(
     home_config = home / ".vemoizer" / "config.toml"
     if home_config.is_file():
         return home_config
-    for candidate in _LEGACY_CONFIG_PATHS:
+    for candidate in legacy_paths:
         if candidate.is_file():
             return candidate
     return None
@@ -258,12 +265,20 @@ def _install_completer(names: list[str]) -> Callable[[], None] | None:
 # ---------------------------------------------------------------------------
 
 
+class _NotFound:
+    """Sentinel: caller did not inject a config path (search layered)."""
+
+
+_NOT_FOUND = _NotFound()
+
+
 def run_names(
     sidecar_path: Path,
     *,
     no_play: bool = False,
     input_fn: Callable[[str], str] | None = None,
     tty_isatty: Callable[[], bool] | None = None,
+    config_path: Path | _NotFound = _NOT_FOUND,
 ) -> int:
     """Interactive speaker-naming loop.
 
@@ -283,6 +298,15 @@ def run_names(
     if data is None:
         return 1
 
+    # --- Locate the people config (nearest layered config) ---
+    # The ``_NOT_FOUND`` sentinel (not ``None``) distinguishes "caller did
+    # not inject a path" from "caller injected an isolated path".
+    if config_path is _NOT_FOUND:
+        resolved_config: Path | None = _find_people_config_path()
+    else:
+        assert not isinstance(config_path, _NotFound)  # narrows the union
+        resolved_config = config_path
+
     paragraphs: list[dict[str, Any]] = data.get("paragraphs") or []
     segments: list[dict[str, Any]] = data.get("segments") or []
 
@@ -295,9 +319,8 @@ def run_names(
     # --- Select clips ---
     clips = select_clips(paragraphs, segments)
 
-    # --- Read people list ---
-    config_path = _find_people_config_path()
-    people_list = _read_people_list(config_path)
+    # --- Read people list (fail-open to []) ---
+    people_list = _read_people_list(resolved_config)
 
     # --- Resolve source entries ---
     raw_source: list[dict[str, Any]] = data.get("source") or []
@@ -364,10 +387,7 @@ def run_names(
                     prompt = f"Name for {label} [{stored}]: "
                 else:
                     prompt = f"Name for {label} (empty to skip): "
-                try:
-                    answer = prompt_fn(prompt).strip()
-                except (EOFError, KeyboardInterrupt):
-                    raise
+                answer = prompt_fn(prompt).strip()
 
                 if stored:
                     if not answer:
@@ -378,7 +398,9 @@ def run_names(
                     new_names[label] = answer
                     # People list: add new (replacing) name?
                     if answer.lower() not in [p.lower() for p in people_list]:
-                        cfg_display = str(config_path) if config_path else "(no config)"
+                        cfg_display = (
+                            str(resolved_config) if resolved_config else "(no config)"
+                        )
                         yes = (
                             prompt_fn(
                                 f"Add {answer} to people in {cfg_display}? [y/N] "
@@ -386,18 +408,20 @@ def run_names(
                             .strip()
                             .lower()
                         )
-                        if yes == "y" and config_path is not None:
+                        if yes == "y" and resolved_config is not None:
                             new_people = list(people_list)
                             if answer not in new_people:
                                 new_people.append(answer)
-                            _write_people_list(config_path, new_people)
+                            _write_people_list(resolved_config, new_people)
                 else:
                     if not answer:
                         continue
                     new_names[label] = answer
                     # People list: add new name?
                     if answer.lower() not in [p.lower() for p in people_list]:
-                        cfg_display = str(config_path) if config_path else "(no config)"
+                        cfg_display = (
+                            str(resolved_config) if resolved_config else "(no config)"
+                        )
                         yes = (
                             prompt_fn(
                                 f"Add {answer} to people in {cfg_display}? [y/N] "
@@ -405,18 +429,22 @@ def run_names(
                             .strip()
                             .lower()
                         )
-                        if yes == "y" and config_path is not None:
+                        if yes == "y" and resolved_config is not None:
                             new_people = list(people_list)
                             if answer not in new_people:
                                 new_people.append(answer)
-                            _write_people_list(config_path, new_people)
+                            _write_people_list(resolved_config, new_people)
         finally:
             if restore_completer is not None:
                 restore_completer()
 
     # --- Persist names (only after loop completes) ---
     if new_names:
-        _persist_speaker_names(sidecar_path, data, new_names)
+        try:
+            _persist_speaker_names(sidecar_path, data, new_names)
+        except OSError as e:
+            typer.echo(f"error: could not persist speaker names: {e}", err=True)
+            return 1
 
         # --- Re-render Markdown ---
         from vemoizer.output.naming import collision_free_path
@@ -424,7 +452,11 @@ def run_names(
 
         markdown = render_markdown(data, corrections={}, speaker_names=new_names)
         md_path = collision_free_path(sidecar_path.parent, sidecar_path.stem, ".md")
-        md_path.write_text(markdown, encoding="utf-8")
+        try:
+            md_path.write_text(markdown, encoding="utf-8")
+        except OSError as e:
+            typer.echo(f"error: could not write {md_path}: {e}", err=True)
+            return 1
         typer.echo(f"wrote {md_path.name}")
     else:
         typer.echo("no names entered")

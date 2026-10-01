@@ -11,9 +11,11 @@ models, or network.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import struct
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -136,6 +138,14 @@ def _capture_stderr(fn, *args, **kwargs):
 # ---------------------------------------------------------------------------
 # Non-TTY guard
 # ---------------------------------------------------------------------------
+
+
+def _write_sidecar(
+    tmp_path: Path, data: dict[str, Any], name: str = "sidecar.json"
+) -> Path:
+    path = tmp_path / name
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
 
 
 class TestNonTTYGuard:
@@ -635,8 +645,6 @@ class TestCtrlC:
                 return "Mikko"
             raise KeyboardInterrupt
 
-        import contextlib
-
         monkeypatch.setattr("vemoizer.speaker_clips.subprocess.run", _fake_ffmpeg_ok())
 
         with contextlib.suppress(KeyboardInterrupt):
@@ -652,6 +660,109 @@ class TestCtrlC:
         # No clip files remain (clip_session cleans up)
         wav_files = list(tmp_path.glob("clip_*.wav"))
         assert wav_files == []
+
+
+class TestPersistFailure:
+    def test_persist_readonly_dir_returns_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Read-only sidecar dir → clean error (exit 1), no traceback."""
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        ro = tmp_path / "ro"
+        ro.mkdir()
+        data = _sidecar()
+        data.pop("source", None)
+        data["paragraphs"] = data["paragraphs"][:1]
+        sc = ro / "sidecar.json"
+        sc.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        ro.chmod(0o555)
+        try:
+            inputs = iter(["Mikko", "n"])
+            rc, stderr = _capture_stderr(
+                run_names,
+                sc,
+                no_play=True,
+                input_fn=lambda prompt: next(inputs),
+                tty_isatty=lambda: True,
+            )
+        finally:
+            ro.chmod(0o755)
+        assert rc == 1
+        assert "could not persist speaker names" in stderr
+
+    def test_md_write_readonly_dir_returns_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Persist succeeds but .md write fails (dir becomes read-only in
+        between) → clean error (exit 1), no traceback."""
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        data = _sidecar()
+        data.pop("source", None)
+        data["paragraphs"] = data["paragraphs"][:1]
+        sc = _write_sidecar(tmp_path, data)
+
+        import vemoizer.names_cli as names_cli_mod
+        import vemoizer.render_cli as render_cli_mod
+
+        original_persist = render_cli_mod._persist_speaker_names
+
+        def persist_then_lock(*a, **kw):
+            original_persist(*a, **kw)
+            tmp_path.chmod(0o555)
+
+        # ``names_cli`` imported ``_persist_speaker_names`` by name at
+        # module load; patch BOTH binding sites so the patch takes effect.
+        monkeypatch.setattr(render_cli_mod, "_persist_speaker_names", persist_then_lock)
+        monkeypatch.setattr(names_cli_mod, "_persist_speaker_names", persist_then_lock)
+        try:
+            inputs = iter(["Mikko", "n"])
+            rc, stderr = _capture_stderr(
+                run_names,
+                sc,
+                no_play=True,
+                input_fn=lambda prompt: next(inputs),
+                tty_isatty=lambda: True,
+            )
+        finally:
+            tmp_path.chmod(0o755)
+        assert rc == 1
+        assert "could not write" in stderr
+
+
+class TestCompleterRestore:
+    def test_completer_restored_after_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Command-level: the prompt loop restores readline's completer to
+        its pre-call value (decision 7)."""
+        try:
+            import readline
+        except ImportError:  # pragma: no cover
+            pytest.skip("readline not available")
+
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+
+        def sentinel(text: str, state: int) -> str | None:
+            return None
+
+        monkeypatch.setattr(readline, "get_completer", lambda: sentinel)
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+        data = _sidecar()
+        data.pop("source", None)
+        sc = _write_sidecar(tmp_path, data)
+
+        inputs = iter(["Mikko", "n", "Aino", "n"])
+        rc = run_names(
+            sc,
+            no_play=True,
+            input_fn=lambda prompt: next(inputs),
+            tty_isatty=lambda: True,
+        )
+        assert rc == 0
+        # The sentinel (the pre-call completer) is back in place.
+        assert readline.get_completer() is sentinel
 
 
 # ---------------------------------------------------------------------------
