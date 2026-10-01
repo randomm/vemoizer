@@ -122,19 +122,21 @@ def _call_write_seam(
 
     Contract: the seam is called with exactly ``(label, result)`` —
     two positional arguments, nothing more. Its return value is
-    ignored (bool/None both fine); it may raise. This helper turns any
-    ``Exception`` into one clean ``error: <label>: could not write
-    output: <reason>`` line and ``False``; ``KeyboardInterrupt``/
-    ``SystemExit`` propagate; a normal call returns True (the caller
-    sets exit 1 on ``False`` and keeps going — the seam must never
-    escape as a raw traceback after minutes of decoding).
+    ignored (bool/None both fine); it may raise, including from steps
+    that run before the actual file write (first-part path lookup,
+    mtime-date lookup). This helper turns any ``Exception`` into one
+    clean ``error: <label>: could not produce output: <reason>`` line
+    and ``False``; ``KeyboardInterrupt``/``SystemExit`` propagate; a
+    normal call returns True (the caller sets exit 1 on ``False`` and
+    keeps going — the seam must never escape as a raw traceback after
+    minutes of decoding).
     """
     try:
         fn(label, result)
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as e:  # noqa: BLE001 - per-group fail-loud boundary
-        typer.echo(f"error: {label}: could not write output: {e}", err=True)
+        typer.echo(f"error: {label}: could not produce output: {e}", err=True)
         return False
     return True
 

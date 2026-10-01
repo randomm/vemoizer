@@ -269,10 +269,10 @@ def test_seam_runtime_error_is_clean_and_continues(
     out, err = capsys.readouterr()
     assert code == 1
     assert "Traceback" not in err
-    assert "could not write output" in err
+    assert "could not produce output" in err
     assert "disk on fire" in err
     # Exactly one clean error line for the seam failure.
-    assert err.count("could not write output") == 1
+    assert err.count("could not produce output") == 1
     # The second group was still written (one full pair).
     mds = sorted(tmp_path.glob("*.md"))
     js = sorted(tmp_path.glob("*.json"))
@@ -329,6 +329,33 @@ def test_seam_system_exit_still_propagates(tmp_path, monkeypatch) -> None:
             write_group_fn=write_group,
             input_fn=lambda _: "\n",
         )
+
+
+def test_seam_date_lookup_failure_message_is_accurate(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """A seam failure that runs BEFORE the actual file write (the
+    mtime-date lookup, not a write) must not be misattributed: the
+    error line says ``could not produce output`` with the reason,
+    never ``could not write output``; exit 1, no traceback, no files."""
+    _fake_continuation_seams(monkeypatch)
+    touch_files(["a.m4a", "b.m4a"], tmp_path)
+    record: list[str] = []
+    fake_transcribe(monkeypatch, record)
+
+    def boom(_path):
+        raise OverflowError("year out of range")
+
+    monkeypatch.setattr(batch_preset, "_mtime_date_str", boom)
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    result = runner.invoke(app, ["meeting", "a.m4a", "b.m4a", "--yes"])
+    assert result.exit_code == 1
+    assert result.stderr.count("could not produce output") == 1
+    assert "year out of range" in result.stderr
+    assert "could not write output" not in result.stderr
+    assert "Traceback" not in result.stderr
+    assert list(tmp_path.glob("*.md")) == []
+    assert list(tmp_path.glob("*.json")) == []
 
 
 def test_seam_none_return_is_backward_compatible(tmp_path, monkeypatch) -> None:
