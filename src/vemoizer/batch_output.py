@@ -395,15 +395,28 @@ def run_preset(
                     # with a clean error line, not a traceback (issue #78).
                     typer.echo(f"error: {e}", err=True)
                     return 1
-                result = transcribe_file(
-                    file,
-                    diarize=options.diarize,
-                    config_path=options.config_path,
-                    profile=options.profile,
-                    repair=options.repair,
-                    glossary_path=effective_glossary,
-                    speakers=options.speakers,
-                )
+                # The per-file decode guard (issue #77 merge gate): an
+                # unexpected transcribe_file failure degrades to a clean
+                # one-line error naming the file (never a raw traceback
+                # mid-batch); KeyboardInterrupt/SystemExit propagate; the
+                # run continues with the next file and the temp glossary
+                # cleanup in the finally is unchanged.
+                try:
+                    result = transcribe_file(
+                        file,
+                        diarize=options.diarize,
+                        config_path=options.config_path,
+                        profile=options.profile,
+                        repair=options.repair,
+                        glossary_path=effective_glossary,
+                        speakers=options.speakers,
+                    )
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except Exception as e:  # noqa: BLE001 - per-file fail-loud boundary
+                    typer.echo(f"error: {file.name}: {e}", err=True)
+                    exit_code = 1
+                    continue
                 if _check_result(
                     file, result, diarize=options.diarize, diarize_label="diarize"
                 ):
