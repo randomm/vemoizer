@@ -75,14 +75,10 @@ def _find_people_config_path(
 
 def _read_people_list(config_path: Path | None) -> list[str]:
     """Read the ``people`` key as a list of strings; fail-open to []."""
-    if config_path is None or not config_path.is_file():
+    if config_path is None:
         return []
-    try:
-        with config_path.open("rb") as f:
-            raw = tomllib.load(f)
-    except (OSError, tomllib.TOMLDecodeError, ValueError):
-        return []
-    if not isinstance(raw, dict):
+    raw, _ = _read_people_raw(config_path)
+    if raw is None:
         return []
     return _top_level_people(raw) or []
 
@@ -101,6 +97,25 @@ def _top_level_people(raw: dict[str, Any]) -> list[str] | None:
     return [s for s in value if isinstance(s, str)]
 
 
+def _read_people_raw(config_path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """Load an existing config, or report why it cannot be written.
+
+    Returns ``(dict, None)`` for a parseable file, ``(None, exc_name)``
+    when an EXISTING file could not be read or parsed (caller must leave
+    it byte-identical), or ``(None, None)`` when no file exists yet.
+    """
+    if not config_path.is_file():
+        return None, None
+    try:
+        with config_path.open("rb") as f:
+            loaded = tomllib.load(f)
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        return None, type(exc).__name__
+    if isinstance(loaded, dict):
+        return loaded, None
+    return {}, None
+
+
 def _write_people_list(config_path: Path, new_people: list[str]) -> None:
     """Atomically write *new_people* as the top-level ``people`` key.
 
@@ -108,16 +123,22 @@ def _write_people_list(config_path: Path, new_people: list[str]) -> None:
     inside a table (e.g. under ``[llm]``) is dropped: a ``people`` key is
     only valid as a top-level list of strings, and leaving a stale one would
     make the next strict config load fail (issue #93).
+
+    Write-back is best-effort: an existing config that cannot be read or
+    parsed is left byte-identical with one warning line (rewriting it with
+    only ``people`` would destroy unreadable keys); a missing config is
+    still created (issue #93).
     """
-    raw: dict[str, Any] = {}
-    if config_path.is_file():
-        try:
-            with config_path.open("rb") as f:
-                loaded = tomllib.load(f)
-        except (OSError, tomllib.TOMLDecodeError, ValueError):
-            loaded = None
-        if isinstance(loaded, dict):
-            raw = loaded
+    raw, exc_name = _read_people_raw(config_path)
+    if exc_name is not None:
+        typer.echo(
+            f"warning: could not update people in {config_path}: "
+            f"{exc_name} (config left unchanged)",
+            err=True,
+        )
+        return
+    if raw is None:
+        raw = {}
 
     for table in raw.values():
         if isinstance(table, dict):
@@ -216,6 +237,32 @@ def _resolve_source_entry(
     if not resolved.is_file():
         return None
     return {**entry, "path": str(resolved)}
+
+
+def _prompt_add_to_people(
+    answer: str,
+    resolved_config: Path | None,
+    people_list: list[str],
+    ask: Callable[[str], str | _NotFound],
+) -> bool:
+    """Ask to add *answer* to the people list; write it on yes.
+
+    Shared by the stored-name and new-name branches. Returns ``True`` when
+    EOF aborted the prompt (caller must stop the run). The ask callable is
+    passed in so the closure (and its ``_NotFound`` sentinel handling) stays
+    with the caller.
+    """
+    cfg_display = str(resolved_config) if resolved_config else "(no config)"
+    add_result = ask(f"Add {answer} to people in {cfg_display}? [y/N] ")
+    if isinstance(add_result, _NotFound):
+        return True
+    if add_result.strip().lower() != "y" or resolved_config is None:
+        return False
+    new_people = list(people_list)
+    if answer not in new_people:
+        new_people.append(answer)
+    _write_people_list(resolved_config, new_people)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -333,10 +380,7 @@ def run_names(
         else:
             degraded = True
 
-    if no_play:
-        # Quotes only; no extraction or playback.
-        has_clips = False
-    elif not raw_source:
+    if not raw_source:
         has_clips = False
         degraded = True
     else:
@@ -358,6 +402,7 @@ def run_names(
         # Install readline completer (if applicable); restores the previous
         # completer on every exit path, including KeyboardInterrupt.
         restore_completer = _install_completer(people_list)
+        known = [p.lower() for p in people_list]
         try:
             for label in sorted(shares, key=lambda x: shares[x], reverse=True):
                 share = shares[label]
@@ -367,7 +412,7 @@ def run_names(
                 for w in label_clips[:3]:
                     typer.echo(f'  "{w.quote}"')
 
-                # Play clips (if not --no-play and clips available)
+                # Play clips (skipped under --no-play; quotes only then)
                 if has_clips and not no_play and label_clips:
                     clip_map = extract_clips(resolved_source, label_clips[:3], tmp_dir)
                     for w in label_clips[:3]:
@@ -390,51 +435,27 @@ def run_names(
                     break
                 answer = result.strip()
 
-                if stored:
-                    if not answer:
-                        # Empty keeps the stored name; it already exists so
-                        # it never triggers the Add-to-people prompt.
-                        new_names[label] = stored
-                        continue
+                # Store the name. Stored-label with empty answer keeps the
+                # stored name; new-label with empty answer skips it.
+                keep_stored = bool(stored) and not answer
+                if keep_stored:
+                    new_names[label] = stored
+                elif answer:
                     new_names[label] = answer
-                    # People list: add new (replacing) name?
-                    if answer.lower() not in [p.lower() for p in people_list]:
-                        cfg_display = (
-                            str(resolved_config) if resolved_config else "(no config)"
-                        )
-                        add_result = _ask(
-                            f"Add {answer} to people in {cfg_display}? [y/N] "
-                        )
-                        if isinstance(add_result, _NotFound):
-                            prompt_aborted = True
-                            break
-                        yes = add_result.strip().lower()
-                        if yes == "y" and resolved_config is not None:
-                            new_people = list(people_list)
-                            if answer not in new_people:
-                                new_people.append(answer)
-                            _write_people_list(resolved_config, new_people)
                 else:
-                    if not answer:
-                        continue
-                    new_names[label] = answer
-                    # People list: add new name?
-                    if answer.lower() not in [p.lower() for p in people_list]:
-                        cfg_display = (
-                            str(resolved_config) if resolved_config else "(no config)"
-                        )
-                        add_result = _ask(
-                            f"Add {answer} to people in {cfg_display}? [y/N] "
-                        )
-                        if isinstance(add_result, _NotFound):
-                            prompt_aborted = True
-                            break
-                        yes = add_result.strip().lower()
-                        if yes == "y" and resolved_config is not None:
-                            new_people = list(people_list)
-                            if answer not in new_people:
-                                new_people.append(answer)
-                            _write_people_list(resolved_config, new_people)
+                    continue
+
+                # People list: ask to add a NEW name (replacing or fresh)
+                # that is not already there (case-insensitive). A kept
+                # stored name is skipped (it was added when originally named).
+                if not keep_stored and (
+                    answer.lower() not in known
+                    and _prompt_add_to_people(
+                        answer, resolved_config, people_list, _ask
+                    )
+                ):
+                    prompt_aborted = True
+                    break
         finally:
             if restore_completer is not None:
                 restore_completer()
