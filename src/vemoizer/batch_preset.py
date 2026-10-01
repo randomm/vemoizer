@@ -42,7 +42,12 @@ from typing import Any
 
 import typer
 
-from vemoizer.batch_output import PRESET_FORMATS, _check_result, _write_preset_output
+from vemoizer.batch_output import (
+    PRESET_FORMATS,
+    _check_result,
+    _render_quality_report,
+    _write_preset_output,
+)
 from vemoizer.diarization import SpeakerCount
 from vemoizer.ingest import IngestError
 from vemoizer.llm import ConfigError
@@ -146,6 +151,16 @@ def _run_preset_groups(
     from vemoizer.sidecar import resolve_run_glossary_files
 
     gfiles = resolve_run_glossary_files(command, options.glossary_path)
+    # M6 (issue #75): the report-only glossary provenance, stashed on each
+    # group's run dict before the seam writes (see run_preset's plain loop
+    # for the full contract). Only whisper-prompt terms — @-prefixed
+    # LLM-only terms never reached the whisper prompt, so they are not part
+    # of the "X of N" denominator.
+    glossary_terms = list(options.whisper_prompt)
+    if gfiles:
+        glossary_source = ", ".join(gfiles) + f" ({len(glossary_terms)} terms)"
+    else:
+        glossary_source = None
 
     def write_group(label: Path | str, result: dict[str, Any]) -> None:
         # One dated pair per group. The date is the first part's mtime
@@ -171,6 +186,12 @@ def _run_preset_groups(
             glossary_files=gfiles,
             source_paths=parts,
         )
+        # M6: stash the glossary provenance (report-only; the run dict is
+        # the interface — never stored on the pipeline result, which
+        # transcribe_file never sees).
+        if glossary_source is not None:
+            result["glossary_source"] = glossary_source
+            result["glossary_terms"] = glossary_terms
         # The first part's path: the label's own path (single-part) or its
         # first name resolved against the original files (the group is
         # built over natural_sort(files), so the first part is a member).
@@ -399,14 +420,6 @@ def run_preset(
                 if result is None:
                     exit_code = 1
                     continue
-                if _check_result(
-                    file,
-                    result,
-                    diarize=options.diarize,
-                    diarize_label="diarize",
-                ):
-                    exit_code = 1
-                    continue
                 # M5a: stash this file's PCM duration (fail-open) and
                 # build the sidecar keys before the seam writes the
                 # .md + .json pair.
@@ -421,6 +434,34 @@ def run_preset(
                     glossary_files=gfiles,
                     source_paths=[file],
                 )
+                # M6 (issue #75): stash the report-only glossary provenance
+                # before the seam writes. Source = the real layer file path(s)
+                # the run read (never the composed temp file — deleted in the
+                # finally) or the explicit --glossary; term count = the
+                # whisper-prompt terms only (@-prefixed LLM-only terms never
+                # reached the whisper prompt). Absent when the run read no
+                # glossary at all — then the md header and the report omit
+                # the line, never a blank one.
+                if gfiles:
+                    result["glossary_source"] = (", ".join(gfiles)) + (
+                        f" ({len(options.whisper_prompt)} terms)"
+                    )
+                    result["glossary_terms"] = list(options.whisper_prompt)
+                # M6 (issue #75): compute the per-file quality report
+                # BEFORE _check_result pops result["warnings"] (a report
+                # computed after the pop would see an empty warnings list),
+                # then let the check print the warnings to stderr and fail
+                # loud on error/no-transcript/no-labels.
+                _render_quality_report(result, diarize_requested=bool(options.diarize))
+                result.pop("glossary_terms", None)
+                if _check_result(
+                    file,
+                    result,
+                    diarize=options.diarize,
+                    diarize_label="diarize",
+                ):
+                    exit_code = 1
+                    continue
                 pair = _write_preset_output(
                     result,
                     first_stem,

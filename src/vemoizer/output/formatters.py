@@ -277,4 +277,12 @@ def format_transcript(transcript: dict[str, Any], format: str) -> str:
     if format not in dispatch:
         known = ", ".join(OUTPUT_FORMATS)
         raise ValueError(f"Unknown output format: {format!r}. Expected one of: {known}")
+    if format == "md":
+        # M6 (issue #75): the section language rides on the run dict
+        # (``transcript["language"]``, loaded by the pipeline from the
+        # config layer); absent → the "fi" default in format_md.
+        language = transcript.get("language")
+        if not isinstance(language, str):
+            language = "fi"
+        return format_md(transcript, language=language)
     return dispatch[format](transcript)

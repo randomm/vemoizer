@@ -30,6 +30,7 @@ from vemoizer.llm import (
     _find_nearest_vemoizer_config,
     load_config,
     load_default_config,
+    load_language,
 )
 
 #: A minimal valid ``[llm]`` section.
@@ -419,3 +420,85 @@ class TestExplicitPathContract:
         f = tmp_path / "bad.toml"
         f.write_text("[llm\nbroken", encoding="utf-8")
         assert load_config(str(f)) is None
+
+
+# ---------------------------------------------------------------------------
+# Section language (issue #75, M6) — llm.load_language
+# ---------------------------------------------------------------------------
+
+
+class TestLoadLanguage:
+    def test_explicit_path_language_en(self, tmp_path: Path) -> None:
+        f = tmp_path / "cfg.toml"
+        f.write_text('language = "en"\n' + _VALID_SECTION, encoding="utf-8")
+        assert load_language(str(f)) == "en"
+
+    def test_explicit_path_language_fi(self, tmp_path: Path) -> None:
+        f = tmp_path / "cfg.toml"
+        f.write_text('language = "fi"\n' + _VALID_SECTION, encoding="utf-8")
+        assert load_language(str(f)) == "fi"
+
+    def test_explicit_path_case_insensitive_en(self, tmp_path: Path) -> None:
+        f = tmp_path / "cfg.toml"
+        f.write_text('language = "EN"\n', encoding="utf-8")
+        assert load_language(str(f)) == "en"
+
+    def test_missing_explicit_path_defaults_fi(self, tmp_path: Path) -> None:
+        assert load_language(str(tmp_path / "nope.toml")) == "fi"
+
+    def test_explicit_path_no_language_key_defaults_fi(self, tmp_path: Path) -> None:
+        f = tmp_path / "cfg.toml"
+        f.write_text(_VALID_SECTION, encoding="utf-8")
+        assert load_language(str(f)) == "fi"
+
+    def test_explicit_path_non_string_language_defaults_fi(
+        self, tmp_path: Path
+    ) -> None:
+        f = tmp_path / "cfg.toml"
+        f.write_text("language = 42\n", encoding="utf-8")
+        assert load_language(str(f)) == "fi"
+
+    def test_explicit_path_bad_toml_defaults_fi(self, tmp_path: Path) -> None:
+        f = tmp_path / "cfg.toml"
+        f.write_text("language = \nbroken", encoding="utf-8")
+        assert load_language(str(f)) == "fi"
+
+    def test_devnull_sentinel_defaults_fi(self, tmp_path, monkeypatch) -> None:
+        # A project config exists in the tree — the sentinel must skip it.
+        (tmp_path / ".vemoizer").mkdir()
+        (tmp_path / ".vemoizer" / "config.toml").write_text(
+            'language = "en"\n', encoding="utf-8"
+        )
+        monkeypatch.chdir(tmp_path)
+        assert load_language("os.devnull") == "fi"
+
+    def test_project_walk_up_language_en(self, tmp_path, monkeypatch) -> None:
+        (tmp_path / ".vemoizer").mkdir()
+        (tmp_path / ".vemoizer" / "config.toml").write_text(
+            'language = "en"\n' + _VALID_SECTION, encoding="utf-8"
+        )
+        monkeypatch.chdir(tmp_path)
+        assert load_language(None) == "en"
+
+    def test_no_config_defaults_fi(self, tmp_path, monkeypatch) -> None:
+        # An isolated tree with no .vemoizer anywhere → default.
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.chdir(empty)
+        assert load_language(None) == "fi"
+
+    def test_nearest_project_config_wins_on_walk_up(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        (tmp_path / ".vemoizer").mkdir()
+        (tmp_path / ".vemoizer" / "config.toml").write_text(
+            'language = "fi"\n', encoding="utf-8"
+        )
+        nested = tmp_path / "a" / "b"
+        nested.mkdir(parents=True)
+        (nested / ".vemoizer").mkdir()
+        (nested / ".vemoizer" / "config.toml").write_text(
+            'language = "en"\n', encoding="utf-8"
+        )
+        monkeypatch.chdir(nested)
+        assert load_language(None) == "en"

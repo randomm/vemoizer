@@ -31,6 +31,7 @@ from vemoizer.output.naming import (
     nfc_stem_and_suffix,
 )
 from vemoizer.presets import RunOptions
+from vemoizer.report import build_quality_report
 
 
 def dated_basename(title: str, **kwargs) -> str:
@@ -184,6 +185,46 @@ def _write_temp_glossary(lines: list[str]) -> str:
     return str(path)
 
 
+def _render_quality_report(
+    result: dict[str, Any],
+    *,
+    diarize_requested: bool,
+) -> None:
+    """Compute the per-file quality report BEFORE the warnings pop.
+
+    M6 (issue #75): the report reads ``result["warnings"]`` and rides on
+    the run dict as ``quality_report`` (the md embeds it as a
+    ``<details>`` block) AND is returned to the caller for stdout
+    printing (suppressed by ``--quiet``). It must be computed HERE — not
+    in the write seam — because ``_check_result``'s destructive
+    ``result.pop("warnings")`` runs after this call: a report computed
+    later would see an empty warnings list in every real run.
+    Fail-open (invariant #5): ``build_quality_report`` never raises for
+    any run-dict shape the pipeline produces; a blank report (nothing to
+    report) stores an empty string the md formatter omits.
+    """
+    glossary_source = result.get("glossary_source")
+    glossary_source = (
+        glossary_source
+        if isinstance(glossary_source, str) and glossary_source
+        else None
+    )
+    glossary_terms = result.get("glossary_terms")
+    glossary_terms = (
+        [str(t) for t in glossary_terms] if isinstance(glossary_terms, list) else None
+    )
+    language = result.get("language")
+    language = language if isinstance(language, str) and language else "fi"
+    report = build_quality_report(
+        result,
+        diarize_requested=diarize_requested,
+        glossary_source=glossary_source,
+        glossary_terms=glossary_terms,
+        language=language,
+    )
+    result["quality_report"] = report
+
+
 def _check_result(
     file: Path | str,
     result: dict[str, Any],
@@ -284,6 +325,16 @@ def _process_result(
     effective_diarize = (
         diarize if diarize is not None else (options.diarize if options else False)
     )
+    # M6 (issue #75): the quality report is computed BEFORE _check_result
+    # pops result["warnings"] — after that pop the report would see an
+    # empty warnings list in every real run (the CLI's old line-233 pop
+    # is now inside _check_result).
+    _render_quality_report(result, diarize_requested=effective_diarize)
+    # glossary_terms is the report's matching input, not an output field:
+    # it is stashed by the preset seam and consumed here — never mirrored
+    # into a json/srt output file (the header shows the formatted
+    # glossary_source string only).
+    result.pop("glossary_terms", None)
     if _check_result(
         label,
         result,
@@ -313,4 +364,10 @@ def _process_result(
     if not quiet:
         name = label.name if isinstance(label, Path) else label
         typer.echo(f"wrote transcript for {name}")
+        # M6 (issue #75): the per-file quality report goes to stdout
+        # (suppressed by --quiet, per the ticket); the <details> block in
+        # the md already carries it for the file output.
+        report = result.get("quality_report")
+        if isinstance(report, str) and report.strip():
+            typer.echo(report)
     return True

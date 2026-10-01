@@ -27,11 +27,13 @@ from vemoizer.output.formatters import (
     OUTPUT_FORMATS,
     format_json,
     format_srt,
+    format_transcript,
     format_txt,
     format_vtt,
     srt_timestamp,
     vtt_timestamp,
 )
+from vemoizer.output.markdown import format_md
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "output"
 
@@ -577,8 +579,6 @@ def test_captions_from_words_without_speakers_have_no_labels() -> None:
 
 
 def test_format_transcript_dispatches_by_format() -> None:
-    from vemoizer.output.formatters import format_transcript
-
     assert format_transcript(TRANSCRIPT, "txt") == format_txt(TRANSCRIPT)
     assert format_transcript(TRANSCRIPT, "json") == format_json(TRANSCRIPT)
     assert format_transcript(TRANSCRIPT, "srt") == format_srt(TRANSCRIPT)
@@ -592,8 +592,6 @@ def test_format_transcript_dispatches_by_format() -> None:
 
 
 def test_format_transcript_rejects_unknown_format() -> None:
-    from vemoizer.output.formatters import format_transcript
-
     with pytest.raises(ValueError, match="Unknown output format"):
         format_transcript(TRANSCRIPT, "csv")
 
@@ -658,3 +656,110 @@ def test_json_omits_part_markers_when_absent_or_empty() -> None:
     assert "part_markers" not in json.loads(
         format_json({"text": "x", "part_markers": []})
     )
+
+
+# -- md golden fixture + <details> quality report (issue #75) ------------
+
+
+def _md_golden_transcript() -> dict:
+    """Paragraphs-bearing variant of the DIARIZED_TRANSCRIPT golden dict.
+
+    The DIARIZED_TRANSCRIPT fixture has no paragraphs, so the md golden is
+    built from a paragraphs list with the same segment texts/speakers,
+    plus one suspect paragraph to exercise the labelled warning path.
+    """
+    return {
+        "text": (
+            "Käytimme aamupäivän debuggaamassa deploy pipeline issuea. "
+            "Ei mitään outoa, mutta CI oli aivan flaky. "
+            "Testataan uudestaan illalla, ehkä kun infra on ehtinyt "
+            "vääntyä takaisin."
+        ),
+        "language": "fi",
+        "speakers": ["SPEAKER_00", "SPEAKER_01"],
+        "paragraphs": [
+            {
+                "start": 0.0,
+                "end": 2.0,
+                "text": "Käytimme aamupäivän debuggaamassa deploy pipeline issuea.",
+                "speaker": "SPEAKER_00",
+            },
+            {
+                "start": 2.0,
+                "end": 4.5,
+                "text": "Ei mitään outoa, mutta CI oli aivan flaky.",
+                "speaker": "SPEAKER_01",
+                "suspect": "garble",
+            },
+            {
+                "start": 4.5,
+                "end": 6.0,
+                "text": (
+                    "Testataan uudestaan illalla, ehkä kun infra on ehtinyt "
+                    "vääntyä takaisin."
+                ),
+                "speaker": "SPEAKER_00",
+            },
+        ],
+    }
+
+
+def test_format_md_matches_golden_fixture() -> None:
+    rendered = format_md(_md_golden_transcript())
+    expected = (FIXTURE_DIR / "expected.md").read_text(encoding="utf-8")
+    assert rendered == expected
+
+
+def test_md_with_quality_report_renders_details_block() -> None:
+    """A `quality_report` string on the run dict renders as a <details>
+    block AFTER the transcript section (the M6 quality-report seam)."""
+    transcript = _md_golden_transcript()
+    transcript["quality_report"] = "- Puhujat: 2 (SPEAKER_00, SPEAKER_01)"
+    md = format_md(transcript)
+    assert "<details>" in md
+    assert "<summary>Laadunseuranta</summary>" in md
+    assert "- Puhujat: 2 (SPEAKER_00, SPEAKER_01)" in md
+    assert "</details>" in md
+    # The block is after the transcript content.
+    assert md.index("Käytimme aamupäivän") < md.index("<details>")
+
+
+def test_md_without_quality_report_has_no_details_block() -> None:
+    md = format_md(_md_golden_transcript())
+    assert "<details>" not in md
+
+
+def test_md_quality_report_non_string_omits_block() -> None:
+    transcript = _md_golden_transcript()
+    transcript["quality_report"] = None
+    md = format_md(transcript)
+    assert "<details>" not in md
+
+
+def test_md_quality_report_empty_string_omits_block() -> None:
+    transcript = _md_golden_transcript()
+    transcript["quality_report"] = ""
+    md = format_md(transcript)
+    assert "<details>" not in md
+
+
+def test_format_transcript_md_threads_language_from_run_dict() -> None:
+    """The run-dict ``language`` key selects the md section language.
+
+    M6 (issue #75): the written md deliverable must honour ``language =
+    "en"`` from the config — format_transcript (the seam every real md
+    write goes through) must thread it into format_md, not default to fi.
+    """
+    notes = {"title": "Meeting", "summary": "Summary."}
+    t = {"text": "x", "notes": notes, "language": "en"}
+    md = format_transcript(t, "md")
+    assert "## Summary" in md
+    assert "## Tiivistelmä" not in md
+
+
+def test_format_transcript_md_without_language_key_defaults_fi() -> None:
+    notes = {"title": "Palaveri", "summary": "Yhteenveto."}
+    t = {"text": "x", "notes": notes}
+    md = format_transcript(t, "md")
+    assert "## Tiivistelmä" in md
+    assert "## Summary" not in md
