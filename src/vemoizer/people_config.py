@@ -123,6 +123,13 @@ def write_people_list(config_path: Path, new_people: list[str]) -> None:
     text: a ``people`` key is only valid top-level, and a stale nested
     one would fail the next strict config load (issue #93).
 
+    Two safety mechanisms keep the surgical path from writing a broken
+    file: the surgical result must re-parse to exactly the intended data
+    (a table-nested stale ``people`` key that would otherwise survive
+    makes it fail), and on any failure the code falls through to the
+    re-emit (or, if that cannot round-trip either, to the refusal path)
+    rather than writing a partial edit.
+
     Best-effort: an existing config that cannot be read or parsed, or a
     layout that cannot be expressed without data loss, is left
     byte-identical with one warning line; a missing config is still
@@ -176,8 +183,10 @@ def _surgical_people_edit(config_path: Path, intended: dict[str, Any]) -> str | 
     (multi-line people array, ``[people]`` table, scalar people, a
     table-nested stale ``people`` that only the re-emit can drop, a
     re-parse mismatch, or the file disappearing/going unreadable between
-    the parse and this read — the caller then falls through to the
-    refuse-with-warning path, never a traceback).
+    the parse and this read — both ``OSError`` and ``UnicodeDecodeError``
+    on the second read route to the refusal path via ``None`` — the caller
+    then falls through to the re-emit/refuse-with-warning path, never a
+    traceback).
     """
     try:
         text = config_path.read_text(encoding="utf-8")

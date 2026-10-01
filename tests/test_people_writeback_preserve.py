@@ -29,6 +29,7 @@ from typing import Any
 import pytest
 from _cli_helpers import isolate_home
 
+from vemoizer.llm import ConfigError, _strict_load
 from vemoizer.people_config import write_people_list
 
 # --- Helpers ---
@@ -242,6 +243,43 @@ class TestSurgicalReplace:
         loaded = tomllib.loads(config.read_text(encoding="utf-8"))
         assert loaded["people"] == ["Top", "New"]
         assert "people" not in loaded["llm"]
+
+    def test_stale_nested_people_with_top_level_list_pinned_by_strict_load(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Regression test for the lens-review claim (issue #93): a config
+        with a single-line top-level people AND a table-nested stale
+        people (``[llm]`` → ``people``). Note the claim's literal config
+        (top-level people lines AFTER the ``[llm]`` header) is not valid
+        TOML: a bare key after a table header belongs to that table, so
+        the only valid form is a top-level people line BEFORE the table
+        plus the nested one under it — the surgical single-line replace
+        path. The replace must not win: ``intended`` already has the
+        nested key stripped, so the surgical result fails the re-parse
+        check and the re-emit drops it. The result parses, carries both
+        names at top level, keeps no nested people key, and passes the
+        strict config load (which ``llm.people`` is not a known llm
+        key).
+        """
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        config = _config_path(tmp_path)
+        config.write_text(
+            'x = 1\npeople = ["Top"]\n[llm]\npeople = ["stale"]\n',
+            encoding="utf-8",
+        )
+
+        write_people_list(config, ["Top", "New"])
+
+        text = config.read_text(encoding="utf-8")
+        loaded = tomllib.loads(text)
+        assert loaded["people"] == ["Top", "New"]
+        assert "people" not in loaded.get("llm", {})
+        assert loaded["x"] == 1
+        # The strict load must accept the file without ConfigError: a
+        # surviving nested llm.people would fail it (llm.people is not a
+        # known llm key).
+        with pytest.raises(ConfigError, match="unknown top-level key or section 'x'"):
+            _strict_load(config)
 
 
 # --- Unsupported layout: surgical impossible, file refused unchanged ---
