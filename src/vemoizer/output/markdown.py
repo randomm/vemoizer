@@ -103,7 +103,12 @@ def _suspect_prefix(suspect: Any) -> str:
     """
     if suspect is None:
         return ""
-    label = _SUSPECT_LABELS.get(suspect, f"⚠ {suspect}")
+    # Non-string (unhashable) suspect values would raise from the dict
+    # lookup — coerce so the fallback renders instead of crashing.
+    if isinstance(suspect, str):
+        label = _SUSPECT_LABELS.get(suspect, f"⚠ {suspect}")
+    else:
+        label = f"⚠ {suspect}"
     return f"{label} "
 
 
@@ -124,7 +129,9 @@ def _clock_or_none(seconds: Any) -> str | None:
     if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
         return None
     value = float(seconds)
-    if value != value or value in (float("inf"), float("-inf")):
+    # Invalid (negative / non-finite) times are omitted like a missing
+    # key, not silently rendered as [00:00:00].
+    if value != value or value in (float("inf"), float("-inf")) or value < 0:
         return None
     return _clock_time(value)
 

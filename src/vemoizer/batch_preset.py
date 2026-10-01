@@ -42,7 +42,12 @@ from typing import Any
 
 import typer
 
-from vemoizer.batch_output import PRESET_FORMATS, _check_result, _write_preset_output
+from vemoizer.batch_output import (
+    PRESET_FORMATS,
+    _check_result,
+    _render_quality_report,
+    _write_preset_output,
+)
 from vemoizer.diarization import SpeakerCount
 from vemoizer.ingest import IngestError
 from vemoizer.llm import ConfigError
@@ -415,14 +420,6 @@ def run_preset(
                 if result is None:
                     exit_code = 1
                     continue
-                if _check_result(
-                    file,
-                    result,
-                    diarize=options.diarize,
-                    diarize_label="diarize",
-                ):
-                    exit_code = 1
-                    continue
                 # M5a: stash this file's PCM duration (fail-open) and
                 # build the sidecar keys before the seam writes the
                 # .md + .json pair.
@@ -450,6 +447,21 @@ def run_preset(
                         f" ({len(options.whisper_prompt)} terms)"
                     )
                     result["glossary_terms"] = list(options.whisper_prompt)
+                # M6 (issue #75): compute the per-file quality report
+                # BEFORE _check_result pops result["warnings"] (a report
+                # computed after the pop would see an empty warnings list),
+                # then let the check print the warnings to stderr and fail
+                # loud on error/no-transcript/no-labels.
+                _render_quality_report(result, diarize_requested=bool(options.diarize))
+                result.pop("glossary_terms", None)
+                if _check_result(
+                    file,
+                    result,
+                    diarize=options.diarize,
+                    diarize_label="diarize",
+                ):
+                    exit_code = 1
+                    continue
                 pair = _write_preset_output(
                     result,
                     first_stem,

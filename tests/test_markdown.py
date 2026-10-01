@@ -155,6 +155,39 @@ def test_suspect_garble_outranks_number() -> None:
     assert "⚠ luku" not in md
 
 
+def test_suspect_non_string_value_renders_raw() -> None:
+    """A non-string (unhashable) suspect value renders raw, never crashes."""
+    md = format_md(
+        {
+            "text": "x",
+            "paragraphs": [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "outo kohta",
+                    "suspect": ["weird", "value"],
+                },
+            ],
+        }
+    )
+    assert "⚠ [" in md  # the list's repr, via the non-string fallback
+    assert "outo kohta" in md
+
+
+def test_paragraph_negative_start_omits_timestamp() -> None:
+    """A negative ``start`` is omitted, not rendered as [00:00:00]."""
+    md = format_md(
+        {
+            "text": "x",
+            "paragraphs": [
+                {"start": -5.0, "end": 1.0, "text": "negatiivinen"},
+            ],
+        }
+    )
+    assert "[00:00:00]" not in md
+    assert "negatiivinen" in md
+
+
 def test_no_suspect_no_warning() -> None:
     md = format_md(
         {
