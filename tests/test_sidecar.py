@@ -13,7 +13,13 @@ from typing import Any, cast
 
 import pytest
 
-from vemoizer.sidecar import build_sidecar, glossary_layer_files, sha256_over_files
+from vemoizer.sidecar import (
+    build_sidecar,
+    glossary_layer_files,
+    group_durations,
+    group_part_paths,
+    sha256_over_files,
+)
 
 # ---------------------------------------------------------------------------
 # build_sidecar — single-file runs
@@ -267,6 +273,58 @@ def test_build_sidecar_part_markers_non_dict_entries() -> None:
     # Only the one valid dict entry survives.
     src = cast(list[dict[str, Any]], result["source"])
     assert len(src) == 1
+
+
+# ---------------------------------------------------------------------------
+# group_part_paths / group_durations — real part paths (issue #89)
+# ---------------------------------------------------------------------------
+
+
+def test_group_part_paths_single_part_path_label_returns_label(tmp_path: Path):
+    """A single-part group's label *is* the part's path: returned as-is,
+    never basename-looked-up against files (even when a same-basename
+    file is in the list)."""
+    a = tmp_path / "sub" / "a.m4a"
+    decoy = tmp_path / "decoy" / "a.m4a"
+    assert group_part_paths(a, [decoy]) == [a]
+    # A multi-part str label still resolves names against files.
+    assert group_part_paths("a.m4a", [decoy]) == [decoy]
+
+
+def test_group_durations_single_part_path_label(tmp_path: Path, monkeypatch):
+    """``group_durations`` measures a Path label at its OWN path, not a
+    basename resolved against the CWD or files."""
+    a = tmp_path / "sub" / "a.m4a"
+    a.parent.mkdir()
+
+    def fake_pcm(path, **kwargs):
+        if str(path) == str(a):
+            return 7.5
+        raise AssertionError(f"unexpected path {path!r}")
+
+    import vemoizer.ingest as ingest_module
+
+    monkeypatch.setattr(ingest_module, "pcm_duration_seconds", fake_pcm)
+    assert group_durations(a, [a]) == [7.5]
+
+
+def test_group_durations_multi_part_resolves_against_files(tmp_path, monkeypatch):
+    """A multi-part label's bare names resolve against files, so each
+    measurement sees the real on-disk path (never a CWD-relative name)."""
+    a = tmp_path / "a.m4a"
+    b = tmp_path / "b.m4a"
+
+    def fake_pcm(path, **kwargs):
+        if str(path) == str(a):
+            return 1.0
+        if str(path) == str(b):
+            return 2.0
+        raise AssertionError(f"unexpected path {path!r}")
+
+    import vemoizer.ingest as ingest_module
+
+    monkeypatch.setattr(ingest_module, "pcm_duration_seconds", fake_pcm)
+    assert group_durations("a.m4a+b.m4a", [a, b]) == [1.0, 2.0]
 
 
 # ---------------------------------------------------------------------------

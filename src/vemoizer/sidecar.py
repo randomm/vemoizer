@@ -197,41 +197,30 @@ def group_part_names(label: Path | str) -> list[str]:
     """The group label's part names, in label order.
 
     A single-part group's label is that part's path (its name is the
-    whole path string); a multi-part label (``a.m4a+b.m4a``) splits on
-    ``+``. One seam for the ``a+b`` label grammar: :func:`group_durations`,
-    :func:`group_part_paths` and the batch preset's first-part lookup all
-    derive their part list from here.
+    label's basename); a multi-part label (``a.m4a+b.m4a``) splits on
+    ``+``. One seam for the ``a+b`` label grammar: :func:`group_durations`
+    and :func:`group_part_paths` derive their part list from here.
     """
     if isinstance(label, Path):
         return [label.name]
     return label.split("+")
 
 
-def group_durations(label: Path | str) -> list[float]:
-    """Per-part decoded-PCM durations for a group's sidecar ``source``.
-
-    A single-part group's label is that part's path; a multi-part label
-    (``a.m4a+b.m4a``) resolves each part's filename. Durations come from
-    ``pcm_duration_seconds`` — the same measurement the sidecar's
-    ``part_offset_s`` (derived from ``part_markers``) is based on, so the
-    two stay consistent.
-    """
-    from vemoizer.ingest import pcm_duration_seconds
-
-    parts = [Path(name) for name in group_part_names(label)]
-    return [pcm_duration_seconds(p) for p in parts]
-
-
 def group_part_paths(label: Path | str, files: list[Path]) -> list[Path]:
     """The group's per-part source paths, in label order.
 
-    A single-part group's label is that part's path; a multi-part label
-    (``a.m4a+b.m4a``) resolves each part's filename against the original
-    *files* list (the group is built over ``natural_sort(files)``, so each
-    part is a member of *files*). The sidecar's ``source[].path`` carries
-    these real on-disk paths (not the decorative marker label) so
-    ``render`` can re-apply per-part offsets to the actual files.
+    A single-part group's label *is* that part's path, so the label is
+    returned as-is (its directory is part of the identity — never a
+    basename lookup). A multi-part label (``a.m4a+b.m4a``) resolves each
+    part's filename against the original *files* list (the group is built
+    over ``natural_sort(files)``, so each part is a member of *files*),
+    falling back to the bare name when no member matches. The sidecar's
+    ``source[].path`` carries these real on-disk paths (not the decorative
+    marker label) so ``render`` can re-apply per-part offsets to the
+    actual files.
     """
+    if isinstance(label, Path):
+        return [label]
     parts: list[Path] = []
     for name in group_part_names(label):
         for f in files:
@@ -241,6 +230,22 @@ def group_part_paths(label: Path | str, files: list[Path]) -> list[Path]:
         else:
             parts.append(Path(name))
     return parts
+
+
+def group_durations(label: Path | str, files: list[Path]) -> list[float]:
+    """Per-part decoded-PCM durations for a group's sidecar ``source``.
+
+    Durations come from ``pcm_duration_seconds`` over the group's real
+    part paths (:func:`group_part_paths` — a single-part label's own
+    path; a multi-part label's names resolved against *files*), so each
+    measurement sees the file the run actually decoded (never a bare
+    name resolved against the process CWD). The same measurement the
+    sidecar's ``part_offset_s`` (derived from ``part_markers``) is based
+    on, so the two stay consistent.
+    """
+    from vemoizer.ingest import pcm_duration_seconds
+
+    return [pcm_duration_seconds(p) for p in group_part_paths(label, files)]
 
 
 def resolve_run_glossary_files(

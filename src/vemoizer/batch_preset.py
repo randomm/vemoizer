@@ -156,25 +156,24 @@ def _run_preset_groups(
         from vemoizer.sidecar import (
             build_sidecar,
             group_durations,
-            group_part_names,
             group_part_paths,
         )
 
+        parts = group_part_paths(label, files)
         with suppress(
             OSError, IngestError
         ):  # fail-open: skip durations on ffmpeg error
-            result["_source_durations"] = group_durations(label)
+            result["_source_durations"] = group_durations(label, files)
         build_sidecar(
             result,
             command=command,
             glossary_files=gfiles,
-            source_paths=group_part_paths(label, files),
+            source_paths=parts,
         )
-        # The first part's path: the label's first name resolved against
-        # the original files (the group is built over natural_sort(files),
-        # so the first part is always a member; fall back to a bare Path).
-        first_name = group_part_names(label)[0]
-        first = next((f for f in files if f.name == first_name), Path(first_name))
+        # The first part's path: the label's own path (single-part) or its
+        # first name resolved against the original files (the group is
+        # built over natural_sort(files), so the first part is a member).
+        first = parts[0]
         stem, _ = nfc_stem_and_suffix(first)
         pair = _write_preset_output(
             result,
