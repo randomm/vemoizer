@@ -324,6 +324,57 @@ existing NFC helpers:
 
 See section 12a — the single canonical sidecar-key contract lives there.
 
+### 14. Speaker clips (issue #90)
+
+`src/vemoizer/speaker_clips.py` selects short audio windows from a
+rendered sidecar's `paragraphs` and decodes them from the `source` parts
+for preview playback. It is a pure selector plus audio helpers; nothing
+it does changes the pipeline output.
+
+**Selection rules** (`select_clips(paragraphs, segments, *, per_speaker=3,
+min_s=3.0, max_s=5.0, total_duration=None) -> dict[label, list[ClipWindow]]`
+— `total_duration` overrides the audio-end used to clamp windows; it
+defaults to the end of the last paragraph):
+`ClipWindow` is a hashable 3-tuple subclass of `tuple` with named fields
+`start_s`, `end_s`, `quote`; the same value is the key of the
+dict returned by `extract_clips`:
+
+- A *turn* is one labelled, non-suspect paragraph — labelled iff its
+  `speaker` is a non-empty string (missing key, `None`, or `""` are all
+  unlabelled and excluded).
+- A turn of duration D is a candidate iff D ≥ 2 s and its
+  whitespace-collapsed, casefolded text is **not** a member of
+  `BACKCHANNELS ∪ BACKCHANNEL_PHRASES` (no word-count condition — a
+  backchannel word inside a longer sentence is a normal turn).
+- The window is the middle `min(max_s, D)` seconds of the turn, centered
+  on the turn midpoint and clamped to the audio duration. `min_s` is a
+  display annotation, not a disqualification threshold.
+- Picks for one speaker spread across the beginning, middle and end of
+  the meeting: the longest candidate from each third in order
+  (beginning → middle → end); when a third is empty, the longest remaining
+  candidate regardless of third. Fewer than `per_speaker` clean turns
+  yields fewer clips, without error. The result is sorted by `start_s`.
+
+Extraction (`extract_clips(source, windows, tmp_dir)`) maps each window
+onto the sidecar `source` part whose `[part_offset_s, part_offset_s +
+duration_s)` contains it (a part without a measured `duration_s` extends
+unbounded), and decodes only the needed span with ffmpeg
+`-ss {start} -t {dur}` placed **before** `-i` (input seeking, O(window))
+to 16 kHz mono WAV. `duration_s` is the part's measured decoded-PCM
+duration from the sidecar's `source` entries (via `pcm_duration_seconds`),
+never ffprobe. A window that straddles two parts, a window whose end
+exceeds the mapped part's `duration_s`, or a window whose source file is
+missing/unreadable yields `None` — never an exception.
+`play(path) -> bool` runs `afplay` (argv list, 30 s timeout) and fails
+open (returns `False`) on non-darwin, missing afplay, missing file,
+non-zero exit, or timeout.
+
+**No clips on disk**: `clip_session()` is a context manager yielding a
+fresh 0o700 temp dir; it removes the directory (and every clip in it) on
+normal exit, exception, and KeyboardInterrupt. Clips are preview-only —
+nothing clip-related is ever written to a persistent location, and no
+`clips` key is ever written to the sidecar.
+
 ## Model manifest
 
 | Stage | Upstream model | Load repo (MLX) | Pinned revision | Notes |
