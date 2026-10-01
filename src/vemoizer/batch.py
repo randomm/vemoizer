@@ -53,6 +53,7 @@ import typer
 
 from vemoizer.caffeinate import caffeinate_context
 from vemoizer.diarization import SpeakerCount
+from vemoizer.grouping_common import with_part_markers
 from vemoizer.ingest import IngestError
 from vemoizer.llm import ConfigError
 from vemoizer.output.naming import (  # noqa: F401
@@ -173,7 +174,10 @@ def transcribe_batch(
                     glossary_path=glossary_path,
                     speakers=speakers,
                 )
-            except (ConfigError, KeyboardInterrupt, SystemExit):
+            except (KeyboardInterrupt, SystemExit):
+                # ConfigError is handled by the separate _resolve_llm_config
+                # try above (it cannot come from transcribe_file); only the
+                # two non-Exception control-flow signals need re-raising here.
                 raise
             except Exception as e:
                 # A per-file decode/write failure is a clean one-line
@@ -421,17 +425,11 @@ def run_batch(
                         remove_concat_output(merged)
                 if "error" not in result:
                     # Multi-part groups only: single-part groups get no
-                    # part_markers key at all (issue #77). PartMarker gives
-                    # each {offset, label} entry an explicit type (finding 5).
-                    markers: list[PartMarker] = [
-                        {
-                            "offset": off.start_offset,
-                            "label": f"— osa {off.part_number} "
-                            f"(äänitys {off.source_filename})",
-                        }
-                        for off in offsets
-                    ]
-                    result["part_markers"] = markers
+                    # part_markers key at all (issue #77). with_part_markers
+                    # is the single place the batch layer attaches the marker
+                    # sidecar — it returns a NEW dict, so the pipeline's
+                    # result is never mutated in place.
+                    result = with_part_markers(result, offsets)
                 label = "+".join(p.name for p in group)
 
             if not _process_result(

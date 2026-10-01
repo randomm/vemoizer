@@ -153,3 +153,54 @@ def test_transcript_without_part_markers_renders_unchanged() -> None:
     md = format_md(_transcript())
     assert "— osa" not in md
     assert "Puhuttiin alustasta." in md
+
+
+def _no_para_markers() -> list[dict]:
+    return [
+        {"offset": 0.0, "label": "— osa 1 (äänto pair_a.m4a) —"},
+        {"offset": 2.5, "label": "— osa 2 (äänto pair_b.m4a) —"},
+    ]
+
+
+def test_md_no_paragraphs_markers_only() -> None:
+    """No timestamped structure and an empty body: the markers render
+    (joined) and there is no trailing bare text to append."""
+    md = format_md({"text": "", "part_markers": _no_para_markers()})
+    # Both markers render; markers-only means no body appended.
+    assert "— osa 1 (äänto pair_a.m4a) —" in md
+    assert "— osa 2 (äänto pair_b.m4a) —" in md
+    # Markers are the only content in the transcript section (no empty body).
+    t_section = md.split("## Transcript")[1]
+    assert "\n\n" in t_section
+    i1 = md.index("— osa 1")
+    i2 = md.index("— osa 2")
+    assert i1 < i2
+
+
+def test_md_no_paragraphs_body_only() -> None:
+    """No timestamped structure and no markers: the bare text renders
+    unchanged (the common single-file case)."""
+    md = format_md({"text": "vain teksti tässä"})
+    assert "vain teksti tässä" in md
+    assert "— osa" not in md
+
+
+def test_md_no_paragraphs_markers_and_body() -> None:
+    """No timestamped structure with markers AND a body: markers render
+    first, then the body, joined by blank lines."""
+    md = format_md({"text": "vain teksti tässä", "part_markers": _no_para_markers()})
+    i1 = md.index("— osa 1")
+    i2 = md.index("— osa 2")
+    i_t = md.index("vain teksti tässä")
+    assert i1 < i2 < i_t
+
+
+def test_md_no_paragraphs_neither_markers_nor_body() -> None:
+    """No timestamped structure, no markers, empty body: the transcript
+    section renders as a clean empty line — no crash, no stray markers."""
+    md = format_md({"text": ""})
+    assert "## Transcript" in md
+    assert "— osa" not in md
+    # The transcript section body is empty (no markers, no body text).
+    t_section = md.split("## Transcript")[1].strip()
+    assert t_section == ""

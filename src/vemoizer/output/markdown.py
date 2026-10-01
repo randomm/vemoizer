@@ -33,6 +33,24 @@ def _part_markers(transcript: dict[str, Any]) -> list[dict[str, Any]]:
     return [m for m in markers if isinstance(m, dict)]
 
 
+def _marker_labels(markers: list[dict[str, Any]]) -> list[str]:
+    """The stripped, non-empty marker labels.
+
+    One shared label-stripping helper for both render paths (the
+    interleaved ``_render_blocks`` and the no-paragraphs branch of
+    ``format_md``): the ``label`` of each marker, stripped, with blank
+    labels dropped. ``markers`` is already the dict-only list from
+    ``_part_markers`` (non-dict entries are dropped there), so this is
+    tolerant of a missing/blank ``label`` key (``m.get("label", "")``).
+    """
+    labels: list[str] = []
+    for m in markers:
+        label = str(m.get("label", "")).strip()
+        if label:
+            labels.append(label)
+    return labels
+
+
 def _render_blocks(
     blocks: list[tuple[float, str]], markers: list[dict[str, Any]]
 ) -> list[str]:
@@ -49,15 +67,13 @@ def _render_blocks(
     pi = 0
     for offset, text in blocks:
         while pi < len(pending) and float(pending[pi].get("offset", 0.0)) <= offset:
-            label = str(pending[pi].get("label", "")).strip()
-            if label:
-                lines.append(label)
+            # _marker_labels strips + drops blanks; a single-element call
+            # shares the exact label semantics with the no-paragraphs branch.
+            lines.extend(_marker_labels([pending[pi]]))
             pi += 1
         lines.append(text)
     while pi < len(pending):
-        label = str(pending[pi].get("label", "")).strip()
-        if label:
-            lines.append(label)
+        lines.extend(_marker_labels([pending[pi]]))
         pi += 1
     return lines
 
@@ -125,17 +141,10 @@ def format_md(transcript: dict[str, Any]) -> str:
         # marker, offset 0.0, is the only meaningful position) then the
         # bare text.
         body = str(transcript.get("text", "")).strip()
-        marker_lines = [
-            str(m.get("label", "")).strip()
-            for m in markers
-            if str(m.get("label", "")).strip()
-        ]
-        if marker_lines and body:
-            lines.append("\n\n".join(marker_lines + [body]))
-        elif body:
-            lines.append(body)
-        elif marker_lines:
-            lines.append("\n\n".join(marker_lines))
+        marker_lines = _marker_labels(markers)
+        parts = marker_lines + ([body] if body else [])
+        if parts:
+            lines.append("\n\n".join(parts))
     lines.append("")
 
     return "\n".join(lines)
