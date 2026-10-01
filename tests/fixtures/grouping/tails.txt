@@ -1,0 +1,8 @@
+fi_no_cue: ja sitten puhuttiin vielä deploymentin aikataulusta ja
+fi_cue_kiitos: tuo on siinä niin kiitos
+fi_cue_moi: no kai se oli kai moi
+fi_cue_naahdaan: tapaamista nähdään
+en_cue_thanks: so that is everything thanks
+en_cue_bye: all right then bye
+mid_cue: kiitos oli sitten puhua puhua puhua puhua puhua puhua
+silence:

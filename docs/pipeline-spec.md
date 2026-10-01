@@ -365,8 +365,52 @@ and `memo` presets can reuse it.
 | `--format` | `all` | `txt`, `json`, `srt`, `vtt`, or a comma-separated subset |
 | `--quiet` / `-q` | off | suppress the summary output |
 | `--verbose` / `-v` | off | per-stage progress logging to stderr |
-| `--copy` | off | copy transcript text to the clipboard via pbcopy (macOS only) |
+| `--copy` | off | copy transcript text to the clipboard via pbcopy (macOS only; single-file runs — a warning is printed when 2+ files are passed) |
+| `--yes` | off | group mode for 2+ files: run the 20 s boundary decodes and accept every continuation proposal without a prompt (mutually exclusive with `--no-group`) |
+| `--no-group` | off | skip split-recording grouping entirely — each file is transcribed standalone (no boundary decode, no concat, no part markers) |
 | `--low-memory` / `--no-low-memory` | auto | low-memory model-loading mode; auto-detected by total RAM when unset (on at ≤16 GiB, off if detection fails) |
+
+Split-recording grouping (issue #77, 2+ files only): the inputs are
+naturally sorted (NFC stem, trailing integer as the numeric key), the
+last 20 s of each file and the first 20 s of its successor are decoded
+with the Whisper boundary model (only those 20 s windows — ffmpeg
+`-ss`/`-t`; the full file is never decoded for the probe), and each
+boundary is proposed as *continue* or *break* from closing-cue matching
+over the normalised edge text (silent/failed edges degrade to *break*,
+never a false continuation). The proposal is confirmed — `--yes`
+(accept all; boundary decodes still run), `--no-group` (no grouping at
+all), or interactively (Enter accept, `e` a full partition edit, `q`
+quit). A non-TTY invocation without `--yes`/`--no-group` fails fast
+before any decode. Accepted multi-part groups are joined with the ffmpeg
+concat demuxer (`-c copy`, same audio-stream check per part) into a temp
+file and decoded ONCE; the part start offsets (decoded PCM, never
+ffprobe) are written to the result as `part_markers` (`{"offset",
+"label"}`) so the JSON sidecar and Markdown carry a
+`— osa N (äänitys X) —` marker per part. Single-part groups carry no
+`part_markers` key at all. A single file skips grouping entirely.
+
+Part offsets are measured by decoding EACH part separately (one extra
+streaming decode pass per part, no PCM materialised — only the byte
+count) rather than deriving them from the merged decode: the contract
+is that offsets come from decoded PCM byte counts, never ffprobe or
+container metadata (iOS Voice Memos edit lists make container duration
+lie), and `-c copy` concatenation of AAC does not guarantee that the
+merged decode's length equals the sum of the parts' lengths (frame
+padding and edit lists), so the merged decode is not a safe basis for
+the offsets. The measured cost of that extra decode is a streaming pass
+only (no PCM materialised): on this machine (Apple Silicon, synthetic
+20-minute 16 kHz pink-noise .m4a, 3 runs) each per-part decode took
+0.530-0.649 s (median 0.575 s) — about 1.6 s per hour of audio, roughly
+2265x real time — versus ~12 min/h for the whisper-per-window decode
+itself (PR #84 spike), i.e. well under 1 % of a run's wall time; a 3 x
+7-minute group measured 0.837 s end to end. That figure is a measurement
+on a synthetic file on one machine, not a guarantee.
+
+`--out` with 2+ files is honored only when the run ends up as a single
+group (one combined transcript to that path); `--out -` (stdout) is
+always fine (groups stream in order). An explicit `--out` file path with
+2+ files that would produce more than one group fails up front (exit 2,
+before any decode) instead of later groups overwriting the earlier ones.
 
 Streams: progress bars and warnings go to **stderr**; transcripts and
 summaries go to **stdout** (pipeable). On battery power a warning is

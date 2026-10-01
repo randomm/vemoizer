@@ -184,6 +184,24 @@ def transcribe(
         help="Run speaker diarization and attach speaker labels "
         "(pyannote.audio; off by default).",
     ),
+    yes: bool = typer.Option(  # noqa: B008
+        False,
+        "--yes",
+        help=(
+            "Group mode for 2+ files: run the boundary decodes and accept "
+            "every continuation proposal without a prompt (mutually "
+            "exclusive with --no-group)."
+        ),
+    ),
+    no_group: bool = typer.Option(  # noqa: B008
+        False,
+        "--no-group",
+        help=(
+            "Skip split-recording grouping entirely (each file is "
+            "transcribed standalone; no boundary decode, no concat, no "
+            "part markers). Mutually exclusive with --yes."
+        ),
+    ),
 ) -> None:
     """Transcribe one or more voice memos and write transcript files."""
     # Resolve low-memory mode (auto-detect or explicit flag)
@@ -222,19 +240,54 @@ def transcribe(
             err=True,
         )
 
-    exit_code = transcribe_batch(
-        files,
-        formats=formats,
-        config_path=str(config) if config is not None else None,
-        profile=profile,
-        repair=repair,
-        glossary_path=str(glossary) if glossary is not None else None,
-        speakers=speaker_count,
-        diarize=diarize,
-        out=out,
-        quiet=quiet,
-        copy=copy,
-    )
+    # Two or more files: M3 split-recording grouping (issue #77) — natural
+    # sort, 20s boundary decodes, confirmation (--yes / --no-group /
+    # interactive), concat, one decode per group, part markers. A single
+    # file stays on the plain per-file loop (no grouping work at all).
+    if len(files) > 1:
+        from vemoizer.batch import run_batch
+        from vemoizer.presets import RunOptions
+
+        if copy:
+            # The plain loop honors --copy; the batch loop does not (one
+            # clipboard per group is not a sensible multi-file contract),
+            # so the narrowing is made explicit rather than silent.
+            typer.echo(
+                "warning: --copy is only honored for a single file; "
+                "skipped for multi-file runs",
+                err=True,
+            )
+        batch_options = RunOptions.expert_transcribe(
+            profile=profile,
+            diarize=diarize,
+            repair=repair,
+            speakers=speaker_count,
+            glossary_path=str(glossary) if glossary is not None else None,
+            config_path=str(config) if config is not None else None,
+        )
+        exit_code = run_batch(
+            files,
+            batch_options,
+            formats=formats,
+            out=out,
+            quiet=quiet,
+            yes=yes,
+            no_group=no_group,
+        )
+    else:
+        exit_code = transcribe_batch(
+            files,
+            formats=formats,
+            config_path=str(config) if config is not None else None,
+            profile=profile,
+            repair=repair,
+            glossary_path=str(glossary) if glossary is not None else None,
+            speakers=speaker_count,
+            diarize=diarize,
+            out=out,
+            quiet=quiet,
+            copy=copy,
+        )
     if exit_code:
         raise typer.Exit(code=exit_code)
 

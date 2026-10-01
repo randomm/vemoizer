@@ -98,3 +98,109 @@ def test_suspect_paragraphs_render_a_warning() -> None:
     )
     assert "⚠ epävarma kohta" in md
     assert "⚠ selvä kohta" not in md
+
+
+def test_part_markers_interleaved_at_offsets() -> None:
+    """Multi-part groups: a `— osa N (äänto X) —` marker renders as a
+    standalone line, interleaved with the paragraph blocks at its offset
+    (the issue #77 sidecar/MD contract)."""
+    t = _transcript(
+        part_markers=[
+            {"offset": 0.0, "label": "— osa 1 (äänto Uusi äänto 425.m4a) —"},
+            {"offset": 8.0, "label": "— osa 2 (äänto Uusi äänto 426.m4a) —"},
+        ]
+    )
+    md = format_md(t)
+    assert "— osa 1 (äänto Uusi äänto 425.m4a) —" in md
+    assert "— osa 2 (äänto Uusi äänto 426.m4a) —" in md
+    # Each marker is a standalone line, and the order is:
+    # marker 1 (offset 0) < paragraph 1 < marker 2 (offset 8) < paragraph 2.
+    i1 = md.index("— osa 1")
+    i_p1 = md.index("Puhuttiin alustasta.")
+    i2 = md.index("— osa 2")
+    i_p2 = md.index("Sitten deploymentista.")
+    assert i1 < i_p1 < i2 < i_p2
+
+
+def test_part_markers_without_paragraphs_render_before_bare_text() -> None:
+    """No timestamped structure: markers have no offset to anchor to, so
+    they render before the bare text — no crash, no lost marker."""
+    t = {
+        "text": "vain teksti tässä",
+        "part_markers": [
+            {"offset": 0.0, "label": "— osa 1 (äänto pair_a.m4a) —"},
+            {"offset": 2.5, "label": "— osa 2 (äänto pair_b.m4a) —"},
+        ],
+    }
+    md = format_md(t)
+    i1 = md.index("— osa 1")
+    i2 = md.index("— osa 2")
+    i_t = md.index("vain teksti tässä")
+    assert i1 < i2 < i_t
+
+
+def test_non_dict_part_markers_are_dropped_not_crash() -> None:
+    """A stray non-dict entry in `part_markers` cannot crash the render
+    path with an `AttributeError` — it is dropped, the valid ones render."""
+    t = _transcript(part_markers=[None, "junk", {"offset": 0.0, "label": "— osa 1 —"}])
+    md = format_md(t)
+    assert "— osa 1 —" in md
+
+
+def test_transcript_without_part_markers_renders_unchanged() -> None:
+    """The common single-file case: no `part_markers` key, no behaviour
+    change — the marker path must be a no-op."""
+    md = format_md(_transcript())
+    assert "— osa" not in md
+    assert "Puhuttiin alustasta." in md
+
+
+def _no_para_markers() -> list[dict]:
+    return [
+        {"offset": 0.0, "label": "— osa 1 (äänto pair_a.m4a) —"},
+        {"offset": 2.5, "label": "— osa 2 (äänto pair_b.m4a) —"},
+    ]
+
+
+def test_md_no_paragraphs_markers_only() -> None:
+    """No timestamped structure and an empty body: the markers render
+    (joined) and there is no trailing bare text to append."""
+    md = format_md({"text": "", "part_markers": _no_para_markers()})
+    # Both markers render; markers-only means no body appended.
+    assert "— osa 1 (äänto pair_a.m4a) —" in md
+    assert "— osa 2 (äänto pair_b.m4a) —" in md
+    # Markers are the only content in the transcript section (no empty body).
+    t_section = md.split("## Transcript")[1]
+    assert "\n\n" in t_section
+    i1 = md.index("— osa 1")
+    i2 = md.index("— osa 2")
+    assert i1 < i2
+
+
+def test_md_no_paragraphs_body_only() -> None:
+    """No timestamped structure and no markers: the bare text renders
+    unchanged (the common single-file case)."""
+    md = format_md({"text": "vain teksti tässä"})
+    assert "vain teksti tässä" in md
+    assert "— osa" not in md
+
+
+def test_md_no_paragraphs_markers_and_body() -> None:
+    """No timestamped structure with markers AND a body: markers render
+    first, then the body, joined by blank lines."""
+    md = format_md({"text": "vain teksti tässä", "part_markers": _no_para_markers()})
+    i1 = md.index("— osa 1")
+    i2 = md.index("— osa 2")
+    i_t = md.index("vain teksti tässä")
+    assert i1 < i2 < i_t
+
+
+def test_md_no_paragraphs_neither_markers_nor_body() -> None:
+    """No timestamped structure, no markers, empty body: the transcript
+    section renders as a clean empty line — no crash, no stray markers."""
+    md = format_md({"text": ""})
+    assert "## Transcript" in md
+    assert "— osa" not in md
+    # The transcript section body is empty (no markers, no body text).
+    t_section = md.split("## Transcript")[1].strip()
+    assert t_section == ""

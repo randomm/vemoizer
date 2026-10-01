@@ -36,6 +36,12 @@ class TranscriptionResult(_TranscriptionBase, total=False):
 
     words: list[dict[str, Any]]
     segments: list[dict[str, Any]]
+    # Part markers for a multi-part (concatenated) group: a list of
+    # {"offset": float, "label": str} dicts, one per source part. Present
+    # ONLY for multi-part groups (issue #77); single-file results carry no
+    # part_markers key at all. Injected by the batch layer, not by a
+    # transcriber backend.
+    part_markers: list[dict[str, Any]]
     language: str
     transcribe_time: float
     audio_duration: float

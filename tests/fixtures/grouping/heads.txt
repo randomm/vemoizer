@@ -1,0 +1,4 @@
+fi_head_no_cue: ensiksi käydään läpi agenda ja alkaa
+fi_head_continuation: jatkaetaan sieltä mistä jäätiin
+en_head_no_cue: so first up on the agenda is
+silence:

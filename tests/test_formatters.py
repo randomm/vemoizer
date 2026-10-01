@@ -536,3 +536,23 @@ def test_json_carries_paragraphs_when_present() -> None:
 def test_json_omits_empty_paragraphs() -> None:
     data = json.loads(format_json({"text": "x", "paragraphs": []}))
     assert "paragraphs" not in data
+
+
+def test_json_carries_part_markers_when_present() -> None:
+    """Issue #77 sidecar contract: a multi-part group's `part_markers`
+    list is passed through the JSON sidecar unchanged."""
+    markers = [
+        {"offset": 0.0, "label": "— osa 1 (äänto pair_a.m4a) —"},
+        {"offset": 2.5, "label": "— osa 2 (äänto pair_b.m4a) —"},
+    ]
+    data = json.loads(format_json({"text": "x", "part_markers": markers}))
+    assert data["part_markers"] == markers
+
+
+def test_json_omits_part_markers_when_absent_or_empty() -> None:
+    """Single-file runs carry no `part_markers` key at all; an empty list
+    is omitted too (consistent with the mirror-present-keys behaviour)."""
+    assert "part_markers" not in json.loads(format_json({"text": "x"}))
+    assert "part_markers" not in json.loads(
+        format_json({"text": "x", "part_markers": []})
+    )
