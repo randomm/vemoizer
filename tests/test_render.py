@@ -343,3 +343,26 @@ def test_round_trip_holds_iff_glossary_hash_matches() -> None:
 
     assert "Erkä-hankkeesta" in md
     assert "Flagship" not in md
+
+
+# ---------------------------------------------------------------------------
+# Corrupted sidecar: non-dict paragraphs
+# ---------------------------------------------------------------------------
+
+
+def test_render_sidecar_with_string_entry_in_paragraphs_does_not_crash() -> None:
+    """A sidecar with a non-dict entry in paragraphs renders without crash.
+
+    ``apply_corrections`` maps over dict entries (``para.get``); a
+    corrupted sidecar can carry a string entry. ``_render_dict`` filters
+    to dict entries first (consistent with ``_blocks``) and leaves
+    non-dict entries verbatim.
+    """
+    sidecar = _sidecar()
+    sidecar["paragraphs"].append("corrupted-string-entry")  # type: ignore[valid-type]
+    sidecar["paragraphs"].append(None)  # type: ignore[valid-type]
+
+    md = render_markdown(sidecar, corrections=_corrections(), speaker_names={})
+    # The valid dict entries still render with corrections applied.
+    assert "Flagship-hankkeesta" in md
+    assert "EBITDA selvitetään" in md

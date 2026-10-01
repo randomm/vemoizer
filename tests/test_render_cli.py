@@ -20,6 +20,85 @@ from vemoizer.cli import app
 runner = CliRunner()
 
 
+# ---------------------------------------------------------------------------
+# End-to-end: preset run with project glossary → sidecar glossary_files
+# point at real files; render emits no drift warning until the glossary
+# is edited (issue #89, finding B).
+# ---------------------------------------------------------------------------
+
+
+def test_preset_run_sidecar_glossary_files_exist_and_render_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A meeting run with a project ``.vemoizer/glossary.txt`` stores the
+    real layer file in ``options.glossary_files`` (not the deleted temp
+    file). After the run, every stored path exists. ``vemoizer render``
+    emits no drift warning on the untouched glossary and exactly one
+    when the glossary is edited.
+    """
+    import vemoizer.pipeline as pipeline_module
+
+    # Project glossary with a correction pair.
+    vemoizer_dir = tmp_path / ".vemoizer"
+    vemoizer_dir.mkdir()
+    glossary = vemoizer_dir / "glossary.txt"
+    glossary.write_text("Blacksit => Flagship\n", encoding="utf-8")
+
+    def fake_transcribe(path, **kwargs):
+        return {
+            "text": "Puhuttiin Blacksit-hankkeesta.",
+            "paragraphs": [
+                {
+                    "start": 0.0,
+                    "end": 5.0,
+                    "text": "Puhuttiin Blacksit.",
+                    "speaker": "SPEAKER_1",
+                }
+            ],
+            "notes": {"title": "Alustus"},
+        }
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+
+    # Run the meeting preset.
+    result = runner.invoke(app, ["meeting", "a.m4a"])
+    assert result.exit_code == 0
+
+    # Find the sidecar .json.
+    json_files = list(tmp_path.glob("*.json"))
+    assert len(json_files) == 1, f"expected 1 .json, got {json_files}"
+    sidecar = json.loads(json_files[0].read_text(encoding="utf-8"))
+
+    opts = sidecar["options"]
+    stored_files = opts["glossary_files"]
+    # The stored glossary files must be the real layer file, not a temp path.
+    assert len(stored_files) == 1
+    assert stored_files[0] == str(glossary)
+    # Every stored path must exist after the run (the temp file is deleted).
+    for p in stored_files:
+        assert Path(p).is_file(), f"stored glossary path does not exist: {p}"
+
+    # The stored hash must match the real glossary file's hash.
+    assert opts["glossary_sha256"] is not None
+    import hashlib
+
+    expected_hash = hashlib.sha256(glossary.read_bytes()).hexdigest()
+    assert opts["glossary_sha256"] == expected_hash
+
+    # Render with the untouched glossary: no drift warning.
+    out_md = tmp_path / "rendered.md"
+    result2 = runner.invoke(app, ["render", str(json_files[0]), "--out", str(out_md)])
+    assert result2.exit_code == 0
+    assert "re-transcribe" not in result2.stderr
+
+    # Edit the glossary: exactly one drift warning.
+    glossary.write_text("Blacksit => Flagship\nNewterm\n", encoding="utf-8")
+    result3 = runner.invoke(app, ["render", str(json_files[0]), "--out", str(out_md)])
+    assert result3.exit_code == 0
+    assert result3.stderr.count("re-transcribe") == 1
+
+
 def _sidecar(**extra: Any) -> dict[str, Any]:
     """A minimal M5a sidecar with notes and paragraphs."""
     base: dict[str, Any] = {

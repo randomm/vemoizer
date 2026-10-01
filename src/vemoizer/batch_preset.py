@@ -68,27 +68,6 @@ def _mtime_date_str(path: Path) -> str:
     return datetime.fromtimestamp(mtime).date().isoformat()
 
 
-def _glossary_layer_files_for_sidecar(
-    command: str, options: RunOptions, effective_glossary: str | None
-) -> list[str] | None:
-    """The exact glossary files the run used, for the M5a sidecar hash.
-
-    An explicit ``--glossary`` (meeting) or its memo correction-only temp
-    file (``options.glossary_path`` set) is hashed as that single file; the
-    layered path resolves the project + home layer files the same way the
-    run read them. ``None`` when the run had no glossary file at all (so
-    ``options.glossary_sha256`` is ``null``).
-    """
-    if options.glossary_path is not None:
-        return [str(options.glossary_path)]
-    if command == "meeting" and effective_glossary is not None:
-        return [str(effective_glossary)]
-    from vemoizer.sidecar import glossary_layer_files
-
-    files = glossary_layer_files()
-    return [str(p) for p in files] or None
-
-
 def _transcribe_preset_file(
     file: Path,
     options: RunOptions,
@@ -128,24 +107,6 @@ def _transcribe_preset_file(
         return None
 
 
-def _first_part_path(label: Path | str, files: list[Path]) -> Path:
-    """The first part's path for a group label.
-
-    A single-part group's label IS the part's path (``run_batch`` passes
-    the group's ``Path``). A multi-part label joins part filenames with
-    '+'; the first part is matched by name against the original
-    *files* list (the group is built over ``natural_sort(files)``, so
-    the first part is always a member of *files*).
-    """
-    if isinstance(label, Path):
-        return label
-    first_name = label.split("+", 1)[0]
-    for f in files:
-        if f.name == first_name:
-            return f
-    return Path(first_name)
-
-
 def _run_preset_groups(
     files: list[Path],
     options: RunOptions,
@@ -179,7 +140,11 @@ def _run_preset_groups(
 
     written: list[str] = []
     exit_code = 0
-    gfiles = _glossary_layer_files_for_sidecar(command, options, effective_glossary)
+    # M5a: the real glossary files the run read (never the composed temp
+    # file — it is deleted in run_preset's finally).
+    from vemoizer.sidecar import resolve_run_glossary_files
+
+    gfiles = resolve_run_glossary_files(command, options.glossary_path)
 
     def write_group(label: Path | str, result: dict[str, Any]) -> None:
         # One dated pair per group. The date is the first part's mtime
@@ -188,7 +153,12 @@ def _run_preset_groups(
         # M5a: stash the group's per-part PCM durations (fail-open) and
         # the real per-part source paths, then build the sidecar keys
         # before the seam writes the .md + .json pair.
-        from vemoizer.sidecar import build_sidecar, group_durations, group_part_paths
+        from vemoizer.sidecar import (
+            build_sidecar,
+            group_durations,
+            group_part_names,
+            group_part_paths,
+        )
 
         with suppress(
             OSError, IngestError
@@ -200,7 +170,11 @@ def _run_preset_groups(
             glossary_files=gfiles,
             source_paths=group_part_paths(label, files),
         )
-        first = _first_part_path(label, files)
+        # The first part's path: the label's first name resolved against
+        # the original files (the group is built over natural_sort(files),
+        # so the first part is always a member; fall back to a bare Path).
+        first_name = group_part_names(label)[0]
+        first = next((f for f in files if f.name == first_name), Path(first_name))
         stem, _ = nfc_stem_and_suffix(first)
         pair = _write_preset_output(
             result,
@@ -410,7 +384,9 @@ def run_preset(
         exit_code = 0
         written: list[str] = []
         # M5a: the glossary files the run used (for the sidecar hash).
-        gfiles = _glossary_layer_files_for_sidecar(command, options, effective_glossary)
+        from vemoizer.sidecar import resolve_run_glossary_files
+
+        gfiles = resolve_run_glossary_files(command, options.glossary_path)
         with caffeinate_context():
             for file in files:
                 result = _transcribe_preset_file(file, options, effective_glossary)

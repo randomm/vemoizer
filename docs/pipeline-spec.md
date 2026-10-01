@@ -437,7 +437,7 @@ the same empty-prompt invariant (prompt terms ignored).
 Re-apply the CURRENT glossary correction pairs and any `--name` values
 to a stored meeting/memo sidecar (the `.json` written next to the `.md`
 by `meeting` / `memo`) and re-emit the Markdown. No model, no LLM —
-works on a machine without the MLX stack. A renaming a speaker or
+works on a machine without the MLX stack. A speaker renaming or
 adding a correction pair never requires a re-transcribe.
 
 Glossary resolution mirrors `meeting` / `memo`: the layered glossary

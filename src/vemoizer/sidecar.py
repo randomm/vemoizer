@@ -48,7 +48,9 @@ __all__ = [
     "build_sidecar",
     "glossary_layer_files",
     "group_durations",
+    "group_part_names",
     "group_part_paths",
+    "resolve_run_glossary_files",
     "sha256_over_files",
 ]
 
@@ -77,7 +79,10 @@ def build_sidecar(
       *source_paths* entry (falling back to the marker label when absent),
       ``part_offset_s`` from the marker, and ``duration_s`` from the
       corresponding measured PCM duration. ``duration_s`` is omitted when
-      no duration was measured for that part.
+      no duration was measured for that part. Measuring it costs one extra
+      streamed ffmpeg decode per part (~1.6 s per hour of audio — under 1%
+      of a typical run, measured), which is why the measurement stays
+      optional and fail-open (a decode failure leaves the key absent).
     * ``options``: ``{command, glossary_files, glossary_sha256}``.
       ``glossary_files`` is the list of files actually used (``[]`` when
       none); ``glossary_sha256`` is the single sha256 over their
@@ -188,6 +193,20 @@ def glossary_layer_files() -> list[Path]:
     return files
 
 
+def group_part_names(label: Path | str) -> list[str]:
+    """The group label's part names, in label order.
+
+    A single-part group's label is that part's path (its name is the
+    whole path string); a multi-part label (``a.m4a+b.m4a``) splits on
+    ``+``. One seam for the ``a+b`` label grammar: :func:`group_durations`,
+    :func:`group_part_paths` and the batch preset's first-part lookup all
+    derive their part list from here.
+    """
+    if isinstance(label, Path):
+        return [label.name]
+    return label.split("+")
+
+
 def group_durations(label: Path | str) -> list[float]:
     """Per-part decoded-PCM durations for a group's sidecar ``source``.
 
@@ -199,7 +218,7 @@ def group_durations(label: Path | str) -> list[float]:
     """
     from vemoizer.ingest import pcm_duration_seconds
 
-    parts = [label] if isinstance(label, Path) else [Path(n) for n in label.split("+")]
+    parts = [Path(name) for name in group_part_names(label)]
     return [pcm_duration_seconds(p) for p in parts]
 
 
@@ -213,10 +232,8 @@ def group_part_paths(label: Path | str, files: list[Path]) -> list[Path]:
     these real on-disk paths (not the decorative marker label) so
     ``render`` can re-apply per-part offsets to the actual files.
     """
-    if isinstance(label, Path):
-        return [label]
     parts: list[Path] = []
-    for name in label.split("+"):
+    for name in group_part_names(label):
         for f in files:
             if f.name == name:
                 parts.append(f)
@@ -224,6 +241,27 @@ def group_part_paths(label: Path | str, files: list[Path]) -> list[Path]:
         else:
             parts.append(Path(name))
     return parts
+
+
+def resolve_run_glossary_files(
+    command: str, options_glossary_path: str | None
+) -> list[str] | None:
+    """The real glossary files a preset run actually read from disk.
+
+    The M5a sidecar's ``options.glossary_files`` must point at files that
+    survive the run: ``run_preset`` composes the layered glossary into a
+    temp file (deleted in its ``finally``), so the temp path must never be
+    stored — only the layer files that composed it (project first, then
+    home, via :func:`glossary_layer_files`) or the explicit ``--glossary``
+    file (``options_glossary_path``). ``None`` when the run had no glossary
+    file at all (so ``options.glossary_sha256`` is ``null``). The layered
+    list is also what :func:`vemoizer.render_cli` recomputes the hash
+    over, so an untouched glossary renders with no drift warning.
+    """
+    if options_glossary_path is not None:
+        return [str(options_glossary_path)]
+    files = glossary_layer_files()
+    return [str(p) for p in files] or None
 
 
 def sha256_over_files(files: list[str] | list[Path]) -> str | None:

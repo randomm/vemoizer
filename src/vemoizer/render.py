@@ -73,7 +73,13 @@ def _render_dict(
 
     paragraphs = out.get("paragraphs")
     if isinstance(paragraphs, list) and paragraphs:
-        out["paragraphs"] = apply_corrections(paragraphs, corrections)
+        # ``apply_corrections`` maps over dict entries (``para.get``) and
+        # ``format_md`` does the same — a corrupted sidecar can carry
+        # non-dict entries, so drop them here (consistent with ``_blocks``)
+        # rather than raising ``AttributeError`` downstream.
+        out["paragraphs"] = [p for p in paragraphs if isinstance(p, dict)] or None
+        if out["paragraphs"]:
+            out["paragraphs"] = apply_corrections(out["paragraphs"], corrections)
 
     # Speaker names: ``--name`` rewrites a label to a display name; the
     # stored sidecar ``speaker_names`` (persisted by a previous render) is

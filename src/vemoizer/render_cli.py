@@ -26,6 +26,7 @@ Exit codes:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -127,11 +128,12 @@ def _persist_speaker_names(
 
     payload = json.dumps(sidecar, ensure_ascii=False, indent=2) + "\n"
     tmp = sidecar_path.with_name(f"{sidecar_path.name}.tmp-{os.getpid()}")
-    tmp.write_text(payload, encoding="utf-8")
     try:
+        tmp.write_text(payload, encoding="utf-8")
         os.replace(str(tmp), str(sidecar_path))
-    except Exception:
-        tmp.unlink(missing_ok=True)
+    except OSError:
+        with contextlib.suppress(OSError):  # cleanup is best-effort
+            tmp.unlink(missing_ok=True)
         raise
 
 
