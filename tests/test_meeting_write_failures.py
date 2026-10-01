@@ -24,7 +24,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from _cli_helpers import isolate_home
+from _cli_helpers import fake_transcribe, isolate_home, touch_files
 from typer.testing import CliRunner
 
 import vemoizer.batch as batch
@@ -36,13 +36,6 @@ from vemoizer.output.naming import nfc_stem_and_suffix
 from vemoizer.presets import RunOptions
 
 runner = CliRunner()
-
-
-def _touch(names: list[str], tmp_path: Path) -> list[Path]:
-    files = [tmp_path / n for n in names]
-    for f in files:
-        f.touch()
-    return files
 
 
 def _fake_continuation_seams(monkeypatch: pytest.MonkeyPatch) -> dict:
@@ -81,22 +74,6 @@ def _fake_break_seams(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(grouping, "part_offsets", lambda files: [])
     monkeypatch.setattr(batch, "concat_groups", lambda files: files[0])
     monkeypatch.setattr(batch, "part_offsets", lambda files: [])
-
-
-def _fake_transcribe(
-    monkeypatch: pytest.MonkeyPatch,
-    record: list[str],
-    title: str | None = None,
-) -> None:
-    def fake_transcribe(path, **kwargs):
-        record.append(Path(path).name)
-        return {
-            "text": "moikka maailma",
-            "segments": [],
-            "notes": {"title": title if title is not None else Path(path).stem.upper()},
-        }
-
-    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
 
 
 def _real_partial_write(result, first_stem, out_dir, *, date_str=None):
@@ -160,9 +137,9 @@ def test_grouped_write_failure_exits_1_and_keeps_going(
     exits 1, and the 'wrote' summary claims only files that really
     exist. Two files -> one group (continuation)."""
     _fake_continuation_seams(monkeypatch)
-    _touch(["a.m4a", "b.m4a"], tmp_path)
+    touch_files(["a.m4a", "b.m4a"], tmp_path)
     record: list[str] = []
-    _fake_transcribe(monkeypatch, record)
+    fake_transcribe(monkeypatch, record)
     monkeypatch.setattr(batch_preset, "_write_preset_output", _real_partial_write)
     isolate_home(monkeypatch, tmp_path, tmp_path)
     result = runner.invoke(app, ["meeting", "a.m4a", "b.m4a", "--yes"])
@@ -183,9 +160,9 @@ def test_plain_loop_write_failure_exits_1(tmp_path, monkeypatch) -> None:
     """--no-group plain loop: file 1's pair is half-written (md yes, json
     no), file 2 still writes its full pair; exit 1; the summary never
     claims the missing json."""
-    _touch(["a.m4a", "b.m4a"], tmp_path)
+    touch_files(["a.m4a", "b.m4a"], tmp_path)
     record: list[str] = []
-    _fake_transcribe(monkeypatch, record)
+    fake_transcribe(monkeypatch, record)
     calls = {"n": 0}
 
     def partial(result, first_stem, out_dir, *, date_str=None):
@@ -218,9 +195,9 @@ def test_plain_loop_write_failure_exits_1(tmp_path, monkeypatch) -> None:
 def test_single_file_write_failure_exits_1(tmp_path, monkeypatch) -> None:
     """Single file: the .md is written, the .json fails; exit 1, one
     error line, the md claimed in the summary, the json not."""
-    _touch(["a.m4a"], tmp_path)
+    touch_files(["a.m4a"], tmp_path)
     record: list[str] = []
-    _fake_transcribe(monkeypatch, record)
+    fake_transcribe(monkeypatch, record)
     monkeypatch.setattr(batch_preset, "_write_preset_output", _real_partial_write)
     isolate_home(monkeypatch, tmp_path, tmp_path)
     result = runner.invoke(app, ["meeting", "a.m4a"])
@@ -239,9 +216,9 @@ def test_single_file_write_failure_exits_1(tmp_path, monkeypatch) -> None:
 def test_normal_run_still_exits_0_with_both_files(tmp_path, monkeypatch) -> None:
     """A normal run (no write failure) still exits 0 with both the .md
     and the .json written and claimed."""
-    _touch(["a.m4a"], tmp_path)
+    touch_files(["a.m4a"], tmp_path)
     record: list[str] = []
-    _fake_transcribe(monkeypatch, record)
+    fake_transcribe(monkeypatch, record)
     isolate_home(monkeypatch, tmp_path, tmp_path)
     result = runner.invoke(app, ["meeting", "a.m4a"])
     assert result.exit_code == 0
@@ -263,10 +240,10 @@ def test_seam_runtime_error_is_clean_and_continues(
     exit 1, one clean error line (no traceback), and the SECOND group
     still written (its real pair is on disk)."""
     _fake_break_seams(monkeypatch)
-    files = _touch(["a.m4a", "b.m4a"], tmp_path)
+    files = touch_files(["a.m4a", "b.m4a"], tmp_path)
     monkeypatch.chdir(tmp_path)
     record: list[str] = []
-    _fake_transcribe(monkeypatch, record)
+    fake_transcribe(monkeypatch, record)
 
     calls = {"n": 0}
 
@@ -309,7 +286,7 @@ def test_seam_keyboard_interrupt_still_propagates(tmp_path, monkeypatch) -> None
     """A KeyboardInterrupt from the seam must propagate (not be swallowed
     as a group failure)."""
     _fake_break_seams(monkeypatch)
-    files = _touch(["a.m4a", "b.m4a"], tmp_path)
+    files = touch_files(["a.m4a", "b.m4a"], tmp_path)
     monkeypatch.chdir(tmp_path)
 
     def fake_transcribe(path, **kwargs):
@@ -333,7 +310,7 @@ def test_seam_keyboard_interrupt_still_propagates(tmp_path, monkeypatch) -> None
 def test_seam_system_exit_still_propagates(tmp_path, monkeypatch) -> None:
     """A SystemExit from the seam must propagate."""
     _fake_break_seams(monkeypatch)
-    files = _touch(["a.m4a", "b.m4a"], tmp_path)
+    files = touch_files(["a.m4a", "b.m4a"], tmp_path)
     monkeypatch.chdir(tmp_path)
 
     def fake_transcribe(path, **kwargs):
@@ -358,7 +335,7 @@ def test_seam_none_return_is_backward_compatible(tmp_path, monkeypatch) -> None:
     """The seam may return a bool/None; run_batch must not care (the
     seam's write side effects are what matter) — exit 0 on success."""
     _fake_break_seams(monkeypatch)
-    files = _touch(["a.m4a"], tmp_path)
+    files = touch_files(["a.m4a"], tmp_path)
     monkeypatch.chdir(tmp_path)
 
     def fake_transcribe(path, **kwargs):

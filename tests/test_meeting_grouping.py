@@ -18,7 +18,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
-from _cli_helpers import isolate_home
+from _cli_helpers import fake_transcribe, isolate_home, touch_files
 from typer.testing import CliRunner
 
 import vemoizer.grouping as grouping
@@ -43,13 +43,6 @@ _PART_A = "Uusi \u00e4\u00e4nitys 1.m4a"
 _PART_B = "Uusi \u00e4\u00e4nitys 2.m4a"
 _DATE_A = "2025-03-14"
 _DATE_B = "2025-06-01"
-
-
-def _touch(names: list[str], tmp_path: Path) -> list[Path]:
-    files = [tmp_path / n for n in names]
-    for f in files:
-        f.touch()
-    return files
 
 
 def _set_mtime(path: Path, y: int, m: int, d: int) -> None:
@@ -93,25 +86,6 @@ def _fake_group_seams(
     return touched
 
 
-def _fake_transcribe(
-    monkeypatch: pytest.MonkeyPatch,
-    record: list[str],
-    title: str | None = None,
-) -> None:
-    """Patch ``pipeline.transcribe_file`` with a fake that records the
-    transcribed files; the result carries a per-file or fixed title."""
-
-    def fake_transcribe(path, **kwargs):
-        record.append(Path(path).name)
-        return {
-            "text": "moikka maailma",
-            "segments": [],
-            "notes": {"title": title if title is not None else Path(path).stem.upper()},
-        }
-
-    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
-
-
 def _pair_files(tmp_path: Path) -> tuple[list[Path], list[Path]]:
     return sorted(tmp_path.glob("*.md")), sorted(tmp_path.glob("*.json"))
 
@@ -135,9 +109,9 @@ def test_meeting_yes_accepts_proposal_one_group_one_pair(tmp_path, monkeypatch) 
     one group -> ONE transcribe call and one dated .md + .json pair in
     the CWD. CliRunner's stdin is non-TTY; --yes passes the TTY guard."""
     _fake_group_seams(monkeypatch)
-    _touch(["a.m4a", "b.m4a"], tmp_path)
+    touch_files(["a.m4a", "b.m4a"], tmp_path)
     record: list[str] = []
-    _fake_transcribe(monkeypatch, record, title="Team Sync")
+    fake_transcribe(monkeypatch, record, title="Team Sync")
     isolate_home(monkeypatch, tmp_path, tmp_path)
     result = runner.invoke(app, ["meeting", "a.m4a", "b.m4a", "--yes"])
     assert result.exit_code == 0
@@ -173,7 +147,7 @@ def test_meeting_non_tty_without_yes_or_no_group_fails_immediately(
         ingest_calls += 1
         return None
 
-    _touch(["a.m4a", "b.m4a"], tmp_path)
+    touch_files(["a.m4a", "b.m4a"], tmp_path)
     monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
     monkeypatch.setattr(ingest, "ingest_audio", fake_ingest_audio)
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
@@ -196,7 +170,7 @@ def test_meeting_yes_and_no_group_mutually_excluded(tmp_path, monkeypatch) -> No
     before any decode — even for a single file (the check fires before
     the single-file short-circuit, matching run_batch's existing order)."""
     touched = _fake_group_seams(monkeypatch)
-    _touch(["a.m4a", "b.m4a"], tmp_path)
+    touch_files(["a.m4a", "b.m4a"], tmp_path)
     isolate_home(monkeypatch, tmp_path, tmp_path)
     result = runner.invoke(app, ["meeting", "a.m4a", "b.m4a", "--yes", "--no-group"])
     assert result.exit_code == 2
@@ -217,9 +191,9 @@ def test_meeting_no_group_transcribes_each_file_standalone(
     """--no-group: each file transcribed standalone (today's behaviour) —
     no boundary decode, one dated pair per file with today's date."""
     touched = _fake_group_seams(monkeypatch)
-    _touch(["a.m4a", "b.m4a"], tmp_path)
+    touch_files(["a.m4a", "b.m4a"], tmp_path)
     record: list[str] = []
-    _fake_transcribe(monkeypatch, record)
+    fake_transcribe(monkeypatch, record)
     isolate_home(monkeypatch, tmp_path, tmp_path)
     result = runner.invoke(app, ["meeting", "a.m4a", "b.m4a", "--no-group"])
     assert result.exit_code == 0
@@ -238,9 +212,9 @@ def test_meeting_yes_break_yields_one_pair_per_group(tmp_path, monkeypatch) -> N
     """meeting a.m4a b.m4a --yes where the boundary is a break: two
     single-file groups -> two dated .md/.json pairs, no combined pair."""
     _fake_group_seams(monkeypatch, tail=_CLOSING_TAIL, head="")
-    _touch(["a.m4a", "b.m4a"], tmp_path)
+    touch_files(["a.m4a", "b.m4a"], tmp_path)
     record: list[str] = []
-    _fake_transcribe(monkeypatch, record)
+    fake_transcribe(monkeypatch, record)
     isolate_home(monkeypatch, tmp_path, tmp_path)
     result = runner.invoke(app, ["meeting", "a.m4a", "b.m4a", "--yes"])
     assert result.exit_code == 0
@@ -265,9 +239,9 @@ def test_meeting_single_file_needs_no_tty(tmp_path, monkeypatch) -> None:
         isatty_calls += 1
         return False
 
-    _touch(["a.m4a"], tmp_path)
+    touch_files(["a.m4a"], tmp_path)
     record: list[str] = []
-    _fake_transcribe(monkeypatch, record, title="T")
+    fake_transcribe(monkeypatch, record, title="T")
     monkeypatch.setattr("sys.stdin.isatty", _counting_isatty)
     isolate_home(monkeypatch, tmp_path, tmp_path)
     result = runner.invoke(app, ["meeting", "a.m4a"])
@@ -287,7 +261,7 @@ def test_meeting_grouped_run_passes_preset_options(tmp_path, monkeypatch) -> Non
     to transcribe_file: profile=meeting, diarize=True, repair=True,
     speakers (2, 6) by default."""
     _fake_group_seams(monkeypatch)
-    _touch(["a.m4a", "b.m4a"], tmp_path)
+    touch_files(["a.m4a", "b.m4a"], tmp_path)
     seen: dict = {}
 
     def fake_transcribe(path, **kwargs):
@@ -310,7 +284,7 @@ def test_meeting_grouped_no_diarize_flag_reaches_transcribe(
     """--no-diarize overrides the meeting preset default: the grouped
     path must pass diarize=False through to transcribe_file."""
     _fake_group_seams(monkeypatch)
-    _touch(["a.m4a", "b.m4a"], tmp_path)
+    touch_files(["a.m4a", "b.m4a"], tmp_path)
     seen: dict = {}
 
     def fake_transcribe(path, **kwargs):
@@ -333,7 +307,7 @@ def test_meeting_dated_name_uses_file_mtime(tmp_path, monkeypatch) -> None:
     def fake_transcribe(path, **kwargs):
         return {"text": "moikka", "segments": [], "notes": {"title": "Team Sync"}}
 
-    files = _touch(["a.m4a"], tmp_path)
+    files = touch_files(["a.m4a"], tmp_path)
     _set_mtime(files[0], 2025, 3, 14)
     monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
     isolate_home(monkeypatch, tmp_path, tmp_path)
@@ -356,7 +330,7 @@ def test_meeting_group_dated_name_uses_first_part_mtime_non_sorted_args(
     def fake_transcribe(path, **kwargs):
         return {"text": "moikka", "segments": [], "notes": {"title": "Team Sync"}}
 
-    files = _touch([_PART_A, _PART_B], tmp_path)
+    files = touch_files([_PART_A, _PART_B], tmp_path)
     _set_mtime(files[0], 2025, 3, 14)
     _set_mtime(files[1], 2025, 6, 1)
     monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
@@ -391,7 +365,7 @@ def test_meeting_unreadable_mtime_falls_back_to_today(tmp_path, monkeypatch) -> 
     test_meeting_mtime_date_str_falls_back_to_today."""
     import vemoizer.batch_preset as batch_preset
 
-    _touch(["a.m4a"], tmp_path)
+    touch_files(["a.m4a"], tmp_path)
     isolate_home(monkeypatch, tmp_path, tmp_path)
 
     state = {"deleted": False}
@@ -436,9 +410,9 @@ def test_meeting_grouped_success_deletes_temp_glossary(tmp_path, monkeypatch) ->
     the run (the finally)."""
     _write_glossary_layer(tmp_path)
     _fake_group_seams(monkeypatch)
-    _touch(["a.m4a", "b.m4a"], tmp_path)
+    touch_files(["a.m4a", "b.m4a"], tmp_path)
     record: list[str] = []
-    _fake_transcribe(monkeypatch, record)
+    fake_transcribe(monkeypatch, record)
     isolate_home(monkeypatch, tmp_path, tmp_path)
     result = runner.invoke(app, ["meeting", "a.m4a", "b.m4a", "--yes"])
     assert result.exit_code == 0
@@ -452,7 +426,7 @@ def test_meeting_grouped_failure_deletes_temp_glossary(tmp_path, monkeypatch) ->
 
     _write_glossary_layer(tmp_path)
     _fake_group_seams(monkeypatch)
-    _touch(["a.m4a", "b.m4a"], tmp_path)
+    touch_files(["a.m4a", "b.m4a"], tmp_path)
 
     def fake_transcribe(path, **kwargs):
         raise RuntimeError("decoder exploded")
@@ -475,7 +449,7 @@ def test_meeting_grouped_keyboard_interrupt_deletes_temp_glossary(
 
     _write_glossary_layer(tmp_path)
     _fake_group_seams(monkeypatch)
-    _touch(["a.m4a", "b.m4a"], tmp_path)
+    touch_files(["a.m4a", "b.m4a"], tmp_path)
 
     def fake_transcribe(path, **kwargs):
         raise KeyboardInterrupt()
@@ -494,9 +468,9 @@ def test_meeting_no_group_deletes_temp_glossary(tmp_path, monkeypatch) -> None:
     """--no-group plain loop: the temp glossary is deleted on success
     (the finally) — unchanged contract from issue #82."""
     _write_glossary_layer(tmp_path)
-    _touch(["a.m4a", "b.m4a"], tmp_path)
+    touch_files(["a.m4a", "b.m4a"], tmp_path)
     record: list[str] = []
-    _fake_transcribe(monkeypatch, record)
+    fake_transcribe(monkeypatch, record)
     isolate_home(monkeypatch, tmp_path, tmp_path)
     result = runner.invoke(app, ["meeting", "a.m4a", "b.m4a", "--no-group"])
     assert result.exit_code == 0
@@ -511,9 +485,9 @@ def test_memo_two_files_stay_per_file_no_grouping(tmp_path, monkeypatch) -> None
     two dated pairs, no boundary decode, no grouping flags. The
     grouped-path seams must all stay untouched."""
     touched = _fake_group_seams(monkeypatch)
-    _touch(["a.m4a", "b.m4a"], tmp_path)
+    touch_files(["a.m4a", "b.m4a"], tmp_path)
     record: list[str] = []
-    _fake_transcribe(monkeypatch, record)
+    fake_transcribe(monkeypatch, record)
     isolate_home(monkeypatch, tmp_path, tmp_path)
     result = runner.invoke(app, ["memo", "a.m4a", "b.m4a"])
     assert result.exit_code == 0
