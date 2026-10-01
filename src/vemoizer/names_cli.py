@@ -327,6 +327,12 @@ def run_names(
     # --- Prompt loop (inside clip_session for temp dir cleanup) ---
     new_names: dict[str, str] = {}
 
+    # Stored names (existing sidecar speaker_names). A label with a stored
+    # name shows it as the prompt default; an empty answer keeps it, a
+    # non-empty answer replaces it. A kept stored name never triggers the
+    # Add-to-people prompt. (issue #93, decision 4.)
+    stored_names: dict[str, str] = data.get("speaker_names") or {}
+
     with clip_session() as tmp_dir:
         # Install readline completer (if applicable); restores the previous
         # completer on every exit path, including KeyboardInterrupt.
@@ -350,30 +356,60 @@ def run_names(
                         else:
                             degraded = True
 
-                # Prompt for name
+                # Prompt for name. A label with a stored name shows it as a
+                # bracketed default; empty keeps it, non-empty replaces.
                 prompt_fn = input_fn if input_fn is not None else input
+                stored = stored_names.get(label)
+                if stored:
+                    prompt = f"Name for {label} [{stored}]: "
+                else:
+                    prompt = f"Name for {label} (empty to skip): "
                 try:
-                    answer = prompt_fn(f"Name for {label} (empty to skip): ").strip()
+                    answer = prompt_fn(prompt).strip()
                 except (EOFError, KeyboardInterrupt):
                     raise
-                if not answer:
-                    continue
 
-                new_names[label] = answer
-
-                # People list: add new name?
-                if answer.lower() not in [p.lower() for p in people_list]:
-                    cfg_display = str(config_path) if config_path else "(no config)"
-                    yes = (
-                        prompt_fn(f"Add {answer} to people in {cfg_display}? [y/N] ")
-                        .strip()
-                        .lower()
-                    )
-                    if yes == "y" and config_path is not None:
-                        new_people = list(people_list)
-                        if answer not in new_people:
-                            new_people.append(answer)
-                        _write_people_list(config_path, new_people)
+                if stored:
+                    if not answer:
+                        # Empty keeps the stored name; it already exists so
+                        # it never triggers the Add-to-people prompt.
+                        new_names[label] = stored
+                        continue
+                    new_names[label] = answer
+                    # People list: add new (replacing) name?
+                    if answer.lower() not in [p.lower() for p in people_list]:
+                        cfg_display = str(config_path) if config_path else "(no config)"
+                        yes = (
+                            prompt_fn(
+                                f"Add {answer} to people in {cfg_display}? [y/N] "
+                            )
+                            .strip()
+                            .lower()
+                        )
+                        if yes == "y" and config_path is not None:
+                            new_people = list(people_list)
+                            if answer not in new_people:
+                                new_people.append(answer)
+                            _write_people_list(config_path, new_people)
+                else:
+                    if not answer:
+                        continue
+                    new_names[label] = answer
+                    # People list: add new name?
+                    if answer.lower() not in [p.lower() for p in people_list]:
+                        cfg_display = str(config_path) if config_path else "(no config)"
+                        yes = (
+                            prompt_fn(
+                                f"Add {answer} to people in {cfg_display}? [y/N] "
+                            )
+                            .strip()
+                            .lower()
+                        )
+                        if yes == "y" and config_path is not None:
+                            new_people = list(people_list)
+                            if answer not in new_people:
+                                new_people.append(answer)
+                            _write_people_list(config_path, new_people)
         finally:
             if restore_completer is not None:
                 restore_completer()
