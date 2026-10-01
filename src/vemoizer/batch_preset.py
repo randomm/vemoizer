@@ -41,7 +41,7 @@ from typing import Any
 
 import typer
 
-from vemoizer.batch_output import _check_result, _write_preset_output
+from vemoizer.batch_output import PRESET_FORMATS, _check_result, _write_preset_output
 from vemoizer.diarization import SpeakerCount
 from vemoizer.llm import ConfigError
 from vemoizer.output.naming import nfc_stem_and_suffix
@@ -154,6 +154,7 @@ def _run_preset_groups(
     group_options = replace(options, glossary_path=effective_glossary)
 
     written: list[str] = []
+    exit_code = 0
 
     def write_group(label: Path | str, result: dict[str, Any]) -> None:
         # One dated pair per group. The date is the first part's mtime
@@ -161,14 +162,19 @@ def _run_preset_groups(
         # same first part's stem (mirrors the plain loop's files[0]).
         first = _first_part_path(label, files)
         stem, _ = nfc_stem_and_suffix(first)
-        written.extend(
-            _write_preset_output(
-                result,
-                stem,
-                Path.cwd(),
-                date_str=_mtime_date_str(first),
-            )
+        pair = _write_preset_output(
+            result,
+            stem,
+            Path.cwd(),
+            date_str=_mtime_date_str(first),
         )
+        written.extend(pair)
+        # A partial pair (fewer paths than the preset's formats — e.g.
+        # the .json write failed) means this group's run failed; the
+        # error line was already printed by _write_output.
+        nonlocal exit_code
+        if len(pair) < len(PRESET_FORMATS):
+            exit_code = 1
 
     code = run_batch(
         files,
@@ -186,7 +192,7 @@ def _run_preset_groups(
     for name in written:
         if not quiet:
             typer.echo(f"wrote {name}")
-    return code
+    return max(code, exit_code)
 
 
 def run_preset(
@@ -376,14 +382,18 @@ def run_preset(
                 ):
                     exit_code = 1
                     continue
-                written.extend(
-                    _write_preset_output(
-                        result,
-                        first_stem,
-                        Path.cwd(),
-                        date_str=_mtime_date_str(file),
-                    )
+                pair = _write_preset_output(
+                    result,
+                    first_stem,
+                    Path.cwd(),
+                    date_str=_mtime_date_str(file),
                 )
+                written.extend(pair)
+                if len(pair) < len(PRESET_FORMATS):
+                    # A partial pair (e.g. the .json write failed) means
+                    # this file's run failed; the error line was already
+                    # printed by _write_output.
+                    exit_code = 1
         for name in written:
             if not quiet:
                 typer.echo(f"wrote {name}")

@@ -17,14 +17,13 @@ without duplicating the loop.
 Both presets call ``transcribe_file`` with the existing signature —
 no new pipeline parameter.  The layered glossary is composed into a
 temp file passed through ``glossary_path``; temp files deleted after.
-
-M3 grouping (issue #77): ``run_batch`` takes ``RunOptions`` and,
-for 2+ files, adds natural sort, boundary decodes, confirm, concat,
+M3 grouping (issue #77): ``run_batch`` takes ``RunOptions`` and, for 2+
+files, adds natural sort, boundary decodes, confirm, concat, and a
+clean one-line error per failed group (keep going, exit 1).
 
 The output-writing helpers (``_write_output``, ``_write_preset_output``,
 ``_write_temp_glossary``, ``_check_result``) live in
-:mod:`vemoizer.batch_output` and are re-exported here for backwards
-compatibility with existing tests.
+:mod:`vemoizer.batch_output` and are re-exported here.
 """
 
 from __future__ import annotations
@@ -67,6 +66,7 @@ def _write_temp_glossary(lines: list[str]) -> str:
 # existing imports from vemoizer.batch continue to work.
 from vemoizer.batch_output import (  # noqa: F401,E402
     PRESET_FORMATS,
+    _call_write_seam,
     _check_result,
     _process_result,
     _write_output,
@@ -75,9 +75,7 @@ from vemoizer.batch_output import (  # noqa: F401,E402
 
 # Re-export run_preset from its new home (batch_preset.py, issue #87) so
 # existing imports from vemoizer.batch continue to work.
-from vemoizer.batch_preset import (  # noqa: F401,E402
-    run_preset,
-)
+from vemoizer.batch_preset import run_preset  # noqa: F401,E402
 
 # Re-export the grouping helpers (now in grouping_*.py submodules) so
 # existing imports and monkeypatch.setattr("vemoizer.grouping.X", ...)
@@ -258,9 +256,6 @@ def _run_plain(
     exit_code = 0
     with caffeinate_context():
         for file in ordered:
-            # A per-file decode/write failure degrades to a clean one-line
-            # error (see _transcribe_guarded), not a traceback mid-batch:
-            # mark the file failed, keep going.
             if (result := _transcribe_guarded(file, options, file.name)) is None:
                 exit_code = 1
                 continue
@@ -273,7 +268,8 @@ def _run_plain(
                 ):
                     exit_code = 1
                     continue
-                write_group_fn(file, result)
+                if not _call_write_seam(write_group_fn, file, result):
+                    exit_code = 1
                 continue
             if not _process_result(
                 file,
@@ -319,13 +315,15 @@ def run_batch(
     groups carry no ``part_markers`` key.
 
     ``write_group_fn`` (issue #87) overrides the per-group write seam:
-    when set, called as ``write_group_fn(label, result)`` after the
-    result passes ``_check_result`` (instead of ``_process_result``).
-    The meeting preset uses it for one dated ``.md``/``.json`` pair per
-    group in the CWD; ``None`` keeps the expert behaviour. The seam runs
-    inside the ``caffeinate_context``. The ``_run_plain`` short-circuit
-    (single file / ``--no-group``) also honours it: each file's result
-    goes through the seam instead of ``_process_result``.
+    when set, called via ``_call_write_seam`` after the result passes
+    ``_check_result`` (instead of ``_process_result``); an unexpected
+    seam exception becomes a clean one-line error (exit 1, keep going)
+    while ``KeyboardInterrupt``/``SystemExit`` propagate. The meeting
+    preset uses it for one dated ``.md``/``.json`` pair per group in the
+    CWD; ``None`` keeps the expert behaviour. The seam runs inside the
+    ``caffeinate_context``. The ``_run_plain`` short-circuit (single
+    file / ``--no-group``) honours it too: each file's result goes
+    through the seam instead of ``_process_result``.
 
     ``--out`` with 2+ files is only honored for a single group (else
     every group would overwrite the same target — fail up front, 2)
@@ -474,8 +472,9 @@ def run_batch(
 
             if write_group_fn is not None:
                 # Preset write seam (issue #87): shared _check_result so
-                # the fail-loud contract matches _process_result; the
-                # caller writes the group's output itself.
+                # the fail-loud contract matches _process_result; an
+                # unexpected seam exception degrades per-group via
+                # _call_write_seam (clean one-line error, keep going).
                 if _check_result(
                     label,
                     result,
@@ -484,7 +483,8 @@ def run_batch(
                 ):
                     exit_code = 1
                     continue
-                write_group_fn(label, result)
+                if not _call_write_seam(write_group_fn, label, result):
+                    exit_code = 1
                 continue
             if not _process_result(
                 label,

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +113,30 @@ def _write_preset_output(
         if _write_output(path, result, fmt):
             written.append(path.name)
     return written
+
+
+def _call_write_seam(
+    fn: Callable[[Path | str, dict[str, Any]], object],
+    label: Path | str,
+    result: dict[str, Any],
+) -> bool:
+    """Call the per-group preset write seam with a fail-loud boundary.
+
+    ``KeyboardInterrupt``/``SystemExit`` propagate; any other exception
+    becomes a clean one-line ``error: <label>: could not write output:
+    <reason>`` and returns False (the caller sets exit 1 and keeps
+    going — the seam must never escape as a raw traceback after minutes
+    of decoding). A normal call returns True (the seam's return value is
+    irrelevant — bool/None are both fine).
+    """
+    try:
+        fn(label, result)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as e:  # noqa: BLE001 - per-group fail-loud boundary
+        typer.echo(f"error: {label}: could not write output: {e}", err=True)
+        return False
+    return True
 
 
 def _write_temp_glossary(lines: list[str]) -> str:
