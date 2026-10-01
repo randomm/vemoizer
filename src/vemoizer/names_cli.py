@@ -125,6 +125,29 @@ def _emit_toml(raw: dict[str, Any]) -> str:
     return "\n".join(out) + ("\n" if out else "")
 
 
+def _escape_basic_string(value: str) -> str:
+    """Escape *value* for a TOML basic string: backslash, quote, newline,
+    tab, carriage return and every other control character (plus ``U+007F``
+    as a TOML basic string forbids raw control characters)."""
+    out: list[str] = []
+    for ch in value:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ord(ch) < 0x20 or ch == "\x7f":
+            out.append(f"\\u{ord(ch):04x}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _toml_value(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -133,16 +156,13 @@ def _toml_value(value: Any) -> str:
     if isinstance(value, float):
         return repr(value)
     if isinstance(value, str):
-        escaped = (
-            value.replace("\\", "\\\\")
-            .replace('"', '\\"')
-            .replace("\n", "\\n")
-            .replace("\t", "\\t")
-        )
-        return f'"{escaped}"'
+        return f'"{_escape_basic_string(value)}"'
     if isinstance(value, list):
         return "[" + ", ".join(_toml_value(item) for item in value) + "]"
-    return repr(value)
+    # ``tomllib`` only yields str/int/float/bool/list; this is unreachable
+    # via the config round-trip (``_read_people_list`` / ``_write_people_list``)
+    # and kept as an explicit empty string rather than an invalid TOML blob.
+    return '""'
 
 
 # ---------------------------------------------------------------------------
