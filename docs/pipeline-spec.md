@@ -256,10 +256,7 @@ Filenames are NFC-normalized (macOS APFS stores NFD).
 ### 12a. M5a JSON sidecar keys (issue #89)
 
 The dated `.json` written next to the `.md` by the `meeting` and `memo`
-prewrites carries four extra keys, assembled by
-`src/vemoizer/sidecar.py` (`build_sidecar`) before `format_json` mirrors
-them (present-only, so old JSON without the keys and the expert
-`transcribe` JSON are unaffected):
+presets carries four extra keys, assembled by
 `src/vemoizer/sidecar.py` (`build_sidecar`) before `format_json` mirrors
 them (present-only, so old JSON without the keys and the expert
 `transcribe` JSON are unaffected):
