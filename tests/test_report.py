@@ -286,16 +286,19 @@ def test_glossary_hits_case_insensitive() -> None:
     assert "Sanastoon osumat: 1 of 1" in result
 
 
-def test_glossary_at_prefixed_term_stripped() -> None:
-    # @-prefix is stripped before matching (per M2).
+def test_glossary_llm_only_terms_are_excluded_by_batch_layer() -> None:
+    # @-prefixed terms are LLM-only (issue #82): the batch layer excludes
+    # them from glossary_terms before calling render_report, so they are
+    # never part of the "X of N" denominator (they never reached the
+    # whisper prompt). The report itself only ever sees prompt terms.
     t = {
         "text": "x",
         "paragraphs": [
             {"start": 0.0, "end": 5.0, "text": "Normal term here."},
         ],
     }
-    result = render_report(t, glossary_terms=["@Normal", "term"])
-    assert "Sanastoon osumat: 2 of 2" in result
+    result = render_report(t, glossary_terms=["term"])
+    assert "Sanastoon osumat: 1 of 1" in result
 
 
 def test_glossary_source_only_no_terms_still_shows() -> None:

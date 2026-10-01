@@ -91,9 +91,10 @@ def _residual_windows(transcript: dict[str, Any]) -> list[tuple[float, float]]:
 def _matched_terms(terms: list[str], paragraphs: list[dict[str, Any]]) -> int:
     """Whole-word, case-insensitive hits of *terms* in the paragraph text.
 
-    Only prompt terms are matched (``load_glossary`` already excludes
-    ``=>`` correction pairs). The ``@`` prefix is stripped before the
-    match (per M2 the prefix is a marker, not part of the term). A term
+    The terms are the WHISPER-prompt terms only (the batch layer excludes
+    ``@``-prefixed LLM-only terms before calling — they never reached the
+    whisper prompt, so they are not part of the "X of N" denominator).
+    ``load_glossary`` already excludes ``=>`` correction pairs. A term
     matches once the text contains it as a whole word — the count is the
     number of distinct terms that matched at least once, shown honestly
     even when zero.
@@ -104,8 +105,6 @@ def _matched_terms(terms: list[str], paragraphs: list[dict[str, Any]]) -> int:
     matched = 0
     for term in terms:
         term = term.strip()
-        while term.startswith("@"):
-            term = term[1:].lstrip()
         if not term:
             continue
         # \b/\b word boundaries; \. escapes the term literally (re.escape
@@ -147,7 +146,6 @@ def render_report(
     transcript: dict[str, Any],
     *,
     diarize_requested: bool = False,
-    duration_s: float | None = None,
     glossary_source: str | None = None,
     glossary_terms: list[str] | None = None,
     language: str = "fi",
@@ -252,7 +250,6 @@ def build_quality_report(
     transcript: dict[str, Any],
     *,
     diarize_requested: bool = False,
-    duration_s: float | None = None,
     glossary_source: str | None = None,
     glossary_terms: list[str] | None = None,
     language: str = "fi",
@@ -269,7 +266,6 @@ def build_quality_report(
         return render_report(
             transcript,
             diarize_requested=diarize_requested,
-            duration_s=duration_s,
             glossary_source=glossary_source,
             glossary_terms=glossary_terms,
             language=language,

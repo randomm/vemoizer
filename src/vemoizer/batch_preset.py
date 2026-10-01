@@ -148,8 +148,10 @@ def _run_preset_groups(
     gfiles = resolve_run_glossary_files(command, options.glossary_path)
     # M6 (issue #75): the report-only glossary provenance, stashed on each
     # group's run dict before the seam writes (see run_preset's plain loop
-    # for the full contract).
-    glossary_terms = list(options.whisper_prompt) + ["@" + t for t in options.llm_terms]
+    # for the full contract). Only whisper-prompt terms — @-prefixed
+    # LLM-only terms never reached the whisper prompt, so they are not part
+    # of the "X of N" denominator.
+    glossary_terms = list(options.whisper_prompt)
     if gfiles:
         glossary_source = ", ".join(gfiles) + f" ({len(glossary_terms)} terms)"
     else:
@@ -439,17 +441,15 @@ def run_preset(
                 # before the seam writes. Source = the real layer file path(s)
                 # the run read (never the composed temp file — deleted in the
                 # finally) or the explicit --glossary; term count = the
-                # resolved merged terms (whisper prompt + @-LLM terms). Absent
-                # when the run read no glossary at all — then the md header
-                # and the report omit the line, never a blank one.
+                # whisper-prompt terms only (@-prefixed LLM-only terms never
+                # reached the whisper prompt). Absent when the run read no
+                # glossary at all — then the md header and the report omit
+                # the line, never a blank one.
                 if gfiles:
                     result["glossary_source"] = (", ".join(gfiles)) + (
-                        f" ({len(options.whisper_prompt) + len(options.llm_terms)}"
-                        " terms)"
+                        f" ({len(options.whisper_prompt)} terms)"
                     )
-                    result["glossary_terms"] = list(options.whisper_prompt) + [
-                        "@" + t for t in options.llm_terms
-                    ]
+                    result["glossary_terms"] = list(options.whisper_prompt)
                 pair = _write_preset_output(
                     result,
                     first_stem,

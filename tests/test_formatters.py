@@ -741,3 +741,25 @@ def test_md_quality_report_empty_string_omits_block() -> None:
     transcript["quality_report"] = ""
     md = format_md(transcript)
     assert "<details>" not in md
+
+
+def test_format_transcript_md_threads_language_from_run_dict() -> None:
+    """The run-dict ``language`` key selects the md section language.
+
+    M6 (issue #75): the written md deliverable must honour ``language =
+    "en"`` from the config — format_transcript (the seam every real md
+    write goes through) must thread it into format_md, not default to fi.
+    """
+    notes = {"title": "Meeting", "summary": "Summary."}
+    t = {"text": "x", "notes": notes, "language": "en"}
+    md = format_transcript(t, "md")
+    assert "## Summary" in md
+    assert "## Tiivistelmä" not in md
+
+
+def test_format_transcript_md_without_language_key_defaults_fi() -> None:
+    notes = {"title": "Palaveri", "summary": "Yhteenveto."}
+    t = {"text": "x", "notes": notes}
+    md = format_transcript(t, "md")
+    assert "## Tiivistelmä" in md
+    assert "## Summary" not in md

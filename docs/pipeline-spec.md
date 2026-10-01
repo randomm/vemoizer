@@ -289,10 +289,12 @@ on the dict rather than being passed as a parameter.
 
 **Run-dict keys added by the batch layer** (`batch_output` / 
 `batch_preset`): `glossary_source` (the real layer file path(s) the run
-read, `"<paths> (N terms)"` — report/header provenance only, never
-stored by the pipeline) and `glossary_terms` (the resolved merged terms,
-popped by `batch_output._process_result` before output writing so it is
-the report's matching input, never mirrored into an output file).
+read, `"<paths> (N terms)"` where N counts the whisper-prompt terms only
+— `@`-prefixed LLM-only terms never reached the whisper prompt and are
+excluded from the count — report/header provenance only, never stored by
+the pipeline) and `glossary_terms` (the whisper-prompt terms, popped by
+`batch_output._process_result` before output writing so it is the
+report's matching input, never mirrored into an output file).
 
 **The quality report** (`src/vemoizer/report.py`, `render_report` /
 `build_quality_report`) is a pure function of the run dict plus
