@@ -397,7 +397,14 @@ container metadata (iOS Voice Memos edit lists make container duration
 lie), and `-c copy` concatenation of AAC does not guarantee that the
 merged decode's length equals the sum of the parts' lengths (frame
 padding and edit lists), so the merged decode is not a safe basis for
-the offsets.
+the offsets. The measured cost of that extra decode is a streaming pass
+only (no PCM materialised): on this machine (Apple Silicon, synthetic
+20-minute 16 kHz pink-noise .m4a, 3 runs) each per-part decode took
+0.530-0.649 s (median 0.575 s) — about 1.6 s per hour of audio, roughly
+2265x real time — versus ~12 min/h for the whisper-per-window decode
+itself (PR #84 spike), i.e. well under 1 % of a run's wall time; a 3 x
+7-minute group measured 0.837 s end to end. That figure is a measurement
+on a synthetic file on one machine, not a guarantee.
 
 `--out` with 2+ files is honored only when the run ends up as a single
 group (one combined transcript to that path); `--out -` (stdout) is

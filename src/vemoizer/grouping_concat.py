@@ -196,7 +196,12 @@ def part_offsets(
     padding and edit lists make container math unreliable), so deriving
     offsets from the merged decode is not safe. The cost of that design
     is one extra STREAMING decode pass per part, with no PCM ever
-    materialised.
+    materialised. Measured on this machine (Apple Silicon, synthetic
+    20-minute 16 kHz pink-noise .m4a, 3 runs): the per-part decode took
+    0.530-0.649 s (median 0.575 s) — about 1.6 s per hour of audio,
+    roughly 2265x real time — versus ~12 min/h for the whisper-per-window
+    decode itself (PR #84 spike), so well under 1 % of a run's wall time.
+    A 3 x 7-minute group measured 0.837 s end to end.
 
     The measurement loop is bounded by a CUMULATIVE wall-clock budget
     (*total_timeout*, default :data:`PART_OFFSETS_TOTAL_TIMEOUT` seconds):
