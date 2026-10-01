@@ -177,6 +177,11 @@ def select_clips(
     candidate from each third where possible, otherwise the longest
     remaining candidate regardless of third.
 
+    ``min_s`` is a display annotation only (the nominal lower bound for a
+    clip's length); it never disqualifies a candidate — the disqualification
+    threshold is the 2 s :data:`MIN_TURN_S` gate, and the window length is
+    ``min(max_s, turn_duration)``.
+
     ``segments`` is accepted for interface symmetry with the sidecar (the
     selector's rules operate on paragraph fields) and is not read.
     *total_duration* clamps windows to the audio end; it defaults to the
