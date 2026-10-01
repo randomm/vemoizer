@@ -713,14 +713,6 @@ def test_confirm_groups_yes_accepts_all_proposals() -> None:
     assert groups[1][0].name == "Uusi äänitys 427.m4a"
 
 
-def test_confirm_groups_no_group_is_singletons() -> None:
-    files = _files4()
-    proposals = []
-    groups = confirm_groups(files, proposals, no_group=True)
-    assert len(groups) == 4
-    assert all(len(g) == 1 for g in groups)
-
-
 def test_confirm_groups_interactive_enter_accepts() -> None:
     files = _files4()
     proposals = [

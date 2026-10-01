@@ -46,7 +46,10 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from vemoizer.llm import LLMConfig
 
 import numpy as np
 import typer
@@ -113,7 +116,7 @@ from vemoizer.grouping_probe import (  # noqa: F401,E402
 )
 
 
-def _resolve_llm_config(config_path: str | None):
+def _resolve_llm_config(config_path: str | None) -> LLMConfig | None:
     """Resolve the LLM config for a batch run (issue #82 review).
 
     Explicit ``--config`` short-circuits to ``load_config`` (fail-open).
@@ -367,7 +370,6 @@ def run_batch(
             ordered,
             proposals,
             yes=yes,
-            no_group=False,
             input_fn=input_fn or input,
             print_fn=(
                 print_fn

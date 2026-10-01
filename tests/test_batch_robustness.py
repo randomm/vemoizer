@@ -41,6 +41,49 @@ from vemoizer.cli import app
 runner = CliRunner()
 
 
+def test_run_batch_no_group_yields_one_transcript_per_file(
+    tmp_path, monkeypatch
+) -> None:
+    """2+ files with ``no_group=True``: run_batch takes the plain per-file
+    loop up front (``--no-group`` is a run_batch decision, issue #77
+    lens) — one standalone transcript per file, and ``decode_boundaries``
+    / ``confirm_groups`` are never called."""
+    decode_calls: list[str] = []
+    boundary_calls: list[int] = []
+    confirm_calls: list[int] = []
+
+    def fake_transcribe_file(path, **kwargs):
+        decode_calls.append(str(path))
+        return {"text": f"moikka {len(decode_calls)}", "segments": []}
+
+    import vemoizer.grouping as grouping
+
+    def counting_decode(files, transcribe_fn=None):
+        boundary_calls.append(1)
+        return [""], [""]
+
+    def counting_confirm(*args, **kwargs):
+        confirm_calls.append(1)
+        return []
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.setattr(grouping, "decode_boundaries", counting_decode)
+    monkeypatch.setattr(grouping, "confirm_groups", counting_confirm)
+    monkeypatch.chdir(tmp_path)
+
+    files = [tmp_path / "Uusi äänitys 425.m4a", tmp_path / "Uusi äänitys 426.m4a"]
+    _touch(files)
+    code = batch.run_batch(files, _options(), formats=["txt"], no_group=True)
+
+    assert code == 0
+    # One transcript per file (2 decodes), no boundary work at all.
+    assert len(decode_calls) == 2
+    assert boundary_calls == []
+    assert confirm_calls == []
+    assert (tmp_path / "Uusi äänitys 425.txt").exists()
+    assert (tmp_path / "Uusi äänitys 426.txt").exists()
+
+
 def _options() -> batch.RunOptions:
     return batch.RunOptions.expert_transcribe(
         profile="dictation",

@@ -53,6 +53,10 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy as np
 
 from vemoizer.grouping_concat import (  # noqa: F401
     concat_groups,
@@ -79,7 +83,7 @@ from vemoizer.textnorm import textnorm
 from .grouping_common import PartMarker, PartOffset  # noqa: F401  (re-export)
 
 
-def _decode_edge_window(path: Path, start: float, end: float):
+def _decode_edge_window(path: Path, start: float, end: float) -> np.ndarray:
     """Indirection for :func:`grouping_decode._decode_edge_window`.
 
     Defined here (not imported) so that ``monkeypatch.setattr(grouping,
@@ -380,23 +384,22 @@ def confirm_groups(
     proposals: Sequence[GroupProposal],
     *,
     yes: bool = False,
-    no_group: bool = False,
     input_fn: Callable[[str], str] = input,
     print_fn: Callable[[str], None] = print,
 ) -> list[list[Path]]:
     """Confirm the grouping decision; returns groups in natural order.
 
-    ``--no-group``: each file is its own group (the caller skips the
-    boundary decodes entirely). ``--yes``: every proposal is accepted
-    as-is. Interactive: one prompt per boundary (Enter accept, ``e`` for
-    a full partition edit, ``q`` quit) — ``q`` aborts the run with a
-    :class:`GroupingError`, and the edit path accepts ANY valid
-    partition. The non-TTY guard lives in the CLI, before any boundary
-    decode, so a piped/CI invocation fails fast instead of hanging.
+    ``--yes``: every proposal is accepted as-is. Interactive: one prompt
+    per boundary (Enter accept, ``e`` for a full partition edit, ``q``
+    quit) — ``q`` aborts the run with a :class:`GroupingError`, and the
+    edit path accepts ANY valid partition. The ``--no-group`` decision
+    (no grouping at all, each file standalone) lives in
+    :func:`vemoizer.batch.run_batch`, which handles it before any
+    boundary decode and never reaches this function with it set. The
+    non-TTY guard lives in the CLI, before any boundary decode, so a
+    piped/CI invocation fails fast instead of hanging.
     """
     ordered = natural_sort(files)
-    if no_group:
-        return [[p] for p in ordered]
     if yes:
         return _proposals_to_groups(ordered, proposals)
 

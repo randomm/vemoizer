@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -49,7 +50,7 @@ def dated_basename(title: str, **kwargs) -> str:
 PRESET_FORMATS = ("md", "json")
 
 
-def _write_output(target: Path, result: dict, fmt: str) -> bool:
+def _write_output(target: Path, result: dict[str, Any], fmt: str) -> bool:
     """Render *result* in *fmt* and write it to *target* (``-`` = stdout).
 
     Returns True on success; False after printing the error, so the caller
@@ -76,7 +77,7 @@ def _write_output(target: Path, result: dict, fmt: str) -> bool:
 
 
 def _write_preset_output(
-    result: dict,
+    result: dict[str, Any],
     first_stem: str,
     out_dir: Path,
 ) -> list[str]:
@@ -123,7 +124,11 @@ def _write_temp_glossary(lines: list[str]) -> str:
 
 
 def _check_result(
-    file: Path | str, result: dict, *, diarize: bool, diarize_label: str = "--diarize"
+    file: Path | str,
+    result: dict[str, Any],
+    *,
+    diarize: bool,
+    diarize_label: str = "--diarize",
 ) -> int:
     """The M1 fail-loud checks over one file's result (issue #78).
 
@@ -183,7 +188,7 @@ def _check_result(
 
 def _process_result(
     label: Path | str,
-    result: dict,
+    result: dict[str, Any],
     *,
     formats: list[str],
     out: Path | None,
