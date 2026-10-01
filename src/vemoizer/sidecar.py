@@ -17,15 +17,17 @@ Design notes
   the expert ``transcribe`` JSON — which never carries ``_source_durations``
   or ``options``/``speaker_names`` — is byte-identical to before.
 
-* ``source[]`` per-part ``part_offset_s`` comes from ``result["part_markers"]``
-  (the only per-part offsets that survive to the seam); ``duration_s`` comes
-  from the per-part PCM durations the seam measures and stashes on
+* ``source[]`` per-part ``path`` is the real source file path the seam
+  passes as ``source_paths`` (single-file: ``[file]``; a group: one Path per
+  part, resolved from the group label against the run's file list) — so
+  ``render`` can re-apply per-part offsets to the actual files. Per-part
+  ``part_offset_s`` comes from ``result["part_markers"]`` (the only per-part
+  offsets that survive to the seam); ``duration_s`` comes from the per-part
+  PCM durations the seam measures and stashes on
   ``result["_source_durations"]`` (single-file: ``[d]``; a group: one entry
-  per part, in ``part_markers`` order). ``duration_s`` is optional — it is
-  included only when a measured PCM duration is available for that part.
-  The seam skips the ffmpeg decode when there is no glossary file (no
-  content to hash), so ``duration_s`` is omitted in that case rather than
-  being measured from a test fixture that is not real audio.
+  per part, in marker order). ``duration_s`` is optional — it is included
+  only when a measured PCM duration is available for that part (the
+  measurement is fail-open: an ffmpeg error leaves the key omitted).
 
 * ``options.glossary_sha256`` is the sha256 over the concatenated raw bytes
   of the exact glossary files the run used (project layer first, then home,
@@ -50,6 +52,7 @@ def build_sidecar(
     *,
     command: str,
     glossary_files: list[str] | None,
+    source_paths: list[Path] | None = None,
 ) -> dict[str, Any]:
     """Build the four M5a sidecar keys for a meeting/memo *result*.
 
@@ -64,9 +67,11 @@ def build_sidecar(
       fabricated here.
     * ``source``: one entry per recorded part — single-file runs a single
       ``{path, part_offset_s: 0.0, duration_s?}``; a grouped run one entry
-      per ``part_markers`` part, with ``part_offset_s`` from the marker and
-      ``duration_s`` from the corresponding measured PCM duration.
-      ``duration_s`` is omitted when no duration was measured for that part.
+      per ``part_markers`` part, with ``path`` from the corresponding
+      *source_paths* entry (falling back to the marker label when absent),
+      ``part_offset_s`` from the marker, and ``duration_s`` from the
+      corresponding measured PCM duration. ``duration_s`` is omitted when
+      no duration was measured for that part.
     * ``options``: ``{command, glossary_files, glossary_sha256}``.
       ``glossary_files`` is the list of files actually used (``[]`` when
       none); ``glossary_sha256`` is the single sha256 over their
@@ -86,7 +91,7 @@ def build_sidecar(
         # present-only mirror would include it as null otherwise).
         result.pop("notes")
 
-    source = _build_source(result)
+    source = _build_source(result, source_paths)
     if source:
         result["source"] = source
 
@@ -103,21 +108,27 @@ def build_sidecar(
     return result
 
 
-def _build_source(result: dict[str, Any]) -> list[dict[str, Any]]:
+def _build_source(
+    result: dict[str, Any], source_paths: list[Path] | None
+) -> list[dict[str, Any]]:
     """The ``source[]`` list, or ``[]`` when no part path is known.
 
     ``duration_s`` is optional: it is included only when a measured PCM
     duration is available for that part (``_source_durations``). When the
-    seam did not measure a duration (e.g. the run had no glossary file,
-    so no ffmpeg decode was needed), the entry is emitted without the key.
+    measurement failed (fail-open, e.g. an ffmpeg error), the entry is
+    emitted without the key.
     """
     durations = result.get("_source_durations")
     if not isinstance(durations, list):
         durations = []
 
+    paths = [str(p) for p in source_paths] if source_paths else []
+
     markers = result.get("part_markers")
     if isinstance(markers, list) and markers:
-        # Grouped run: one entry per part. part_offset_s is the marker's
+        # Grouped run: one entry per part. path is the real part path from
+        # source_paths (falling back to the marker label when the seam did
+        # not pass a path for that part); part_offset_s is the marker's
         # cumulative decoded-PCM start offset; duration_s is the measured
         # PCM duration of that same part (aligned by position).
         entries: list[dict[str, Any]] = []
@@ -125,7 +136,7 @@ def _build_source(result: dict[str, Any]) -> list[dict[str, Any]]:
             if not isinstance(m, dict):
                 continue
             entry: dict[str, Any] = {
-                "path": _marker_source_path(m),
+                "path": paths[i] if i < len(paths) else str(m.get("label", "")),
                 "part_offset_s": float(m.get("offset", 0.0)),
             }
             if i < len(durations):
@@ -133,9 +144,10 @@ def _build_source(result: dict[str, Any]) -> list[dict[str, Any]]:
             entries.append(entry)
         return entries
 
-    # Single-file run: no part_markers. part_offset_s is 0.0 by definition;
-    # duration_s is the single measured PCM duration, or omitted when none.
-    path = result.get("source_path")
+    # Single-file run: no part_markers. path is the file path the seam
+    # passed (falling back to result["source_path"]); part_offset_s is 0.0
+    # by definition; duration_s is the measured PCM duration, or omitted.
+    path = paths[0] if paths else result.get("source_path")
     if not path:
         return []
     entry: dict[str, Any] = {
@@ -145,18 +157,6 @@ def _build_source(result: dict[str, Any]) -> list[dict[str, Any]]:
     if durations:
         entry["duration_s"] = float(durations[0])
     return [entry]
-
-
-def _marker_source_path(marker: dict[str, Any]) -> str:
-    """Best-effort source path for a ``part_markers`` entry.
-
-    The marker only stores ``offset``/``label``; the label carries the
-    source filename (``— osa N (äänitys X)``), so we surface that label as
-    the path (we do not have the run's original part paths here). A missing
-    or blank label yields ``""`` rather than a crash.
-    """
-    label = str(marker.get("label", ""))
-    return label
 
 
 def glossary_layer_files() -> list[Path]:

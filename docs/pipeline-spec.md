@@ -253,6 +253,41 @@ absent) plus the paragraphed, speaker-labelled transcript. Subtitle cue timestam
 1-based), VTT uses `HH:MM:SS.mmm -->` (dot) under a `WEBVTT` header.
 Filenames are NFC-normalized (macOS APFS stores NFD).
 
+### 12a. M5a JSON sidecar keys (issue #89)
+
+The dated `.json` written next to the `.md` by the `meeting` and `memo`
+prewrites carries four extra keys, assembled by
+`src/vemoizer/sidecar.py` (`build_sidecar`) before `format_json` mirrors
+them (present-only, so old JSON without the keys and the expert
+`transcribe` JSON are unaffected):
+
+- `notes` — the LLM notes verbatim (`{title, summary, key_points,
+  action_items}`); the key is omitted when there were no notes (absent
+  or `None`, i.e. LLM fail-open). Never fabricated.
+- `source` — one entry per recorded part: `{path, part_offset_s,
+  duration_s?}`. Single-file runs: one entry with the file path,
+  `part_offset_s: 0.0`. Grouped runs: one entry per `part_markers` part,
+  `path` is the real part file path and `part_offset_s` the marker's
+  cumulative decoded-PCM start offset. `duration_s` is the part's
+  measured decoded-PCM duration, omitted when the measurement failed
+  (fail-open).
+- `options` — `{command, glossary_files, glossary_sha256}`.
+  `glossary_files` lists the exact glossary files the run used (project
+  layer first, then home; or the single explicit `--glossary` file); `[]`
+  when the run had none. `glossary_sha256` is a single sha256 over the
+  concatenated raw bytes of those files in that order, or `null` when
+  `glossary_files` is empty. The future `vemoizer render` (M5a, later
+  workstream) recomputes the same hash over the current layers and prints
+  one stderr line when the two differ (new prompt terms need a
+  re-transcribe).
+- `speaker_names` — `{label: name}` speaker-name map, `{}` by default
+  (the render command's `--name` persists into it later). A `clips` key
+  is never written.
+
+`format_json` mirrors each key only when present and non-empty (the
+`speaker_names` `{}` default is omitted), so the expert `transcribe`
+JSON and pre-M5 sidecars are byte-identical to before.
+
 ### 13. Dated output naming (issue #82)
 
 `src/vemoizer/output/naming.py` adds three exports on top of the

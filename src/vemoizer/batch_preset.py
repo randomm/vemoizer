@@ -102,6 +102,29 @@ def _group_durations(label: Path | str, files: list[Path]) -> list[float]:
     return [pcm_duration_seconds(p) for p in parts]
 
 
+def _group_part_paths(label: Path | str, files: list[Path]) -> list[Path]:
+    """The group's per-part source paths, in label order.
+
+    A single-part group's label is that part's path; a multi-part label
+    (``a.m4a+b.m4a``) resolves each part's filename against the original
+    *files* list (the group is built over ``natural_sort(files)``, so each
+    part is a member of *files*). The sidecar's ``source[].path`` carries
+    these real on-disk paths (not the decorative marker label) so
+    ``render`` can re-apply per-part offsets to the actual files.
+    """
+    if isinstance(label, Path):
+        return [label]
+    parts: list[Path] = []
+    for name in label.split("+"):
+        for f in files:
+            if f.name == name:
+                parts.append(f)
+                break
+        else:
+            parts.append(Path(name))
+    return parts
+
+
 def _transcribe_preset_file(
     file: Path,
     options: RunOptions,
@@ -198,19 +221,21 @@ def _run_preset_groups(
         # One dated pair per group. The date is the first part's mtime
         # (group[0] in natural-sort order); the fallback stem is the
         # same first part's stem (mirrors the plain loop's files[0]).
-        # M5a: stash the group's per-part PCM durations and build the
-        # sidecar keys before the seam writes the .md + .json pair.
-        # Durations are measured only when a glossary file is used
-        # (otherwise the ffmpeg decode is skipped — tests fake
-        # ``transcribe_file`` but not ``pcm_duration_seconds``).
+        # M5a: stash the group's per-part PCM durations (fail-open) and
+        # the real per-part source paths, then build the sidecar keys
+        # before the seam writes the .md + .json pair.
+        from contextlib import suppress
+
         from vemoizer.sidecar import build_sidecar
 
-        if gfiles is not None:
-            from contextlib import suppress
-
-            with suppress(Exception):  # fail-open: skip duration on ffmpeg error
-                result["_source_durations"] = _group_durations(label, files)
-        build_sidecar(result, command=command, glossary_files=gfiles)
+        with suppress(Exception):  # fail-open: skip durations on ffmpeg error
+            result["_source_durations"] = _group_durations(label, files)
+        build_sidecar(
+            result,
+            command=command,
+            glossary_files=gfiles,
+            source_paths=_group_part_paths(label, files),
+        )
         first = _first_part_path(label, files)
         stem, _ = nfc_stem_and_suffix(first)
         pair = _write_preset_output(
@@ -420,11 +445,8 @@ def run_preset(
         first_stem, _ = nfc_stem_and_suffix(files[0])
         exit_code = 0
         written: list[str] = []
-        # M5a: the glossary files the run used (for the sidecar hash) and
-        # whether to measure per-file PCM durations (only when a glossary
-        # file exists — otherwise the ffmpeg decode is skipped).
+        # M5a: the glossary files the run used (for the sidecar hash).
         gfiles = _glossary_layer_files_for_sidecar(command, options, effective_glossary)
-        measure_durations = gfiles is not None
         with caffeinate_context():
             for file in files:
                 result = _transcribe_preset_file(file, options, effective_glossary)
@@ -439,20 +461,23 @@ def run_preset(
                 ):
                     exit_code = 1
                     continue
-                # M5a: stash this file's PCM duration and build the
-                # sidecar keys before the seam writes the .md + .json pair.
+                # M5a: stash this file's PCM duration (fail-open) and
+                # build the sidecar keys before the seam writes the
+                # .md + .json pair.
+                from contextlib import suppress
+
                 from vemoizer.sidecar import build_sidecar
 
-                result["source_path"] = str(file)
-                if measure_durations:
-                    from contextlib import suppress
+                with suppress(Exception):  # fail-open: skip on ffmpeg error
+                    from vemoizer.ingest import pcm_duration_seconds
 
-                    # fail-open: skip duration on ffmpeg error
-                    with suppress(Exception):
-                        from vemoizer.ingest import pcm_duration_seconds
-
-                        result["_source_durations"] = [pcm_duration_seconds(file)]
-                build_sidecar(result, command=command, glossary_files=gfiles)
+                    result["_source_durations"] = [pcm_duration_seconds(file)]
+                build_sidecar(
+                    result,
+                    command=command,
+                    glossary_files=gfiles,
+                    source_paths=[file],
+                )
                 pair = _write_preset_output(
                     result,
                     first_stem,

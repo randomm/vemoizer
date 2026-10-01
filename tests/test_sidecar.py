@@ -141,9 +141,10 @@ def test_build_sidecar_no_clips_key() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_build_sidecar_grouped_run() -> None:
+def test_build_sidecar_grouped_run(tmp_path: Path) -> None:
     """Grouped run: source has one entry per part_markers part, with
-    part_offset_s from the marker and duration_s from _source_durations."""
+    path from source_paths (the real part paths), part_offset_s from the
+    marker and duration_s from _source_durations."""
     result: dict[str, Any] = {
         "text": "hei",
         "segments": [],
@@ -153,17 +154,45 @@ def test_build_sidecar_grouped_run() -> None:
         ],
         "_source_durations": [12.5, 8.0],
     }
-    build_sidecar(result, command="meeting", glossary_files=None)
+    build_sidecar(
+        result,
+        command="meeting",
+        glossary_files=None,
+        source_paths=[tmp_path / "a.m4a", tmp_path / "b.m4a"],
+    )
 
     src = cast(list[dict[str, Any]], result["source"])
     assert len(src) == 2
-    assert src[0]["path"] == "— osa 1 (äänitys a.m4a)"
+    assert src[0]["path"] == str(tmp_path / "a.m4a")
     assert src[0]["part_offset_s"] == 0.0
     assert src[0]["duration_s"] == 12.5
-    assert src[1]["path"] == "— osa 2 (äänitys b.m4a)"
+    assert src[1]["path"] == str(tmp_path / "b.m4a")
     assert src[1]["part_offset_s"] == 12.5
     assert src[1]["duration_s"] == 8.0
     assert "_source_durations" not in result
+
+
+def test_build_sidecar_grouped_run_fewer_source_paths() -> None:
+    """Grouped run with fewer source_paths than markers: the missing part
+    falls back to the marker label for its path."""
+    result: dict[str, Any] = {
+        "text": "hei",
+        "segments": [],
+        "part_markers": [
+            {"offset": 0.0, "label": "— osa 1 (äänitys a.m4a)"},
+            {"offset": 10.0, "label": "— osa 2 (äänitys b.m4a)"},
+        ],
+    }
+    build_sidecar(
+        result,
+        command="meeting",
+        glossary_files=None,
+        source_paths=[Path("a.m4a")],
+    )
+
+    src = cast(list[dict[str, Any]], result["source"])
+    assert src[0]["path"] == "a.m4a"
+    assert src[1]["path"] == "— osa 2 (äänitys b.m4a)"
 
 
 def test_build_sidecar_grouped_run_fewer_durations() -> None:
