@@ -83,12 +83,29 @@ def test_check_result_tuple_of_strings_is_echoed(tmp_path, capsys) -> None:
 
 
 def test_check_result_non_iterable_junk_warning_is_ignored(tmp_path, capsys) -> None:
-    """Anything else (int, dict, None) is treated as no warnings — no
-    crash, no output, and the result is still valid."""
+    """Anything else (int, dict, ...) is dropped without a crash and the
+    result is still valid — but the degradation is observable: exactly
+    one bounded stderr line names the unparseable payload's type. An
+    absent key or an explicit ``None`` stays silent (no warnings at
+    all, nothing to report)."""
     result = {"text": "x", "segments": [{"text": "a"}], "warnings": 42}
     code = batch_output._check_result(Path("x.m4a"), result, diarize=False)
     assert code == 0
+    err = capsys.readouterr().err
+    assert err == "warning: ignored an unparseable warnings payload of type int\n"
+
+    # No warnings key at all: still silent (no warnings, no diagnostic).
+    result = {"text": "x", "segments": [{"text": "a"}]}
+    code = batch_output._check_result(Path("x.m4a"), result, diarize=False)
+    assert code == 0
     assert capsys.readouterr().err == ""
+
+    # A lone dict is unparseable too — same one-line diagnostic.
+    result = {"text": "x", "segments": [{"text": "a"}], "warnings": {"a": 1}}
+    code = batch_output._check_result(Path("x.m4a"), result, diarize=False)
+    assert code == 0
+    err = capsys.readouterr().err
+    assert err == "warning: ignored an unparseable warnings payload of type dict\n"
 
 
 # ---------------------------------------------------------------------------

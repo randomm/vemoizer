@@ -136,8 +136,13 @@ def _check_result(
     through here (one implementation); ``diarize_label`` preserves each
     entry point's pre-M2 wording for the no-labels line. The ``warnings``
     channel is defensively normalised: a lone string becomes a
-    one-element list (``_part_markers``'s same contract), anything else
-    non-list-like is treated as no warnings — never a TypeError.
+    one-element list (``_part_markers``'s same contract). A payload of
+    any other type cannot be represented as warnings — it is still
+    dropped without a crash, but the degradation is observable as
+    exactly one bounded stderr line
+    (``warning: ignored an unparseable warnings payload of type
+    <TypeName>``). Non-string entries inside a list/tuple are coerced
+    with ``str()`` rather than dropped.
     """
     raw = result.pop("warnings", [])
     warnings: list[str] = []
@@ -145,6 +150,12 @@ def _check_result(
         warnings = [raw]
     elif isinstance(raw, (list, tuple)):
         warnings = [str(w) for w in raw]
+    elif raw is not None:
+        typer.echo(
+            f"warning: ignored an unparseable warnings payload of "
+            f"type {type(raw).__name__}",
+            err=True,
+        )
     for warning in warnings:
         typer.echo(warning, err=True)
     if "error" in result:

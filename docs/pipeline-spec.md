@@ -389,6 +389,16 @@ ffprobe) are written to the result as `part_markers` (`{"offset",
 `— osa N (äänitys X) —` marker per part. Single-part groups carry no
 `part_markers` key at all. A single file skips grouping entirely.
 
+Part offsets are measured by decoding EACH part separately (one extra
+streaming decode pass per part, no PCM materialised — only the byte
+count) rather than deriving them from the merged decode: the contract
+is that offsets come from decoded PCM byte counts, never ffprobe or
+container metadata (iOS Voice Memos edit lists make container duration
+lie), and `-c copy` concatenation of AAC does not guarantee that the
+merged decode's length equals the sum of the parts' lengths (frame
+padding and edit lists), so the merged decode is not a safe basis for
+the offsets.
+
 `--out` with 2+ files is honored only when the run ends up as a single
 group (one combined transcript to that path); `--out -` (stdout) is
 always fine (groups stream in order). An explicit `--out` file path with

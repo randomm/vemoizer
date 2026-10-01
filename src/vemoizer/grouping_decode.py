@@ -100,7 +100,7 @@ def decode_boundaries(
     Returns ``(tail_texts, head_texts)`` — one entry per boundary, i.e.
     ``len(files) - 1`` of each (the last file's tail has no successor,
     so it is never decoded). A shared *transcribe_fn* is loaded once and
-    cleaned up after the last boundary. The default is a lazily created
+    released after the last boundary. The default is a lazily created
     ``WhisperTranscriber(language=None)`` — the concrete class the meeting
     profile decodes with: boundary text can be Finnish or English (no
     language pinning), and the closing-cue heuristic only needs a coarse
@@ -113,6 +113,16 @@ def decode_boundaries(
     transcribed audio). When ffprobe yields no duration (``0.0``) for an
     existing file, the tail edge is skipped (``""``) rather than
     requesting an unbounded decode window.
+
+    Memory: the boundary model's weights live in the shared
+    ``mlx_whisper`` ``ModelHolder`` cache and — deliberately — remain
+    resident for the main pipeline: the meeting profile's
+    ``WhisperTranscriber`` reuses exactly those weights for the per-group
+    decode, so keeping them resident costs no extra peak (bounded by the
+    one shared copy); ``cleanup()`` is never called here because it
+    would destroy that shared cache. In dictation mode the boundary model
+    additionally stays resident alongside the consensus models (parakeet
+    + canary) for the run's duration — a known follow-up, not an error.
     """
     # Deferred imports so that monkeypatch.setattr(grouping, "X", ...)
     # in tests patches the names that decode_boundaries actually looks up.
@@ -122,7 +132,6 @@ def decode_boundaries(
     ordered = natural_sort(files)
 
     transcriber: Transcriber | None = None
-    last_audio: np.ndarray | None = None
     _window: np.ndarray | None = None  # loop-local; del'd in the finally
     _tr_snapshot: Transcriber | None = None
     if transcribe_fn is None:
@@ -187,10 +196,19 @@ def decode_boundaries(
             head_texts.append(head)
             # Keep only the newest decoded window alive: once a boundary's
             # both edges are done, the previous window is no longer needed
-            # and the reference is dropped (the loop variable itself would
-            # otherwise pin the last window until this finally).
+            # and the single reference is reassigned (the loop variable
+            # itself would otherwise pin the last window until this
+            # finally).
             _window = head_audio if head_audio is not None else tail_audio
-            last_audio = _window
+        if transcriber is not None:
+            # Observable, intentional: the weights stay in the shared
+            # mlx_whisper ModelHolder cache for the main pipeline's
+            # per-group decode (cleanup() would destroy that cache).
+            logger.info(
+                "boundary decode done; whisper-large-v3-turbo weights are "
+                "intentionally left resident in the shared ModelHolder cache "
+                "for the main pipeline"
+            )
         return tail_texts, head_texts
     finally:
         # cleanup() is deliberately NOT called here: it would set
@@ -208,7 +226,6 @@ def decode_boundaries(
         # incurred (round 3 findings 9-16).
         del transcriber
         del _window
-        del last_audio
         if "tail_audio" in locals():
             del tail_audio
         if "head_audio" in locals():

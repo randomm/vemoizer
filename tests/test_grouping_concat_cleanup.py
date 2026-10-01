@@ -22,6 +22,7 @@ seam.
 
 from __future__ import annotations
 
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -184,6 +185,40 @@ def test_concat_groups_success_leaves_file_for_caller(tmp_path, monkeypatch) -> 
     # The list file is gone even on success.
     assert not (tmp / "concat.txt").exists()
     # The caller's cleanup still removes the file AND the dir.
+    gc.remove_concat_output(out)
+    assert not tmp.exists()
+
+
+def test_concat_groups_success_temp_dir_is_mode_700_and_list_gone(
+    tmp_path, monkeypatch
+) -> None:
+    """The concat temp dir is provably 0o700 (``os.chmod`` right after
+    mkdtemp, defence in depth) and the concat list file does not outlive
+    the call — the merged file itself survives for the caller."""
+    tmp = _pin_mkdtemp(monkeypatch, tmp_path)
+    _probe_ok(monkeypatch)
+    a, b = _two_wavs(tmp_path)
+
+    class FakeProc:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    def fake_run(argv, **kwargs):
+        Path(argv[-1]).write_bytes(b"merged audio")
+        return FakeProc()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    out = gc.concat_groups([a, b])
+
+    # The merged file survives the call (the caller owns it)...
+    assert out == tmp / "group.wav"
+    assert out.is_file()
+    # ...and the temp dir holding it is 0o700, mode bits exactly.
+    assert stat.S_IMODE(tmp.stat().st_mode) == 0o700
+    # ...while the concat list file does not outlive the call.
+    assert not (tmp / "concat.txt").exists()
+
     gc.remove_concat_output(out)
     assert not tmp.exists()
 

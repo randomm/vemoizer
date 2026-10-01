@@ -12,6 +12,8 @@ partition parser.
 
 from __future__ import annotations
 
+import logging
+import os
 import subprocess
 import tempfile
 import time
@@ -20,6 +22,8 @@ from contextlib import suppress
 from pathlib import Path
 
 from .grouping_common import PartOffset, _escape_concat_path
+
+logger = logging.getLogger(__name__)
 
 # Default cumulative wall-clock budget (seconds) for ``part_offsets``.
 # The budget shrinks only by the wall time each decode actually spends
@@ -37,6 +41,13 @@ def concat_groups(group: Sequence[Path | str]) -> Path:
     files — ``-c copy`` alone would silently corrupt the output. A
     single-file group is a passthrough: no ffmpeg call, no temp file,
     the input itself is returned.
+
+    The temp directory is 0o700: ``tempfile.mkdtemp`` already creates it
+    that way, but an explicit ``os.chmod`` right after the call makes the
+    permission provable on every path (it is enforced, not merely
+    expected) — the merged group holds every second of the split
+    recording, and a world-readable temp file in a shared temp dir would
+    expose hours of private audio.
     """
     from .grouping import GroupingError
 
@@ -67,7 +78,11 @@ def concat_groups(group: Sequence[Path | str]) -> Path:
     # The merged group holds every second of the split recording — a
     # world-readable temp file would expose hours of private audio in a
     # shared temp dir, so the concat output lives in a 0o700 directory.
+    # mkdtemp already creates it 0o700; the explicit chmod makes the
+    # permission enforced and provable, not merely expected (defence in
+    # depth).
     tmp_dir = Path(tempfile.mkdtemp(prefix="vemoizer-concat-"))
+    os.chmod(tmp_dir, 0o700)
     suffix = parts[0].suffix or ".m4a"
     out_path = tmp_dir / ("group" + suffix)
     list_path = tmp_dir / "concat.txt"
@@ -172,6 +187,17 @@ def part_offsets(
     keeps only the byte count, so measuring a group of hour-long parts
     does not materialise their full float32 PCM.
 
+    Why each part is decoded here even though the pipeline decodes the
+    group again afterwards: the ticket's contract is that offsets are
+    measured from DECODED PCM byte counts — never ffprobe or container
+    metadata, because iOS edit lists make container duration lie — and
+    the ``-c copy`` concatenation does not guarantee that the merged
+    decode's length equals the sum of the parts' lengths (AAC frame
+    padding and edit lists make container math unreliable), so deriving
+    offsets from the merged decode is not safe. The cost of that design
+    is one extra STREAMING decode pass per part, with no PCM ever
+    materialised.
+
     The measurement loop is bounded by a CUMULATIVE wall-clock budget
     (*total_timeout*, default :data:`PART_OFFSETS_TOTAL_TIMEOUT` seconds):
     the budget shrinks only by real elapsed wall-clock time, measured with
@@ -192,6 +218,7 @@ def part_offsets(
     from .ingest import IngestError
 
     parts = [Path(p) for p in group]
+    logger.info("measuring part offsets for %d part(s)", len(parts))
     offsets: list[PartOffset] = []
     total = 0.0
     # The budget shrinks by the wall time each decode actually spent
