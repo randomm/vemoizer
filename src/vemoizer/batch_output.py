@@ -152,10 +152,12 @@ def _check_and_write(
     """The preset write-seam block shared by both of ``run_batch``'s loops.
 
     When *write_group_fn* is set: first the fail-loud result checks
-    (``_check_result``), then the seam via ``_call_write_seam``; returns
-    True on success, False when the caller must set exit 1 and keep
-    going (``None`` when no seam is set). Byte-identical to the inline
-    blocks it replaced (issue #87 lens review: one implementation).
+    (``_check_result``), then the seam via ``_call_write_seam``. Returns
+    True on success and also True when no seam is set (nothing to do);
+    returns False when the caller must set exit 1 and keep going. Both
+    current call sites guard ``write_group_fn is not None`` before
+    calling. Byte-identical to the inline blocks it replaced (issue #87
+    lens review: one implementation).
     """
     if write_group_fn is None:
         return True
