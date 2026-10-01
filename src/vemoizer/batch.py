@@ -207,6 +207,30 @@ def transcribe_batch(
     return exit_code
 
 
+def _transcribe_guarded(
+    target: Path,
+    options: RunOptions,
+    description: str,
+) -> dict[str, Any] | None:
+    """One guarded transcribe (issue #77 merge gate).
+
+    The single per-file/per-group guard shared by the plain loop and both
+    branches of the group loop: an unexpected exception degrades to a clean
+    one-line ``error:`` naming *description* (never a raw traceback);
+    ``KeyboardInterrupt``/``SystemExit`` propagate; returns ``None`` when
+    the target failed.
+    """
+    try:
+        return _transcribe_one(target, options)
+    except (KeyboardInterrupt, SystemExit):
+        # Control-flow signals only — everything else degrades per target
+        # (same contract as transcribe_batch / the group path).
+        raise
+    except Exception as e:  # noqa: BLE001 - per-file fail-loud boundary
+        typer.echo(f"error: {description}: {e}", err=True)
+        return None
+
+
 def _transcribe_one(file: Path, options: RunOptions) -> dict[str, Any]:
     """One ``transcribe_file`` call with the fail-loud config check.
 
@@ -256,7 +280,12 @@ def _run_plain(
     exit_code = 0
     with caffeinate_context():
         for file in ordered:
-            result = _transcribe_one(file, options)
+            # A per-file decode/write failure degrades to a clean one-line
+            # error (see _transcribe_guarded), not a traceback mid-batch:
+            # mark the file failed, keep going.
+            if (result := _transcribe_guarded(file, options, file.name)) is None:
+                exit_code = 1
+                continue
             if not _process_result(
                 file,
                 result,
@@ -396,7 +425,13 @@ def run_batch(
     with caffeinate_context():
         for group in groups:
             if len(group) == 1:
-                result = _transcribe_one(group[0], options)
+                # A per-file decode/write failure is a clean one-line error
+                # (see _transcribe_guarded), not a traceback mid-batch:
+                # mark the file failed, keep going.
+                result = _transcribe_guarded(group[0], options, group[0].name)
+                if result is None:
+                    exit_code = 1
+                    continue
                 label = group[0].name
             else:
                 try:
@@ -421,10 +456,24 @@ def run_batch(
                     exit_code = 1
                     continue
                 try:
-                    result = _transcribe_one(merged, options)
+                    # An unexpected per-group decode failure is a clean
+                    # one-line error (like the plain loop above), not a
+                    # traceback mid-batch: name the group's first part's
+                    # file, mark the group failed, keep going.
+                    result = _transcribe_guarded(
+                        merged,
+                        options,
+                        f"group {group[0].name} (+{len(group) - 1} more part(s))",
+                    )
                 finally:
                     if merged_is_temp:
                         remove_concat_output(merged)
+                if result is None:
+                    # The transcribe for this group failed: the finally
+                    # already cleaned the temp concat file, so skip the
+                    # write and move on to the next group.
+                    exit_code = 1
+                    continue
                 if "error" not in result:
                     # Multi-part groups only: single-part groups get no
                     # part_markers key at all (issue #77). with_part_markers

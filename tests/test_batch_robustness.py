@@ -540,6 +540,194 @@ def test_transcribe_batch_keyboard_interrupt_still_propagates(
         )
 
 
+# ---------------------------------------------------------------------------
+# Merge-gate fix — the plain (``--no-group``) and group paths must carry
+# the same per-file/per-group guard as ``transcribe_batch``: one unexpected
+# exception degrades to a clean ``error:`` line, exit 1, and the batch
+# CONTINUES with the next file/group. ``KeyboardInterrupt`` still
+# propagates on both paths.
+# ---------------------------------------------------------------------------
+
+
+def test_run_plain_no_group_transcribe_failure_is_clean_and_continues(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """3 files with ``no_group=True``: an unexpected exception from
+    ``transcribe_file`` on the middle file degrades to a clean one-line
+    ``error:`` naming that file, exit 1 — files 1 and 3 are still
+    transcribed and written, nothing is written for file 2, and no
+    traceback escapes (same contract as ``transcribe_batch``)."""
+
+    def fake_transcribe_file(path, **kwargs):
+        if path.name == "b.m4a":
+            raise RuntimeError("decoder exploded")
+        return {"text": "hei", "segments": []}
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.setattr(batch, "_resolve_llm_config", lambda p: None)
+    files = [tmp_path / "a.m4a", tmp_path / "b.m4a", tmp_path / "c.m4a"]
+    _touch(files)
+    code = batch.run_batch(files, _options(), formats=["txt"], no_group=True)
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "error: b.m4a: decoder exploded" in err
+    assert err.count("error:") == 1
+    assert "Traceback" not in err
+    # Files 1 and 3 written; nothing for file 2.
+    assert (tmp_path / "a.txt").exists()
+    assert (tmp_path / "c.txt").exists()
+    assert not (tmp_path / "b.txt").exists()
+    assert not (tmp_path / "b.json").exists()
+
+
+def test_run_plain_no_group_keyboard_interrupt_still_propagates(
+    tmp_path, monkeypatch
+) -> None:
+    """A ``KeyboardInterrupt`` from ``transcribe_file`` on the plain
+    ``--no-group`` path must still propagate (not be swallowed into an
+    error line)."""
+
+    def fake_transcribe_file(path, **kwargs):
+        raise KeyboardInterrupt()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.setattr(batch, "_resolve_llm_config", lambda p: None)
+    files = [tmp_path / "a.m4a", tmp_path / "b.m4a"]
+    _touch(files)
+    with pytest.raises(KeyboardInterrupt):
+        batch.run_batch(files, _options(), formats=["txt"], no_group=True)
+
+
+def test_run_batch_group_transcribe_failure_is_clean_and_continues(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """2 groups where the first (multi-part) group's transcribe raises:
+    clean ``error:`` line naming the group's first part's file name and
+    saying it is a group, exit 1, the second group is still transcribed
+    and written, and the first group's temp concat file is removed via
+    the existing ``finally`` cleanup (no partial output written for the
+    failed group)."""
+    import vemoizer.grouping as grouping
+
+    decode_calls: list[str] = []
+
+    def fake_transcribe_file(path, **kwargs):
+        decode_calls.append(Path(path).name)
+        if Path(path).name == "group.m4a":
+            raise RuntimeError("decoder exploded")
+        return {"text": "hei", "segments": []}
+
+    def fake_decode_boundaries(files, transcribe_fn=None):
+        # Boundary 1 continues (files 1+2 in one group), boundary 2 does
+        # not -> [files 1, 2], [file 3].
+        return ["t jatkumossa", ""], ["h", ""]
+
+    tmp_concat = tmp_path / "concat" / "group.m4a"
+    tmp_concat.parent.mkdir(parents=True)
+    tmp_concat.touch()
+
+    def fake_concat(files):
+        return tmp_concat
+
+    def fake_offsets(files):
+        # One offset per part (only the first is consumed by
+        # with_part_markers in this fake's shape — the marker builder
+        # reads the real PartOffset fields).
+        from vemoizer.grouping import PartOffset
+
+        return [
+            PartOffset(part_number=i, source_filename=f.name, start_offset=0.0)
+            for i, f in enumerate(files, start=1)
+        ]
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.setattr(batch, "_resolve_llm_config", lambda p: None)
+    monkeypatch.setattr(grouping, "decode_boundaries", fake_decode_boundaries)
+    monkeypatch.setattr(grouping, "concat_groups", fake_concat)
+    monkeypatch.setattr(batch, "concat_groups", fake_concat)
+    monkeypatch.setattr(grouping, "part_offsets", fake_offsets)
+    monkeypatch.setattr(batch, "part_offsets", fake_offsets)
+    files = [
+        tmp_path / "Uusi äänitys 425.m4a",
+        tmp_path / "Uusi äänitys 426.m4a",
+        tmp_path / "Uusi äänitys 427.m4a",
+    ]
+    _touch(files)
+    # Boundary 1 continues (files 1+2 in one multi-part group), boundary
+    # 2 breaks (empty head) — --yes accepts the proposals as-is.
+    code = batch.run_batch(
+        files,
+        _options(),
+        formats=["txt"],
+        yes=True,
+    )
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert "Uusi äänitys 425.m4a" in err
+    assert "decoder exploded" in err
+    assert "Traceback" not in err
+    # The second group was still transcribed and written.
+    assert (tmp_path / "Uusi äänitys 427.txt").exists()
+    assert (tmp_path / "Uusi äänitys 427.txt").read_text(encoding="utf-8") == "hei\n"
+    # No output written for the failed group; its temp concat is cleaned.
+    assert not (tmp_path / "Uusi äänitys 425+Uusi äänitys 426.txt").exists()
+    assert not tmp_concat.exists()
+    assert not tmp_concat.parent.exists()
+
+
+def test_run_batch_group_keyboard_interrupt_still_propagates(
+    tmp_path, monkeypatch
+) -> None:
+    """A ``KeyboardInterrupt`` from ``transcribe_file`` on the multi-part
+    group path must still propagate."""
+    import vemoizer.grouping as grouping
+
+    def fake_transcribe_file(path, **kwargs):
+        raise KeyboardInterrupt()
+
+    def fake_decode_boundaries(files, transcribe_fn=None):
+        return ["t jatkumossa", ""], ["h", "h"]
+
+    tmp_concat = tmp_path / "concat" / "group.m4a"
+    tmp_concat.parent.mkdir(parents=True)
+    tmp_concat.touch()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
+    monkeypatch.setattr(batch, "_resolve_llm_config", lambda p: None)
+    monkeypatch.setattr(grouping, "decode_boundaries", fake_decode_boundaries)
+    monkeypatch.setattr(grouping, "concat_groups", lambda files: tmp_concat)
+    monkeypatch.setattr(batch, "concat_groups", lambda files: tmp_concat)
+    monkeypatch.setattr(
+        grouping,
+        "part_offsets",
+        lambda files: [
+            grouping.PartOffset(part_number=1, source_filename="x", start_offset=0.0),
+        ],
+    )
+    monkeypatch.setattr(
+        batch,
+        "part_offsets",
+        lambda files: [
+            grouping.PartOffset(part_number=1, source_filename="x", start_offset=0.0),
+        ],
+    )
+    files = [
+        tmp_path / "Uusi äänitys 425.m4a",
+        tmp_path / "Uusi äänitys 426.m4a",
+        tmp_path / "Uusi äänitys 427.m4a",
+    ]
+    _touch(files)
+    # Boundary 1 continues (files 1+2 in one multi-part group), boundary
+    # 2 breaks (empty head) — --yes accepts the proposals as-is, so the
+    # KeyboardInterrupt comes from the multi-part group's transcribe.
+    with pytest.raises(KeyboardInterrupt):
+        batch.run_batch(files, _options(), formats=["txt"], yes=True)
+
+
 def test_parse_partition_ambiguity_escapes_control_chars_in_stem() -> None:
     """The ambiguity message renders each stem with ``repr``, so a stem
     containing an ESC byte (``\x1b``) is escaped and never printed as a
