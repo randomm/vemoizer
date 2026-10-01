@@ -4,8 +4,8 @@ Every decode loop (``transcribe_batch``, the plain loop and both group
 branches of ``run_batch``, and ``run_preset`` for meeting/memo) must
 degrade an unexpected ``transcribe_file`` exception to a clean
 ``error:`` line (exit 1, run continues) through one shared guard —
-``_guarded_transcribe`` in :mod:`vemoizer.batch_output`, wrapped by
-``_transcribe_guarded`` in :mod:`vemoizer.batch`.
+``_transcribe_guarded`` in :mod:`vemoizer.batch` (the preset's
+per-file guard lives in :mod:`vemoizer.batch_preset`).
 
 All tests mock ``transcribe_file``; no models, no network, no ffmpeg.
 """
@@ -17,7 +17,6 @@ from _cli_helpers import isolate_home
 from typer.testing import CliRunner
 
 import vemoizer.batch as batch
-import vemoizer.batch_output as batch_output
 import vemoizer.pipeline as pipeline_module
 from vemoizer.cli import app
 
@@ -111,7 +110,7 @@ def test_run_batch_single_part_group_keyboard_interrupt_still_propagates(
 # run_preset has its own inline copy of the per-file transcribe core
 # (transcribe_file with its own temp glossary argument); it must carry
 # the identical per-file contract through the SAME shared guard
-# (batch_output._guarded_transcribe) — not a fourth handler copy.
+# (batch_preset._transcribe_preset_file) — not a fourth handler copy.
 
 
 def _run_preset_guard_case(
@@ -200,7 +199,11 @@ def test_run_preset_keyboard_interrupt_propagates_and_glossary_cleaned(
     monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
     isolate_home(monkeypatch, tmp_path, tmp_path)
     with pytest.raises(KeyboardInterrupt):
-        batch_output.run_preset(
+        # run_preset lives in batch_preset (issue #87); batch only
+        # re-exports it, so call through the live module.
+        from vemoizer.batch_preset import run_preset
+
+        run_preset(
             [tmp_path / "a.m4a"],
             command="meeting",
             config_path=None,

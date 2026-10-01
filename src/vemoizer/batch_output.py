@@ -25,9 +25,6 @@ from typing import Any
 
 import typer
 
-from vemoizer.caffeinate import caffeinate_context
-from vemoizer.diarization import SpeakerCount
-from vemoizer.llm import ConfigError
 from vemoizer.output.naming import (
     collision_free_paths,
     nfc_stem_and_suffix,
@@ -122,12 +119,14 @@ def _call_write_seam(
 ) -> bool:
     """Call the per-group preset write seam with a fail-loud boundary.
 
-    ``KeyboardInterrupt``/``SystemExit`` propagate; any other exception
-    becomes a clean one-line ``error: <label>: could not write output:
-    <reason>`` and returns False (the caller sets exit 1 and keeps
-    going — the seam must never escape as a raw traceback after minutes
-    of decoding). A normal call returns True (the seam's return value is
-    irrelevant — bool/None are both fine).
+    Contract: the seam is called with exactly ``(label, result)`` —
+    two positional arguments, nothing more. Its return value is
+    ignored (bool/None both fine); it may raise. This helper turns any
+    ``Exception`` into one clean ``error: <label>: could not write
+    output: <reason>`` line and ``False``; ``KeyboardInterrupt``/
+    ``SystemExit`` propagate; a normal call returns True (the caller
+    sets exit 1 on ``False`` and keeps going — the seam must never
+    escape as a raw traceback after minutes of decoding).
     """
     try:
         fn(label, result)
@@ -282,194 +281,3 @@ def _process_result(
         name = label.name if isinstance(label, Path) else label
         typer.echo(f"wrote transcript for {name}")
     return True
-
-
-def run_preset(
-    files: list[Path],
-    *,
-    command: str,
-    config_path: str | None,
-    glossary_path: str | None,
-    repair: bool | None = None,
-    diarize: bool | None = None,
-    speakers: SpeakerCount | None = None,
-    quiet: bool = False,
-) -> int:
-    """Run the *meeting* or *memo* preset over *files*.
-
-    Composition (issue #82, DESIGN DECISION): calls
-    ``glossary_layers.load_layers`` + ``merge`` (no merge when an
-    explicit ``--glossary`` is given), ``presets.resolve_options`` for
-    the resolved options, then ``transcribe_file`` per file with the
-    composed glossary.  Without ``--glossary`` the merged/filtered
-    glossary is written to a temp file passed as ``glossary_path`` —
-    meeting: merged terms (bare + ``@`` lines) and merged correction
-    pairs; memo: merged correction pairs ONLY (whisper prompt stays
-    empty, ``apply_corrections`` still fires).  An explicit
-    ``--glossary`` is passed through as-is for meeting; for memo it is
-    filtered to correction pairs only, via a temp file (same
-    empty-whisper-prompt invariant).  ``quiet`` suppresses the final
-    ``wrote <path>`` summary lines.  Temp files are deleted after the
-    run.
-
-    Both presets:
-
-    - use ``profile="meeting"`` (whisper decode, skip consensus).
-    - write ``.md`` + ``.json`` to the CWD with a dated, sanitised
-      title and NFC collision suffix.
-    - print one ``wrote <relative path>`` line per written file at the
-      end.
-
-    Meeting additionally enables diarization (default 2-6 speakers)
-    and repair.  Memo disables diarization but keeps repair on.
-
-    Returns 0 on success, 1 on any failure.
-    """
-    # Deferred import so run_preset (defined here) and _resolve_llm_config /
-    # _write_temp_glossary (defined in batch.py, which re-exports run_preset
-    # from here) do not create an import cycle.
-    from vemoizer.batch import _resolve_llm_config, _write_temp_glossary
-    from vemoizer.pipeline import transcribe_file
-    from vemoizer.presets import resolve_options
-
-    if command not in ("meeting", "memo"):
-        typer.echo(f"error: unknown preset {command!r}", err=True)
-        return 2
-
-    # Layered glossary: load_layers (I/O) → merge (pure) — skipped when
-    # --glossary explicitly replaces both layers entirely (no merging).
-    merged_terms: list[str] = []
-    merged_corrections: dict[str, str] = {}
-    if glossary_path is None:
-        from vemoizer.glossary_layers import load_layers, merge
-
-        home_terms, home_corr, project_terms, project_corr = load_layers()
-        merged_terms, merged_corrections, notices = merge(
-            project_terms,
-            project_corr,
-            home_terms,
-            home_corr,
-        )
-        for notice in notices:
-            typer.echo(notice, err=True)
-
-    # Pure core: resolve the preset options from the merged layers and
-    # the CLI overrides (CLI > layers > preset defaults).
-    options = resolve_options(
-        command,
-        layers=None,
-        cli_overrides={
-            "glossary": glossary_path,
-            "config": config_path,
-            "glossary_terms": merged_terms,
-            "glossary_corrections": merged_corrections,
-            "repair": repair,
-            "diarize": diarize,
-            "speakers": speakers,
-        },
-    )
-
-    # Temp-file seam: without --glossary, write the composed glossary to
-    # a temp file and pass it through the existing glossary_path argument
-    # (no new pipeline parameter).  Memo: correction pairs ONLY (the
-    # whisper prompt stays empty) — meeting: merged terms (bare + @
-    # lines) plus the merged correction pairs.
-    temp_path: Path | None = None
-    effective_glossary: str | None = None
-    exit_code = 0
-    written: list[str] = []
-
-    # The temp file is created INSIDE the protected region so a write
-    # failure neither leaks the file nor raises a raw traceback
-    # (issue #82 review): a clean error line and exit 1 instead.
-    try:
-        if options.glossary_path is None:
-            if command == "memo":
-                lines = [f"{w} => {r}" for w, r in options.corrections.items()]
-            else:
-                lines = [
-                    *options.whisper_prompt,
-                    *[f"@{t}" for t in options.llm_terms],
-                    *[f"{w} => {r}" for w, r in options.corrections.items()],
-                ]
-            if lines:
-                temp_path = Path(_write_temp_glossary(lines))
-                effective_glossary = str(temp_path)
-        else:
-            effective_glossary = options.glossary_path
-            # Memo seam with an explicit --glossary (issue #82): the file
-            # replaces both layers, but the whisper initial_prompt must
-            # stay empty — so filter it to correction pairs only (same
-            # invariant as the layered memo path) via a temp file.
-            if command == "memo":
-                from vemoizer.glossary import load_corrections
-
-                lines = [
-                    f"{w} => {r}"
-                    for w, r in load_corrections(effective_glossary).items()
-                ]
-                if lines:
-                    temp_path = Path(_write_temp_glossary(lines))
-                    effective_glossary = str(temp_path)
-                else:
-                    effective_glossary = None
-
-        with caffeinate_context():
-            for file in files:
-                try:
-                    # Fail loud on a malformed project config (issue #78).
-                    _resolve_llm_config(options.config_path)
-                except ConfigError as e:
-                    # A malformed .vemoizer/config.toml must fail loud
-                    # with a clean error line, not a traceback (issue #78).
-                    typer.echo(f"error: {e}", err=True)
-                    return 1
-                # The per-file decode guard (issue #77 merge gate): an
-                # unexpected transcribe_file failure degrades to a clean
-                # one-line error naming the file (never a raw traceback
-                # mid-batch); KeyboardInterrupt/SystemExit propagate; the
-                # run continues with the next file and the temp glossary
-                # cleanup in the finally is unchanged.
-                try:
-                    result = transcribe_file(
-                        file,
-                        diarize=options.diarize,
-                        config_path=options.config_path,
-                        profile=options.profile,
-                        repair=options.repair,
-                        glossary_path=effective_glossary,
-                        speakers=options.speakers,
-                    )
-                except (KeyboardInterrupt, SystemExit):
-                    raise
-                except Exception as e:  # noqa: BLE001 - per-file fail-loud boundary
-                    typer.echo(f"error: {file.name}: {e}", err=True)
-                    exit_code = 1
-                    continue
-                if _check_result(
-                    file, result, diarize=options.diarize, diarize_label="diarize"
-                ):
-                    exit_code = 1
-                    continue
-
-                # Determine the fallback stem from the FIRST file in the
-                # argument list (deterministic), not the current iteration.
-                first_stem, _ = nfc_stem_and_suffix(files[0])
-                written.extend(_write_preset_output(result, first_stem, Path.cwd()))
-    except OSError as e:
-        # Temp-glossary write failure: clean error, non-zero exit, no
-        # leaked file (the finally still cleans up what exists).
-        typer.echo(f"error: could not write glossary: {e}", err=True)
-        return 1
-    finally:
-        # The temp glossary file is deleted after the run (issue #82).
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
-
-    # Print one "wrote <relative path>" line per written file at the end
-    # (--quiet suppresses them).
-    for name in written:
-        if not quiet:
-            typer.echo(f"wrote {name}")
-
-    return exit_code
