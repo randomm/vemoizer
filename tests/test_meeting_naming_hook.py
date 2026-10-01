@@ -469,6 +469,47 @@ class TestHookFailureInjection:
         assert calls[0].name == "A.json"
         assert calls[1].name == "B.json"
 
+    def test_systemexit_warns_and_continues(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """run_names raises SystemExit(1) on the first of two sidecars:
+        warning line with SystemExit, second sidecar still processed,
+        and the hook's return code is unchanged (0)."""
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        monkeypatch.setattr(naming_hook, "_stdout_isatty", lambda: True)
+        _write_sidecar(tmp_path, "A.json", _two_label_paragraphs())
+        _write_sidecar(tmp_path, "B.json", _two_label_paragraphs())
+
+        calls: list = []
+
+        def fake_run_names(
+            path, *, no_play=False, input_fn=None, tty_isatty=None, config_path=None
+        ):
+            calls.append(path)
+            if len(calls) == 1:
+                raise SystemExit(1)
+            return 0
+
+        monkeypatch.setattr(names_cli, "run_names", fake_run_names)
+
+        stderr_lines: list[str] = []
+        monkeypatch.setattr(
+            naming_hook.typer, "echo", lambda *a, **kw: stderr_lines.append(str(a[0]))
+        )
+
+        rc = naming_hook.ask_naming_hook(
+            ["A.json", "B.json"],
+            yes=False,
+            input_fn=lambda p: "y",
+            tty_isatty=lambda: True,
+        )
+        assert rc == 0
+        assert "warning: naming failed for A.json: SystemExit" in stderr_lines
+        # Both sidecars were attempted.
+        assert len(calls) == 2
+        assert calls[0].name == "A.json"
+        assert calls[1].name == "B.json"
+
     def test_keyboard_interrupt_stops(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

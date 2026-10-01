@@ -76,9 +76,9 @@ def ask_naming_hook(
     answer starting with ``y``/``Y`` runs :func:`vemoizer.names_cli.run_names`
     on each eligible sidecar in order.
 
-    Per-sidecar failures never touch the exit code: an ``OSError`` (or
-    any other ``Exception``) prints one
-    ``warning: naming failed for <basename>: <ExcClassName>`` line and
+    Per-sidecar failures never touch the exit code: any ``Exception``
+    or ``SystemExit`` (e.g. a ``sys.exit()`` inside the names flow) prints
+    one ``warning: naming failed for <basename>: <ExcClassName>`` line and
     continues; an ``EOFError``/``KeyboardInterrupt`` prints
     ``naming cancelled`` and stops the loop. The return code is always
     ``0`` — the caller ``max``es it with the run's own code.
@@ -112,7 +112,7 @@ def ask_naming_hook(
         except (EOFError, KeyboardInterrupt):
             typer.echo("naming cancelled", err=True)
             break
-        except Exception as e:  # noqa: BLE001 - per-sidecar fail-open boundary
+        except (Exception, SystemExit) as e:  # noqa: BLE001 - per-sidecar fail-open boundary: a sys.exit() inside run_names must not change the meeting run's exit status
             typer.echo(
                 f"warning: naming failed for {path.name}: {type(e).__name__}",
                 err=True,
