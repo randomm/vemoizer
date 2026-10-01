@@ -99,8 +99,18 @@ def concat_groups(group: Sequence[Path | str]) -> Path:
             )
     success = False
     try:
+        # Absolute paths in the list file: the concat demuxer resolves
+        # relative paths against the LIST FILE's directory (the 0o700
+        # temp dir), not the process CWD — a relative input path from the
+        # CLI would fail with "Impossible to open" once the list lives in
+        # the temp dir. os.path.abspath keeps the name byte-for-byte as on
+        # disk (no symlink resolution, NFC/NFD untouched); the error
+        # messages above and below still name the parts as the user typed
+        # them (file names only, as today).
         list_path.write_text(
-            "".join(_escape_concat_path(p) + "\n" for p in parts),
+            "".join(
+                _escape_concat_path(Path(os.path.abspath(p))) + "\n" for p in parts
+            ),
             encoding="utf-8",
         )
         try:
