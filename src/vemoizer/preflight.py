@@ -16,6 +16,7 @@ inline preflight — it lives in :mod:`vemoizer.doctor` only.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -98,6 +99,47 @@ def models_cached() -> list[str]:
     return [name for name, size in sizes.items() if size == 0]
 
 
+_REASONS: dict[str, str] = {
+    "ffmpeg": (
+        "ffmpeg not found on PATH — install it (e.g. `brew install ffmpeg`) "
+        "before transcribing"
+    ),
+    "config": (
+        "config file failed to parse — fix or remove the "
+        ".vemoizer/config.toml [llm] section"
+    ),
+    "hf-token": (
+        "no HuggingFace token found (HF_TOKEN or the cached token file); "
+        "the pyannote diarization weights are gated — accept the licence "
+        "form at huggingface.co/pyannote/"
+        "speaker-diarization-community-1 and set HF_TOKEN"
+    ),
+}
+
+
+def _check(
+    label: str,
+    call: Callable[[], bool],
+    red: list[Check],
+) -> None:
+    """Run one boolean preflight *call* and append a red entry when needed.
+
+    Two failure modes become red: the check returns ``False`` (the usual
+    "not present" state, with its user-facing reason), or the check itself
+    raises (the "never raises" contract — a red entry naming the exception
+    class, never its message, which may carry secrets).  Either way
+    ``preflight_gate`` yields the clean ``preflight failed:`` message
+    instead of a bare error propagating out of ``transcribe_file``.
+    """
+    try:
+        ok = call()
+    except Exception as e:  # noqa: BLE001 - per-check "never raises" guard
+        red.append((label, f"{label} check failed: {type(e).__name__}"))
+        return
+    if not ok:
+        red.append((label, _REASONS[label]))
+
+
 def run_preflight(
     *,
     diarize: bool = False,
@@ -109,48 +151,36 @@ def run_preflight(
     (read-only), and — only when *diarize* is requested — the HuggingFace
     token via ``get_token()``.  On any red check the reasons are printed
     via *echo* (stderr in the CLI path) and the result carries them so
-    the caller can abort.  Never raises: a check that itself errors
-    counts as red.
+    the caller can abort.  Never raises: every check is wrapped in a
+    guard (``_check``) that turns an unexpected exception into a red entry,
+    so a check that itself errors also counts as red.
     """
     import time
 
     start = time.monotonic()
     red: list[Check] = []
 
-    if not ffmpeg_ok():
-        red.append(
-            (
-                "ffmpeg",
-                "ffmpeg not found on PATH — install it (e.g. `brew install "
-                "ffmpeg`) before transcribing",
+    _check("ffmpeg", ffmpeg_ok, red)
+    _check("config", config_parse_ok, red)
+
+    # models_cached returns the list of missing-model names; a non-empty
+    # list (or a raised exception) is red, one entry per missing model.
+    try:
+        missing = models_cached()
+    except Exception as e:  # noqa: BLE001 - per-check "never raises" guard
+        red.append(("models", f"models check failed: {type(e).__name__}"))
+    else:
+        for name in missing:
+            red.append(
+                (
+                    f"model {name}",
+                    f"{name} is not in the local model cache — run "
+                    "'vemoizer models pull' first",
+                )
             )
-        )
-    if not config_parse_ok():
-        red.append(
-            (
-                "config",
-                "config file failed to parse — fix or remove the "
-                ".vemoizer/config.toml [llm] section",
-            )
-        )
-    for name in models_cached():
-        red.append(
-            (
-                f"model {name}",
-                f"{name} is not in the local model cache — run "
-                f"'vemoizer models pull' first",
-            )
-        )
-    if diarize and not hf_token_present():
-        red.append(
-            (
-                "hf-token",
-                "no HuggingFace token found (HF_TOKEN or the cached "
-                "token file); the pyannote diarization weights are gated "
-                "— accept the licence form at huggingface.co/pyannote/"
-                "speaker-diarization-community-1 and set HF_TOKEN",
-            )
-        )
+
+    if diarize:
+        _check("hf-token", hf_token_present, red)
 
     seconds = time.monotonic() - start
     for label, reason in red:

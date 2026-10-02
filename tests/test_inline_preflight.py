@@ -123,3 +123,65 @@ def test_preflight_config_parse_failure_is_red(monkeypatch) -> None:
     result = transcribe_file("/nonexistent.m4a")
     assert "error" in result
     assert "config" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# "Never raises" contract: a check that itself errors is red, not a crash
+# ---------------------------------------------------------------------------
+
+
+def test_preflight_models_cached_raises_is_red_not_crash(monkeypatch) -> None:
+    """A check that raises becomes a red entry (exception class, no message),
+    so ``transcribe_file`` returns the clean ``preflight failed:`` error dict
+    instead of propagating a bare error (issue #79)."""
+
+    def _boom_models():
+        raise RuntimeError("cache walk blew up: secret-token-here")
+
+    monkeypatch.setattr(preflight, "ffmpeg_ok", lambda: True)
+    monkeypatch.setattr(preflight, "config_parse_ok", lambda: True)
+    monkeypatch.setattr(preflight, "models_cached", _boom_models)
+
+    def _boom_ingest(path):
+        raise AssertionError("ingest must not run when preflight is red")
+
+    monkeypatch.setattr(pipeline, "ingest_audio", _boom_ingest)
+    # Must not raise; must return the clean error dict.
+    result = transcribe_file("/nonexistent.m4a")
+    assert "error" in result
+    assert "preflight failed" in result["error"]
+    assert "RuntimeError" in result["error"]
+    # The exception message (potentially a secret) must never be echoed.
+    assert "secret-token-here" not in result["error"]
+    assert result["text"] == ""
+    assert result["segments"] == []
+
+
+def test_preflight_ffmpeg_ok_raises_is_red_not_crash(monkeypatch) -> None:
+    def _boom_ffmpeg():
+        raise OSError("nope")
+
+    monkeypatch.setattr(preflight, "ffmpeg_ok", _boom_ffmpeg)
+    monkeypatch.setattr(preflight, "config_parse_ok", lambda: True)
+    monkeypatch.setattr(preflight, "models_cached", lambda: [])
+
+    result = transcribe_file("/nonexistent.m4a")
+    assert "error" in result
+    assert "preflight failed" in result["error"]
+    assert "OSError" in result["error"]
+
+
+def test_preflight_hf_token_raises_is_red_not_crash(monkeypatch) -> None:
+    def _boom_token():
+        raise ValueError("tok-secret")
+
+    monkeypatch.setattr(preflight, "ffmpeg_ok", lambda: True)
+    monkeypatch.setattr(preflight, "config_parse_ok", lambda: True)
+    monkeypatch.setattr(preflight, "models_cached", lambda: [])
+    monkeypatch.setattr(preflight, "hf_token_present", _boom_token)
+
+    result = transcribe_file("/nonexistent.m4a", diarize=True)
+    assert "error" in result
+    assert "preflight failed" in result["error"]
+    assert "ValueError" in result["error"]
+    assert "tok-secret" not in result["error"]
