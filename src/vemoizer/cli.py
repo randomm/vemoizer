@@ -206,6 +206,12 @@ def transcribe(
 
     from vemoizer.batch import transcribe_batch
     from vemoizer.output.formatters import FORMAT_EXTENSIONS, OUTPUT_FORMATS
+    from vemoizer.progress_wiring import make_batch_display
+
+    # M4b (issue #105): one display per CLI invocation, constructed before
+    # any stderr redirection/logging setup, closed in a finally below.
+    # --quiet suppresses the live progress line too (not just the summary).
+    display = make_batch_display(quiet=quiet)
 
     # Resolve and validate formats BEFORE any transcription: an invalid
     # --format must fail in milliseconds, not after minutes of decoding
@@ -234,50 +240,56 @@ def transcribe(
     # sort, 20s boundary decodes, confirmation (--yes / --no-group /
     # interactive), concat, one decode per group, part markers. A single
     # file stays on the plain per-file loop (no grouping work at all).
-    if len(files) > 1:
-        from vemoizer.batch import run_batch
-        from vemoizer.presets import RunOptions
+    try:
+        if len(files) > 1:
+            from vemoizer.batch import run_batch
+            from vemoizer.presets import RunOptions
 
-        if copy:
-            # The plain loop honors --copy; the batch loop does not (one
-            # clipboard per group is not a sensible multi-file contract),
-            # so the narrowing is made explicit rather than silent.
-            typer.echo(
-                "warning: --copy is only honored for a single file; "
-                "skipped for multi-file runs",
-                err=True,
+            if copy:
+                # The plain loop honors --copy; the batch loop does not (one
+                # clipboard per group is not a sensible multi-file contract),
+                # so the narrowing is made explicit rather than silent.
+                typer.echo(
+                    "warning: --copy is only honored for a single file; "
+                    "skipped for multi-file runs",
+                    err=True,
+                )
+            batch_options = RunOptions.expert_transcribe(
+                profile=profile,
+                diarize=diarize,
+                repair=repair,
+                speakers=speaker_count,
+                glossary_path=str(glossary) if glossary is not None else None,
+                config_path=str(config) if config is not None else None,
             )
-        batch_options = RunOptions.expert_transcribe(
-            profile=profile,
-            diarize=diarize,
-            repair=repair,
-            speakers=speaker_count,
-            glossary_path=str(glossary) if glossary is not None else None,
-            config_path=str(config) if config is not None else None,
-        )
-        exit_code = run_batch(
-            files,
-            batch_options,
-            formats=formats,
-            out=out,
-            quiet=quiet,
-            yes=yes,
-            no_group=no_group,
-        )
-    else:
-        exit_code = transcribe_batch(
-            files,
-            formats=formats,
-            config_path=str(config) if config is not None else None,
-            profile=profile,
-            repair=repair,
-            glossary_path=str(glossary) if glossary is not None else None,
-            speakers=speaker_count,
-            diarize=diarize,
-            out=out,
-            quiet=quiet,
-            copy=copy,
-        )
+            exit_code = run_batch(
+                files,
+                batch_options,
+                formats=formats,
+                out=out,
+                quiet=quiet,
+                yes=yes,
+                no_group=no_group,
+                display=display,
+            )
+        else:
+            exit_code = transcribe_batch(
+                files,
+                formats=formats,
+                config_path=str(config) if config is not None else None,
+                profile=profile,
+                repair=repair,
+                glossary_path=str(glossary) if glossary is not None else None,
+                speakers=speaker_count,
+                diarize=diarize,
+                out=out,
+                quiet=quiet,
+                copy=copy,
+                display=display,
+            )
+    finally:
+        if display is not None:
+            display.close()
     if exit_code:
         raise typer.Exit(code=exit_code)
 
@@ -353,20 +365,29 @@ def meeting(
         logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 
     from vemoizer.batch import run_preset
+    from vemoizer.progress_wiring import make_batch_display
 
+    # M4b (issue #105): one display per CLI invocation, closed in a finally
+    # below; --quiet suppresses the live progress line too.
+    display = make_batch_display(quiet=quiet)
     speaker_count = _parse_speakers(speakers)
-    exit_code = run_preset(
-        files,
-        command="meeting",
-        config_path=str(config) if config is not None else None,
-        glossary_path=str(glossary) if glossary is not None else None,
-        repair=repair,
-        diarize=False if no_diarize else None,
-        speakers=speaker_count,
-        quiet=quiet,
-        yes=yes,
-        no_group=no_group,
-    )
+    try:
+        exit_code = run_preset(
+            files,
+            command="meeting",
+            config_path=str(config) if config is not None else None,
+            glossary_path=str(glossary) if glossary is not None else None,
+            repair=repair,
+            diarize=False if no_diarize else None,
+            speakers=speaker_count,
+            quiet=quiet,
+            yes=yes,
+            no_group=no_group,
+            display=display,
+        )
+    finally:
+        if display is not None:
+            display.close()
     if exit_code:
         raise typer.Exit(code=exit_code)
 
@@ -414,15 +435,24 @@ def memo(
         logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 
     from vemoizer.batch import run_preset
+    from vemoizer.progress_wiring import make_batch_display
 
-    exit_code = run_preset(
-        files,
-        command="memo",
-        config_path=str(config) if config is not None else None,
-        glossary_path=str(glossary) if glossary is not None else None,
-        repair=repair,
-        quiet=quiet,
-    )
+    # M4b (issue #105): one display per CLI invocation, closed in a finally
+    # below; --quiet suppresses the live progress line too.
+    display = make_batch_display(quiet=quiet)
+    try:
+        exit_code = run_preset(
+            files,
+            command="memo",
+            config_path=str(config) if config is not None else None,
+            glossary_path=str(glossary) if glossary is not None else None,
+            repair=repair,
+            quiet=quiet,
+            display=display,
+        )
+    finally:
+        if display is not None:
+            display.close()
     if exit_code:
         raise typer.Exit(code=exit_code)
 

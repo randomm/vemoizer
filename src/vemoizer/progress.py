@@ -233,6 +233,23 @@ class ProgressDisplay:
         """Replace a running stage's status text (e.g. 'loading model...')."""
         self._progress.update(task_id, description=description)
 
+    def prefix_active_stage(self, prefix: str) -> None:
+        """Prepend *prefix* (e.g. ``"[1/3] memo · "``) to the active stage.
+
+        Used by the batch layer (issue #105 M4b) to show ``[i/N] <stem> ·
+        decode 38/56 min`` for multi-file runs.  The prefix is part of the
+        description, not a separate echo line.  A no-op when no stage is
+        active or when the display is disabled.
+        """
+        if self.disable:
+            return
+        task = self._progress.tasks[-1] if self._progress.tasks else None
+        if task is None:
+            return
+        if task.description.startswith(prefix):
+            return
+        self._progress.update(task.id, description=f"{prefix}{task.description}")
+
 
 def _stderr_file() -> IO[str]:
     """Current sys.stderr at call time (tests monkeypatch it)."""
@@ -244,20 +261,13 @@ def _stderr_file() -> IO[str]:
 # ---------------------------------------------------------------------------
 #
 # mlx_whisper.transcribe counts its loop in mel frames via a module-level
-# tqdm: ``with tqdm.tqdm(total=content_frames, unit="frames",
-# disable=verbose is not False) as pbar:`` with ``pbar.update(delta)`` per
-# decoded 30 s window. Because WhisperTranscriber.transcribe decodes the
-# recording in 30 s windows (each its own transcribe() call, so the glossary
-# initial_prompt re-seeds), the shim wraps the WHOLE transcribe() call: every
-# window's internal bar hits the patched tqdm. The display's decode task has
-# a FILE-level total (whole-recording minutes); each window advances it by
-# window_offset_minutes + in-window frames converted to minutes.
-#
-# The patch is idempotent: a module-level sentinel marks the active shim, and
-# the patched tqdm checks it, so a re-entrant short call (self-heal's
-# re-decode lambdas) gets a bare tqdm instead of a second wrapped bar. The
-# original module attribute is always restored in a finally, and the shim
-# swallows its own errors — the decode result must be identical with or
+# tqdm. Because WhisperTranscriber.transcribe decodes in 30 s windows, the
+# shim wraps the WHOLE transcribe() call so every window's bar hits the
+# patched tqdm. The display's decode task has a FILE-level total
+# (whole-recording minutes); each window advances it by window offset +
+# in-window frames. The patch is idempotent (re-entrant calls get a no-op
+# bar), the original attribute is always restored in a finally, and the
+# shim swallows its own errors — the decode result is identical with or
 # without a TTY.
 
 

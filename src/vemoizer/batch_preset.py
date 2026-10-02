@@ -60,6 +60,7 @@ def _transcribe_preset_file(
     options: RunOptions,
     glossary_path: str | None,
     notify_failed: bool = False,
+    display: Any | None = None,
 ) -> dict[str, Any] | None:
     """One guarded preset transcribe (the per-file loop's fail-loud core).
 
@@ -67,6 +68,7 @@ def _transcribe_preset_file(
     one-line ``error:`` naming the file; ``KeyboardInterrupt``/``SystemExit``
     propagate; ``None`` on failure. A malformed project config
     (``ConfigError``) fails loud with a clean error line (issue #78).
+    *display* (issue #105 M4b) is threaded into ``transcribe_file``.
     """
     from vemoizer.batch import _resolve_llm_config
     from vemoizer.pipeline import transcribe_file
@@ -86,6 +88,7 @@ def _transcribe_preset_file(
             repair=options.repair,
             glossary_path=glossary_path,
             speakers=options.speakers,
+            display=display,
         )
     except (KeyboardInterrupt, SystemExit):
         raise
@@ -113,6 +116,7 @@ def _run_preset_groups(
     tty_isatty: Callable[[], bool] | None,
     effective_glossary: str | None,
     command: str,
+    display: Any | None = None,
 ) -> int:
     """The meeting 2+ files path: the M3 flow via ``run_batch``.
 
@@ -208,6 +212,7 @@ def _run_preset_groups(
         input_fn=input_fn,
         print_fn=print_fn,
         tty_isatty=tty_isatty,
+        display=display,
     )
 
     for name in written:
@@ -238,20 +243,15 @@ def run_preset(
     input_fn: Callable[[str], str] | None = None,
     print_fn: Callable[[str], None] | None = None,
     tty_isatty: Callable[[], bool] | None = None,
+    display: Any | None = None,
 ) -> int:
     """Run the *meeting* or *memo* preset over *files*.
 
-    Composes the layered glossary (no merge when an explicit
-    ``--glossary`` is given), resolves the preset options via
-    ``presets.resolve_options``, then runs the plain per-file loop
-    (single file / memo / ``--no-group``) or, for meeting with 2+ files,
-    the M3 grouping flow (:func:`vemoizer.batch.run_batch`) with the
-    meeting write seam (one dated ``.md`` + ``.json`` pair per group in
-    the CWD). Without ``--glossary`` the merged/filtered glossary is
-    written to a temp file (deleted after the run); ``quiet`` suppresses
-    the final ``wrote <path>`` summary lines. The dated output base name
-    uses the first source file's *modification date* (group: first part
-    in natural-sort order), falling back to today when unreadable.
+    Composes the layered glossary, resolves the preset options, then runs
+    the plain per-file loop (single file / memo / ``--no-group``) or, for
+    meeting with 2+ files, the M3 grouping flow via
+    :func:`vemoizer.batch.run_batch` with the meeting write seam.
+    ``display`` (issue #105 M4b) is threaded to ``transcribe_file``.
     Returns 0 on success, 1 on any failure, 2 on a bad flag combination.
     """
     # Deferred import so run_preset (defined here) and _write_temp_glossary
@@ -358,6 +358,7 @@ def run_preset(
                 tty_isatty=tty_isatty,
                 effective_glossary=effective_glossary,
                 command=command,
+                display=display,
             )
 
         # Plain per-file loop: single file (either preset), memo (always),
@@ -365,6 +366,7 @@ def run_preset(
         # the file's own modification date (issue #87); the fallback stem
         # is the FIRST file's stem (deterministic, unchanged since #82).
         from vemoizer.caffeinate import caffeinate_context
+        from vemoizer.progress_wiring import set_batch_prefix
 
         first_stem, _ = nfc_stem_and_suffix(files[0])
         exit_code = 0
@@ -374,9 +376,16 @@ def run_preset(
 
         gfiles = resolve_run_glossary_files(command, options.glossary_path)
         with caffeinate_context():
-            for file in files:
+            for index, file in enumerate(files, start=1):
+                # M4b (issue #105): prefix the active stage with ``[i/N]
+                # stem`` for multi-file runs.
+                set_batch_prefix(display, index, len(files), file.stem)
                 result = _transcribe_preset_file(
-                    file, options, effective_glossary, notify_failed=True
+                    file,
+                    options,
+                    effective_glossary,
+                    notify_failed=True,
+                    display=display,
                 )
                 if result is None:
                     exit_code = 1

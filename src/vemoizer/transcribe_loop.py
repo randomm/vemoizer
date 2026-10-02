@@ -17,6 +17,7 @@ patch convention (``monkeypatch.setattr(pipeline, "transcribe_file", ...)``).
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -24,6 +25,7 @@ from vemoizer.batch_output import check_failure_reason
 from vemoizer.caffeinate import caffeinate_context
 from vemoizer.diarization import SpeakerCount
 from vemoizer.llm import ConfigError
+from vemoizer.progress_wiring import set_batch_prefix
 
 __all__ = ["transcribe_batch"]
 
@@ -41,8 +43,16 @@ def transcribe_batch(
     out: Path | None = None,
     quiet: bool = False,
     copy: bool = False,
+    display: Any | None = None,
 ) -> int:
     """Transcribe *files* and write output files (the loop from old cli.py).
+
+    ``display`` (issue #105 M4b): the CLI-level
+    :class:`~vemoizer.progress.ProgressDisplay`, constructed once per run
+    and closed by the CLI.  Threaded into ``transcribe_file`` so the
+    mlx-whisper tqdm shim can drive the decode stage's progress.
+    ``None`` (the default) keeps every existing call site, fake and test
+    unchanged.
 
     Returns 0 on success, 1 if any file failed.
     """
@@ -53,7 +63,11 @@ def transcribe_batch(
 
     exit_code = 0
     with caffeinate_context():
-        for file in files:
+        for index, file in enumerate(files, start=1):
+            # M4b (issue #105): prefix the active stage with ``[i/N] stem``
+            # for multi-file runs; the prefix is part of the description,
+            # not a separate echo line.  No-op when display is None or N=1.
+            set_batch_prefix(display, index, len(files), file.stem)
             try:
                 # Fail loud on a malformed project config (issue #78).
                 _resolve_llm_config(config_path)
@@ -72,6 +86,7 @@ def transcribe_batch(
                     repair=repair,
                     glossary_path=glossary_path,
                     speakers=speakers,
+                    display=display,
                 )
             except (KeyboardInterrupt, SystemExit):
                 # ConfigError is handled by the try above; only the two
