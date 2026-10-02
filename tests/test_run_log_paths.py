@@ -11,6 +11,7 @@ that stdout is byte-unchanged.
 from __future__ import annotations
 
 import logging
+import stat
 
 import pytest
 from _cli_helpers import fake_transcribe, isolate_home, touch_files
@@ -142,8 +143,19 @@ def test_run_log_coverage_matrix(
     names = sorted(p.name for p in logs_dir(tmp_path).iterdir())
     assert names == sorted(expected)
     for name in names:
-        text = (logs_dir(tmp_path) / name).read_text(encoding="utf-8")
+        p = logs_dir(tmp_path) / name
+        assert p.exists(), f"{name} missing"
+        assert stat.S_IMODE(p.stat().st_mode) == 0o600, f"{name} mode != 0600"
+        assert stat.S_IMODE(logs_dir(tmp_path).stat().st_mode) == 0o700, (
+            "logs dir mode != 0700"
+        )
+        text = p.read_text(encoding="utf-8")
         assert text.strip(), f"{name} is empty"
+        # The span's own start line is present exactly once (item 5):
+        # a re-entrant no-op span adds no second one.
+        stem = p.stem
+        start_line = f"log started for {stem}"
+        assert text.count(start_line) == 1, f"{name}: start line count != 1"
 
 
 def test_meeting_grouped_log_named_after_first_part_stem(tmp_path, monkeypatch):

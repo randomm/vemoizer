@@ -27,14 +27,17 @@ directly):
 
 from __future__ import annotations
 
+import io
 import logging
 import stat
 from collections.abc import Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 
-from vemoizer.run_log import configure, file_log, reset_run_log
+import vemoizer.run_log as run_log_module
+from vemoizer.run_log import _QuietFileHandler, configure, file_log, reset_run_log
 
 pytestmark = pytest.mark.usefixtures("run_log_state")
 
@@ -61,7 +64,7 @@ def _root_stderr_stream() -> _ListStream | None:
         if isinstance(h, logging.StreamHandler) and not isinstance(
             h, logging.FileHandler
         ):
-            return h.stream  # type: ignore[return-value]
+            return cast(_ListStream, h.stream)
     return None
 
 
@@ -325,6 +328,31 @@ class TestRedaction:
         # The traceback is present (redacted), proving exc_text was covered.
         assert "Traceback" in text
 
+    def test_over_long_hf_token_fully_redacted(self, tmp_path: Path):
+        """Item 7 (adversarial): the ``hf_[A-Za-z0-9]{8,}`` regex redacts an
+        over-long token in full (no visible tail)."""
+        token = "hf_" + "A" * 200
+        with file_log("long", base_dir=tmp_path, verbose=False, quiet=True):
+            logging.getLogger("vemoizer.t").warning(f"tok {token} end")
+        text = _log_text(tmp_path, "long")
+        assert token not in text
+        assert "A" * 10 not in text
+        assert "hf_<redacted>" in text
+
+    def test_hf_regex_no_catastrophic_backtracking(self, tmp_path: Path):
+        """Item 7 (adversarial): the ``hf_[A-Za-z0-9]{8,}`` regex must match
+        in linear time (no catastrophic backtracking on a repeated prefix)."""
+        import time
+
+        from vemoizer.run_log import _HF_TOKEN_RE
+
+        pathological = "hf_" + ("a" * 9 + "!") * 5000
+        start = time.perf_counter()
+        _HF_TOKEN_RE.sub("redacted", pathological)
+        elapsed = time.perf_counter() - start
+        # Linear-time regex: 50k chars should take well under 100 ms.
+        assert elapsed < 0.1, f"regex took {elapsed:.3f}s (possible backtracking)"
+
 
 class TestFailOpen:
     def test_unwritable_base_dir_no_raise_one_notice(
@@ -414,6 +442,117 @@ class TestConfigure:
         assert (_logs_dir(tmp_path) / "ctx2.log").exists()
 
 
+class TestRelativeUndo:
+    """Undo must be RELATIVE — only the instances this span added are
+    removed on exit; anything else is left untouched."""
+
+    def test_handler_added_to_root_mid_span_survives(self, tmp_path: Path):
+        """A handler added to root mid-span (simulating pytest's caplog
+        LogCaptureHandler) survives the span."""
+        root = logging.getLogger()
+
+        class _Probe(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                pass
+
+        probe = _Probe()
+        with file_log("mid", base_dir=tmp_path, verbose=False, quiet=True):
+            root.addHandler(probe)
+        assert probe in root.handlers, "mid-span handler must survive the span"
+        root.removeHandler(probe)
+
+    def test_filter_added_mid_span_survives(self, tmp_path: Path):
+        """A filter added to the HF stream handler mid-span (verbose: no
+        span filter is added there) survives the span."""
+        hf = logging.getLogger("huggingface_hub")
+        stream = logging.StreamHandler()
+        hf.addHandler(stream)
+        probe = logging.Filter()
+        try:
+            with file_log("midf", base_dir=tmp_path, verbose=True, quiet=True):
+                stream.addFilter(probe)
+            assert probe in stream.filters, "mid-span filter must survive the span"
+        finally:
+            stream.removeFilter(probe)
+            hf.removeHandler(stream)
+
+    def test_no_duplicate_filters_after_several_spans(self, tmp_path: Path):
+        """Several consecutive non-verbose spans on the same logger must not
+        accumulate duplicate terminal-suppression filters."""
+        from vemoizer.run_log import _NoThirdPartyInfoFilter
+
+        root = logging.getLogger()
+        stream = logging.StreamHandler()
+        stream.setLevel(logging.INFO)
+        root.addHandler(stream)
+        try:
+            for i in range(4):
+                with file_log(f"dup{i}", base_dir=tmp_path, verbose=False, quiet=True):
+                    pass
+            n = sum(1 for f in stream.filters if isinstance(f, _NoThirdPartyInfoFilter))
+            assert n == 0, f"duplicate suppression filters: {n}"
+        finally:
+            root.removeHandler(stream)
+
+    def test_undo_is_idempotent(self, tmp_path: Path):
+        """Detaching twice must be harmless (identity-based removal is a
+        no-op on already-removed instances)."""
+        handler = _QuietFileHandler(str(tmp_path / "i.log"), mode="w")
+        handler.setLevel(logging.INFO)
+        undo = run_log_module._attach(handler, verbose=False)
+        run_log_module._detach(undo)
+        run_log_module._detach(undo)  # second call must be a no-op
+        handler.close()
+
+    def test_explicit_hf_level_above_info_reaches_file(self, tmp_path: Path):
+        """Item 2 (adversarial): with ``huggingface_hub.propagate=False`` and
+        an EXPLICIT level above INFO, an HF INFO must still reach the file
+        (the span raises HF to INFO, restoring the old level after)."""
+        hf = logging.getLogger("huggingface_hub")
+        old_propagate = hf.propagate
+        old_level = hf.level
+        hf.propagate = False
+        try:
+            hf.setLevel(logging.WARNING)  # explicit, above INFO
+            with file_log("hfwarn", base_dir=tmp_path, verbose=False, quiet=True):
+                logging.getLogger("huggingface_hub.file_download").info(
+                    "hf explicit info line"
+                )
+            text = _log_text(tmp_path, "hfwarn")
+            assert "hf explicit info line" in text
+            # The explicit level is restored on every exit path.
+            assert hf.level == logging.WARNING
+        finally:
+            hf.propagate = old_propagate
+            hf.setLevel(old_level)
+
+    def test_root_warning_level_does_not_block_propagated_info(self, tmp_path: Path):
+        """Item 2 (adversarial, propagate=True): a root logger at WARNING
+        would drop propagated INFO before handlers see it; the span raises
+        root to INFO and restores it after. In non-verbose mode the terminal
+        suppression filter keeps the record off the terminal."""
+        root = logging.getLogger()
+        stream = _ListStream()
+        sh = logging.StreamHandler(cast("io.TextIOBase", stream))
+        sh.setLevel(logging.INFO)
+        root.addHandler(sh)
+        old_root_level = root.level
+        root.setLevel(logging.WARNING)
+        try:
+            with file_log("rootwarn", base_dir=tmp_path, verbose=False, quiet=True):
+                logging.getLogger("huggingface_hub.file_download").info(
+                    "propagated info via root"
+                )
+            text = _log_text(tmp_path, "rootwarn")
+            assert "propagated info via root" in text
+            assert root.level == old_root_level
+            # Non-verbose: third-party INFO stayed off the terminal handler.
+            assert "propagated info via root" not in "".join(stream.lines)
+        finally:
+            root.setLevel(old_root_level)
+            root.removeHandler(sh)
+
+
 # --- helpers ----------------------------------------------------------------
 
 
@@ -427,7 +566,7 @@ def _find_file_handler() -> logging.FileHandler | None:
 
 def _set_stream(handler: logging.StreamHandler, stream: object) -> None:
     """Set a handler's stream to an arbitrary writeable object (test helper)."""
-    handler.stream = stream  # type: ignore[assignment]
+    handler.stream = cast(io.TextIOBase, stream)
 
 
 class _RaisingStream:

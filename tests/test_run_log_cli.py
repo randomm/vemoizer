@@ -16,7 +16,8 @@ so the seam's per-file logging is exercised without real model calls:
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from contextlib import ExitStack, contextmanager
+from unittest.mock import MagicMock, patch
 
 from _cli_helpers import fake_transcribe, isolate_home, touch_files
 from _run_log_helpers import fake_continuation_seams
@@ -27,6 +28,20 @@ import vemoizer.run_log as run_log
 from vemoizer.cli import app
 
 runner = CliRunner()
+
+
+@contextmanager
+def _patch_file_log():
+    """Patch ``file_log`` in every module that imports it (the seam resolves
+    ``file_log`` through its own module namespace, not ``vemoizer.run_log``)."""
+    from vemoizer import batch, batch_plain, batch_preset, transcribe_loop
+
+    m = MagicMock()
+    m.return_value = MagicMock()
+    with ExitStack() as stack:
+        for mod in (run_log, batch, batch_preset, batch_plain, transcribe_loop):
+            stack.enter_context(patch.object(mod, "file_log", m))
+        yield m
 
 
 # --- transcribe: run context wiring -------------------------------------------
@@ -339,16 +354,15 @@ def test_transcribe_real_configure_file_log_written(tmp_path, monkeypatch):
     isolate_home(monkeypatch, tmp_path)
     # Patch file_log to verify it was called with the right stem, but
     # let the real configure() run.
-    with patch("vemoizer.run_log.file_log") as mock_fl:
-        mock_fl.return_value.__enter__ = lambda s: None
-        mock_fl.return_value.__exit__ = lambda s, *a: None
+    with _patch_file_log() as mock_fl:
         result = runner.invoke(app, ["transcribe", "a.m4a"])
     assert result.exit_code == 0
-    # The seam should have called file_log with the file's NFC stem.
-    if mock_fl.call_args_list:
-        first_call = mock_fl.call_args_list[0]
-        stem = first_call.args[0] if first_call.args else first_call.kwargs.get("stem")
-        assert stem == "a"
+    # The seam must have called file_log with the file's NFC stem (unconditional:
+    # if the patch misses the call site, this must fail, not pass vacuously).
+    assert len(mock_fl.call_args_list) == 1
+    first_call = mock_fl.call_args_list[0]
+    stem = first_call.args[0] if first_call.args else first_call.kwargs.get("stem")
+    assert stem == "a"
 
 
 def test_meeting_real_configure_file_log_written(tmp_path, monkeypatch):
@@ -357,15 +371,13 @@ def test_meeting_real_configure_file_log_written(tmp_path, monkeypatch):
     record: list[str] = []
     fake_transcribe(monkeypatch, record, title="Team Sync")
     isolate_home(monkeypatch, tmp_path)
-    with patch("vemoizer.run_log.file_log") as mock_fl:
-        mock_fl.return_value.__enter__ = lambda s: None
-        mock_fl.return_value.__exit__ = lambda s, *a: None
+    with _patch_file_log() as mock_fl:
         result = runner.invoke(app, ["meeting", "a.m4a"])
     assert result.exit_code == 0
-    if mock_fl.call_args_list:
-        first_call = mock_fl.call_args_list[0]
-        stem = first_call.args[0] if first_call.args else first_call.kwargs.get("stem")
-        assert stem == "a"
+    assert len(mock_fl.call_args_list) == 1
+    first_call = mock_fl.call_args_list[0]
+    stem = first_call.args[0] if first_call.args else first_call.kwargs.get("stem")
+    assert stem == "a"
 
 
 def test_memo_real_configure_file_log_written(tmp_path, monkeypatch):
@@ -374,15 +386,13 @@ def test_memo_real_configure_file_log_written(tmp_path, monkeypatch):
     record: list[str] = []
     fake_transcribe(monkeypatch, record)
     isolate_home(monkeypatch, tmp_path)
-    with patch("vemoizer.run_log.file_log") as mock_fl:
-        mock_fl.return_value.__enter__ = lambda s: None
-        mock_fl.return_value.__exit__ = lambda s, *a: None
+    with _patch_file_log() as mock_fl:
         result = runner.invoke(app, ["memo", "a.m4a"])
     assert result.exit_code == 0
-    if mock_fl.call_args_list:
-        first_call = mock_fl.call_args_list[0]
-        stem = first_call.args[0] if first_call.args else first_call.kwargs.get("stem")
-        assert stem == "a"
+    assert len(mock_fl.call_args_list) == 1
+    first_call = mock_fl.call_args_list[0]
+    stem = first_call.args[0] if first_call.args else first_call.kwargs.get("stem")
+    assert stem == "a"
 
 
 # --- failure cases: configure still called -------------------------------------
@@ -445,15 +455,13 @@ def test_nfc_filename_file_log_stem(tmp_path, monkeypatch):
     record: list[str] = []
     fake_transcribe(monkeypatch, record)
     isolate_home(monkeypatch, tmp_path)
-    with patch("vemoizer.run_log.file_log") as mock_fl:
-        mock_fl.return_value.__enter__ = lambda s: None
-        mock_fl.return_value.__exit__ = lambda s, *a: None
+    with _patch_file_log() as mock_fl:
         result = runner.invoke(app, ["transcribe", nfd_name])
     assert result.exit_code == 0
-    if mock_fl.call_args_list:
-        first_call = mock_fl.call_args_list[0]
-        stem = first_call.args[0] if first_call.args else first_call.kwargs.get("stem")
-        assert stem == "caf\u00e9"  # NFC-composed
+    assert len(mock_fl.call_args_list) == 1
+    first_call = mock_fl.call_args_list[0]
+    stem = first_call.args[0] if first_call.args else first_call.kwargs.get("stem")
+    assert stem == "caf\u00e9"  # NFC-composed
 
 
 # --- reset_run_log: each CLI invocation starts clean ----------------------------
