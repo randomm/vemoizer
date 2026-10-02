@@ -27,6 +27,7 @@ from vemoizer.batch_output import (
     _check_result,
     _render_quality_report,
     _write_preset_output,
+    check_failure_reason,
 )
 from vemoizer.diarization import SpeakerCount
 from vemoizer.ingest import IngestError
@@ -97,21 +98,6 @@ def _transcribe_preset_file(
 
             notify_result(file, "failed", f"error: {file.name}: {e}")
         return None
-
-
-def _check_reason(result: dict[str, Any]) -> str:
-    """The one-line failure reason for a failed preset check (seam (b)).
-
-    ``_check_result`` fails loud on the ``error`` key, an empty
-    transcript, or ``--diarize`` without labels; this helper re-derives
-    the matching one-line reason (``error: `` is stripped by the helper).
-    """
-    err = result.get("error")
-    if isinstance(err, str) and err.strip():
-        return err
-    if not result.get("text") and not result.get("segments"):
-        return "no transcript produced (empty transcript)"
-    return "check failed"  # --diarize without labels (reason on stderr)
 
 
 def _run_preset_groups(
@@ -437,10 +423,20 @@ def run_preset(
                 ):
                     # M4a (issue #100), seam (b): one failure notification
                     # per file that failed the checks; reason = the stderr
-                    # ``error:`` line.
+                    # ``error:`` line (same source as _check_result).
                     from vemoizer.notify import notify_result
 
-                    notify_result(file, "failed", _check_reason(result))
+                    notify_result(
+                        file,
+                        "failed",
+                        check_failure_reason(
+                            file,
+                            result,
+                            diarize=options.diarize,
+                            diarize_label="diarize",
+                        )
+                        or "",
+                    )
                     exit_code = 1
                     continue
                 pair = _write_preset_output(

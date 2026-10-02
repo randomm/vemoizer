@@ -71,6 +71,7 @@ from vemoizer.batch_output import (  # noqa: F401,E402
     _process_result,
     _write_output,
     _write_preset_output,
+    check_failure_reason,
 )
 
 # Re-export run_preset from its new home (batch_preset.py, issue #87) so
@@ -206,13 +207,11 @@ def _run_plain(
                 continue
             if write_group_fn is not None:
                 # The preset write seam (issue #87): shared _check_and_write
-                # helper so both run_batch loops keep one implementation.
-                # M4a (issue #100), seam (c): failure notifications for this
-                # seam live HERE (check failed — the ``error:`` line is on
-                # stderr); the SUCCESS notification lives at the seam's own
-                # write point (write_group), so a partial-pair write failure
-                # is a failure, never a success, and no file is double-
-                # notified.
+                # helper. M4a (issue #100), seam (c): failure notifications
+                # for this seam live HERE (check failed — the ``error:``
+                # line is on stderr); the SUCCESS notification lives at the
+                # seam's own write point (write_group), so a partial-pair
+                # write failure is a failure, never a success.
                 if not _check_and_write(
                     write_group_fn,
                     file,
@@ -222,9 +221,10 @@ def _run_plain(
                 ):
                     from vemoizer.notify import notify_result
 
-                    err = result.get("error")
-                    reason = err if isinstance(err, str) and err.strip() else ""
-                    notify_result(file, "failed", reason)
+                    reason = check_failure_reason(
+                        file, result, diarize=options.diarize, diarize_label="diarize"
+                    )
+                    notify_result(file, "failed", reason or "")
                     exit_code = 1
                 continue
             if not _process_result(
@@ -242,9 +242,10 @@ def _run_plain(
                 # reaches this branch).
                 from vemoizer.notify import notify_result
 
-                err = result.get("error")
-                reason = err if isinstance(err, str) and err.strip() else ""
-                notify_result(file, "failed", reason)
+                reason = check_failure_reason(
+                    file, result, diarize=options.diarize, diarize_label="--diarize"
+                )
+                notify_result(file, "failed", reason or "")
                 exit_code = 1
                 continue
             # M4a (issue #100), seam (a): one success notification per file
@@ -443,15 +444,13 @@ def run_batch(
 
             if write_group_fn is not None:
                 # Preset write seam (issue #87): shared _check_and_write
-                # helper — fail-loud _check_result first, then the seam
-                # (an unexpected seam exception degrades per-group via
-                # _call_write_seam: clean one-line error, keep going).
-                # M4a (issue #100), seam (c): failure notifications for the
-                # grouped preset seam live HERE (check failed — the ``error:
-                # `` line is on stderr); the SUCCESS notification lives at
-                # the seam's own write point (write_group), so a group is
-                # never double-notified and a partial-pair write failure is
-                # a failure, never a success.
+                # helper — fail-loud _check_result first, then the seam (an
+                # unexpected seam exception degrades per-group via
+                # _call_write_seam). M4a (issue #100), seam (c): failure
+                # notifications for the grouped preset seam live HERE
+                # (check failed — the ``error:`` line is on stderr); the
+                # SUCCESS notification lives at the seam's own write point
+                # (write_group).
                 if not _check_and_write(
                     write_group_fn,
                     label,
@@ -461,9 +460,10 @@ def run_batch(
                 ):
                     from vemoizer.notify import notify_result
 
-                    err = result.get("error")
-                    reason = err if isinstance(err, str) and err.strip() else ""
-                    notify_result(label, "failed", reason)
+                    reason = check_failure_reason(
+                        label, result, diarize=options.diarize, diarize_label="diarize"
+                    )
+                    notify_result(label, "failed", reason or "")
                     exit_code = 1
                 continue
             if not _process_result(
@@ -481,9 +481,10 @@ def run_batch(
                 # names its first part).
                 from vemoizer.notify import notify_result
 
-                err = result.get("error")
-                reason = err if isinstance(err, str) and err.strip() else ""
-                notify_result(label, "failed", reason)
+                reason = check_failure_reason(
+                    label, result, diarize=options.diarize, diarize_label="--diarize"
+                )
+                notify_result(label, "failed", reason or "")
                 exit_code = 1
                 continue
             # M4a (issue #100), seam (a): one success notification per group

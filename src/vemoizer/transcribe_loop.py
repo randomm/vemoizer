@@ -20,6 +20,7 @@ from pathlib import Path
 
 import typer
 
+from vemoizer.batch_output import check_failure_reason
 from vemoizer.caffeinate import caffeinate_context
 from vemoizer.diarization import SpeakerCount
 from vemoizer.llm import ConfigError
@@ -106,9 +107,8 @@ def transcribe_batch(
                 # write) already printed.
                 from vemoizer.notify import notify_result
 
-                err = result.get("error")
-                reason = err if isinstance(err, str) and err.strip() else ""
-                notify_result(file, "failed", reason)
+                reason = check_failure_reason(file, result, diarize=diarize)
+                notify_result(file, "failed", reason or "")
                 exit_code = 1
                 continue
             # M4a (issue #100), seam (a): one success notification per file
