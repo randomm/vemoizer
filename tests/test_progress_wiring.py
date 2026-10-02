@@ -519,10 +519,10 @@ def test_whole_transcribe_wrapping_monotonic_progress(
         t.transcribe(np.zeros(120 * 16_000, dtype=np.float32), display=display)
     display.close()
 
-    # One _ShimmedProgress bar per marked window. With the per-window
-    # protocol, the shim's factory only drives the bar created after the
-    # first mark_window; the remaining windows (no mark_window called in
-    # the fake) get _NoopBar. So we expect exactly 1 driven bar here.
+    # One _ShimmedProgress bar per marked window: the window loop marks
+    # every window, so each of the 4 bars is an armed _ShimmedProgress bar
+    # (a _NoopBar is only ever created for bars that appear without a
+    # preceding mark).
     assert len(bars_created) == 4, f"expected 4 window bars, got {len(bars_created)}"
     # Each bar's total was set from the factory call (total=3000 frames).
     for b in bars_created:
@@ -530,11 +530,9 @@ def test_whole_transcribe_wrapping_monotonic_progress(
 
     # The shim must have driven the display at least once.
     assert len(completed_values) > 0
-    # The display is driven by the first window's bar (4 updates per
-    # window: 0.25, 0.5, 0.75, 1.0 × 3000 frames → 4 completed values).
-    # With the per-window protocol, only the first marked window drives
-    # the display (the fake does not call mark_window per window), so we
-    # expect 4 completed values from the first window's bar.
+    # The display is driven by every marked window's bar (4 updates per
+    # window: 0.25, 0.5, 0.75, 1.0 × 3000 frames → 4 completed values per
+    # window), so we expect at least 4 completed values in total.
     assert len(completed_values) >= 4
     for i in range(1, len(completed_values)):
         assert completed_values[i] >= completed_values[i - 1] - 1e-9, (

@@ -43,6 +43,7 @@ from .transcriber import TranscriptionResult
 
 if TYPE_CHECKING:
     from .progress import ProgressDisplay
+    from .progress_shim import WhisperProgress
 
 logger = logging.getLogger(__name__)
 
@@ -162,13 +163,11 @@ class WhisperTranscriber:
         # In mlx-whisper 0.4.3 verbose=False ENABLES the real tqdm bar and
         # SUPPRESSES the per-segment print (inverted vs upstream whisper);
         # the contract test in tests/test_mlx_whisper_contract.py pins
-        # both. When the display is active the effective verbose is forced
-        # to False — even if the caller passed verbose=True or None (an
-        # accidental or deliberate override must never print transcript
-        # text to stdout under an active display, and the bar is owned by
-        # the shim anyway). On every other path the library default
-        # (verbose=None: no bar, no print) is left intact, and a caller's
-        # own verbose is never overwritten.
+        # both. Under an active display the shim owns the bar, so the
+        # effective verbose is forced to False (even over a caller's
+        # verbose=True) — the per-segment print must never go to stdout
+        # while the display is live. With no active display the caller's
+        # own verbose (or the library default, None) is left intact.
         options.update(kwargs)
         if display is not None and not display.disable:
             options["verbose"] = False
@@ -186,10 +185,12 @@ class WhisperTranscriber:
         file_total_min = (len(audio) / SAMPLE_RATE) / 60.0
         use_shim = display is not None and not display.disable
         if use_shim:
-            shim_cm: Any = with_whisper_progress(
-                display,
-                window_seconds=WINDOW_SECONDS,
-                file_total_minutes=file_total_min,
+            shim_cm: WhisperProgress | contextlib.AbstractContextManager[None] = (
+                with_whisper_progress(
+                    display,
+                    window_seconds=WINDOW_SECONDS,
+                    file_total_minutes=file_total_min,
+                )
             )
             mark_window = shim_cm.mark_window
         else:

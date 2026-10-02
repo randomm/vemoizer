@@ -176,6 +176,10 @@ class ProgressDisplay:
     def __init__(self, verbose: bool = True) -> None:
         is_tty: bool = sys.stderr.isatty()
         self.disable: bool = not (verbose and is_tty)
+        # Exact batch prefix last applied per task id, so a re-prefix can
+        # strip the previous prefix precisely instead of inferring it from
+        # content (a stem containing ` · ` would otherwise be corrupted).
+        self._prefixes: dict[TaskID, str] = {}
         self._console = Console(
             stderr=True,
             no_color=not is_tty,
@@ -188,6 +192,10 @@ class ProgressDisplay:
             transient=False,
         )
         self._started = False
+        # Exact batch prefix last applied per task id, so a re-prefix can
+        # strip the previous prefix precisely instead of inferring it from
+        # content (a stem containing ` · ` would otherwise be corrupted).
+        self._prefixes: dict[TaskID, str] = {}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -251,21 +259,20 @@ class ProgressDisplay:
         if task.description.startswith("[green]"):
             return
         description = task.description
-        if description.startswith(prefix):
+        # The exact prefix last applied to this task (or None on first use).
+        previous = self._prefixes.get(task.id)
+        if previous is not None:
+            if description.startswith(prefix):
+                self._prefixes[task.id] = prefix
+                return
+            # Replace exactly the recorded previous prefix (if still
+            # present); a description someone else changed is prefixed as-is.
+            if description.startswith(previous):
+                description = description[len(previous) :]
+        elif description.startswith(prefix):
             return
-        # A previous batch prefix is a run of `[i/N] stem · ` (the marker
-        # sits at the END of the prefix string). Find its closing `]` and
-        # check the marker right after it, so a re-prefix replaces the old
-        # prefix instead of accumulating ('[2/3] b · [1/3] a · ...').
-        # A previous batch prefix is `[i/N] stem · ` (the `·` marker sits
-        # inside the prefix string).  Find that marker and strip the old
-        # prefix so a re-prefix replaces it instead of accumulating.
-        if description.startswith("["):
-            marker = " · "
-            idx = description.find(marker)
-            if idx != -1:
-                description = description[idx + len(marker) :]
         self._progress.update(task.id, description=f"{prefix}{description}")
+        self._prefixes[task.id] = prefix
 
 
 def _stderr_file() -> IO[str]:

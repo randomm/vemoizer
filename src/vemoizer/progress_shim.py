@@ -81,11 +81,12 @@ def with_whisper_progress(
     """Wrap the window loop so each window's tqdm drives *display*.
 
     Patches the ``tqdm`` referenced by ``mlx_whisper.transcribe`` (a
-    module-level attribute) and restores it when the caller invokes
-    :meth:`WhisperProgress.close` (or when the display is finished). The
-    returned :class:`WhisperProgress` supports the context-manager protocol
-    so the window loop can use ``with with_whisper_progress(...) as shim:``
-    and the module attribute is automatically restored on exit.
+    module-level attribute); the original module attribute is restored
+    when the context is exited (``__exit__``), at which point the
+    display task is finished as well. The returned
+    :class:`WhisperProgress` supports the context-manager protocol so the
+    window loop can use ``with with_whisper_progress(...) as shim:`` and
+    the module attribute is automatically restored on exit.
 
     The window loop calls ``shim.mark_window(offset_seconds)`` before every
     main-loop ``mlx_whisper.transcribe`` call (see the per-window protocol
