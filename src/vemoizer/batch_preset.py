@@ -1,25 +1,14 @@
 """Preset (``meeting`` / ``memo``) run orchestration.
 
 Extracted from :mod:`vemoizer.batch_output` (the 500-line hard limit,
-issue #87) so the meeting preset can gain the M3 split-recording
-grouping seam without pushing either module over the ceiling.
-
-``run_preset`` composes the layered glossary, resolves the preset
-:class:`~vemoizer.presets.RunOptions`, and then runs the plain per-file
-loop (single file / memo / ``--no-group``: per-file decode guard,
-``_check_result`` fail-loud, one dated ``.md`` + ``.json`` pair per file)
-or the M3 grouping flow (:func:`vemoizer.batch.run_batch`) for meeting
-with 2+ files, handing it the meeting write seam (one dated ``.md`` +
-``.json`` pair per group in the CWD).
-
-The dated output name uses the **modification date** of the first
-source file (``st_mtime``; for a group, the first part in natural-sort
-order) rather than today, falling back to today when the file cannot be
-stat'ed (``creation_time`` is the export/copy time on iOS exports, not
-the recording date — deliberately not used). The temp glossary
-lifecycle (write once before the run, delete in a ``finally``), the
-``@``-term split, the layered config search, and the per-file guard all
-behave exactly as before for the no-group and single-file cases.
+issue #87). ``run_preset`` composes the layered glossary, resolves the
+preset :class:`~vemoizer.presets.RunOptions`, runs the plain per-file
+loop (single file / memo / ``--no-group``: decode guard, fail-loud check,
+one dated ``.md`` + ``.json`` pair per file) or, for meeting with 2+
+files, the M3 grouping flow (:func:`vemoizer.batch.run_batch`) with the
+meeting write seam (one dated pair per group in the CWD). The dated
+output name uses the first source file's ``st_mtime`` (group: first part)
+rather than today, falling back to today when the file cannot be stat'ed.
 """
 
 from __future__ import annotations
@@ -69,14 +58,14 @@ def _transcribe_preset_file(
     file: Path,
     options: RunOptions,
     glossary_path: str | None,
+    notify_failed: bool = False,
 ) -> dict[str, Any] | None:
     """One guarded preset transcribe (the per-file loop's fail-loud core).
 
     An unexpected ``transcribe_file`` exception degrades to a clean
-    one-line ``error:`` naming the file (never a raw traceback mid-
-    run); ``KeyboardInterrupt``/``SystemExit`` propagate; ``None`` on
-    failure. A malformed project config (``ConfigError``) fails loud
-    with a clean error line (issue #78).
+    one-line ``error:`` naming the file; ``KeyboardInterrupt``/``SystemExit``
+    propagate; ``None`` on failure. A malformed project config
+    (``ConfigError``) fails loud with a clean error line (issue #78).
     """
     from vemoizer.batch import _resolve_llm_config
     from vemoizer.pipeline import transcribe_file
@@ -101,7 +90,28 @@ def _transcribe_preset_file(
         raise
     except Exception as e:  # noqa: BLE001 - per-file fail-loud boundary
         typer.echo(f"error: {file.name}: {e}", err=True)
+        if notify_failed:
+            # M4a (issue #100), seam (b): one failure notification per
+            # file whose transcribe raised; reason = the stderr line above.
+            from vemoizer.notify import notify_result
+
+            notify_result(file, "failed", f"error: {file.name}: {e}")
         return None
+
+
+def _check_reason(result: dict[str, Any]) -> str:
+    """The one-line failure reason for a failed preset check (seam (b)).
+
+    ``_check_result`` fails loud on the ``error`` key, an empty
+    transcript, or ``--diarize`` without labels; this helper re-derives
+    the matching one-line reason (``error: `` is stripped by the helper).
+    """
+    err = result.get("error")
+    if isinstance(err, str) and err.strip():
+        return err
+    if not result.get("text") and not result.get("segments"):
+        return "no transcript produced (empty transcript)"
+    return "check failed"  # --diarize without labels (reason on stderr)
 
 
 def _run_preset_groups(
@@ -120,33 +130,23 @@ def _run_preset_groups(
 ) -> int:
     """The meeting 2+ files path: the M3 flow via ``run_batch``.
 
-    ``run_batch`` owns the full grouping logic (natural sort, the
-    mutually-exclusive flag check, the pre-decode TTY guard, boundary
-    decodes, proposals, confirmation, concat, part offsets, part
-    markers); this function only hands over the meeting write seam —
-    one dated ``.md`` + ``.json`` pair per group in the CWD — and lets
-    ``run_batch``'s single-file and ``--no-group`` short-circuits keep
-    today's per-file behaviour (per-file pair, per-file mtime date).
+    ``run_batch`` owns the full grouping logic; this function only hands
+    over the meeting write seam — one dated ``.md`` + ``.json`` pair per
+    group in the CWD — and lets ``run_batch``'s single-file and
+    ``--no-group`` short-circuits keep the per-file behaviour.
     """
     from vemoizer.batch import run_batch
     from vemoizer.presets import replace
 
-    # RunOptions is frozen; rebuild it with the composed effective_glossary
-    # so run_batch's per-group transcribe reads the right glossary file.
+    # RunOptions is frozen; rebuild with the composed effective_glossary so
+    # run_batch's per-group transcribe reads the right glossary file.
     group_options = replace(options, glossary_path=effective_glossary)
 
     written: list[str] = []
     exit_code = 0
-    # M5a: the real glossary files the run read (never the composed temp
-    # file — it is deleted in run_preset's finally).
-    from vemoizer.sidecar import resolve_run_glossary_files
+    from vemoizer.sidecar import resolve_run_glossary_files  # noqa: E402
 
     gfiles = resolve_run_glossary_files(command, options.glossary_path)
-    # M6 (issue #75): the report-only glossary provenance, stashed on each
-    # group's run dict before the seam writes (see run_preset's plain loop
-    # for the full contract). Only whisper-prompt terms — @-prefixed
-    # LLM-only terms never reached the whisper prompt, so they are not part
-    # of the "X of N" denominator.
     glossary_terms = list(options.whisper_prompt)
     if gfiles:
         glossary_source = ", ".join(gfiles) + f" ({len(glossary_terms)} terms)"
@@ -156,8 +156,9 @@ def _run_preset_groups(
     def write_group(label: Path | str, result: dict[str, Any]) -> None:
         # One dated pair per group: the date is the first part's mtime
         # (group[0] in natural-sort order); the fallback stem is the same
-        # first part's stem. M5a: stash the per-part PCM durations
-        # (fail-open) and the real part paths, then build the sidecar keys.
+        # first part's stem.
+        # M5a: stash the per-part PCM durations (fail-open) and the real
+        # part paths, then build the sidecar keys.
         from vemoizer.sidecar import (
             build_sidecar,
             group_durations,
@@ -165,9 +166,7 @@ def _run_preset_groups(
         )
 
         parts = group_part_paths(label, files)
-        with suppress(
-            OSError, IngestError
-        ):  # fail-open: skip durations on ffmpeg error
+        with suppress(OSError, IngestError):  # fail-open: skip on ffmpeg error
             result["_source_durations"] = group_durations(parts)
         build_sidecar(
             result,
@@ -193,27 +192,23 @@ def _run_preset_groups(
         )
         written.extend(pair)
         # A partial pair (fewer paths than the preset's formats — e.g.
-        # the .json write failed) means this group's run failed; the
-        # error line was already printed by _write_output.
+        # the .json write failed) means this group's run failed; the error
+        # line was already printed by _write_output.
         nonlocal exit_code
         if len(pair) < len(PRESET_FORMATS):
             exit_code = 1
         # M4a (issue #100), seam (c): one notification per group, at the
-        # seam's own write point — the check-failure and decode-failure
-        # notifications fire earlier (run_batch's _check_and_write / the
-        # decode guard), so a group is never double-notified. Success =
-        # the full pair written; a partial pair is a FAILURE even though
-        # one file landed. The stem is the group's first part (never the
-        # "+"-joined label).
+        # seam's own write point (check-/decode-failure notifications fire
+        # earlier in run_batch, so a group is never double-notified).
+        # Success = the full pair written; a partial pair is a FAILURE even
+        # though one file landed; the stem is the group's first part.
         from vemoizer.notify import notify_write
 
         notify_write(
             first,
             len(pair),
             len(PRESET_FORMATS),
-            reason=(
-                "could not write output" if len(pair) < len(PRESET_FORMATS) else ""
-            ),
+            reason="could not write output" if len(pair) < len(PRESET_FORMATS) else "",
         )
 
     code = run_batch(
@@ -394,7 +389,9 @@ def run_preset(
         gfiles = resolve_run_glossary_files(command, options.glossary_path)
         with caffeinate_context():
             for file in files:
-                result = _transcribe_preset_file(file, options, effective_glossary)
+                result = _transcribe_preset_file(
+                    file, options, effective_glossary, notify_failed=True
+                )
                 if result is None:
                     exit_code = 1
                     continue
@@ -443,9 +440,7 @@ def run_preset(
                     # ``error:`` line.
                     from vemoizer.notify import notify_result
 
-                    err = result.get("error")
-                    reason = err if isinstance(err, str) and err.strip() else ""
-                    notify_result(file, "failed", reason)
+                    notify_result(file, "failed", _check_reason(result))
                     exit_code = 1
                     continue
                 pair = _write_preset_output(
