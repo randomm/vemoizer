@@ -53,6 +53,45 @@ register_render(app)
 register_names(app)
 
 
+def register_glossary(app: typer.Typer) -> None:
+    """Attach the ``glossary`` sub-app (``check`` subcommand)."""
+    from .glossary_check import check_file, render_report
+
+    glossary_app = typer.Typer(
+        name="glossary",
+        help="Inspect and audit the glossary file(s).",
+        no_args_is_help=True,
+    )
+    app.add_typer(glossary_app, name="glossary")
+
+    @glossary_app.command("check")
+    def glossary_check(
+        path: Path | None = typer.Argument(  # noqa: B008
+            None,
+            help=(
+                "Glossary file to check; omitted = the merged .vemoizer "
+                "layers (fail-open: missing file reports empty)."
+            ),
+        ),
+    ) -> None:
+        """Print merged layers, the whisper prompt + token count, and audit findings."""
+        report = check_file(path)
+        typer.echo(render_report(report))
+
+
+register_glossary(app)
+
+
+@app.command()
+def doctor() -> None:
+    """Run local health checks; exit non-zero on any red check."""
+    from .doctor import run_doctor
+
+    report = run_doctor(echo=lambda line: typer.echo(line))
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
 def _warn_on_battery() -> None:
     """Emit a battery warning to stderr if running on battery power."""
     if on_battery():

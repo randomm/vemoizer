@@ -36,8 +36,13 @@ from vemoizer import models as models_mod
 from vemoizer.canary_transcriber import MODEL_ID as CANARY_MODEL_ID
 from vemoizer.canary_transcriber import MODEL_REVISION as CANARY_MODEL_REVISION
 from vemoizer.cli import app
+from vemoizer.diarization import DIARIZATION_REPO_ID, DIARIZATION_REVISION
 from vemoizer.parakeet_transcriber import MODEL_ID as PARAKEET_MODEL_ID
 from vemoizer.parakeet_transcriber import MODEL_REVISION as PARAKEET_MODEL_REVISION
+from vemoizer.redecode import MODEL_ID as REDECODE_MODEL_ID
+from vemoizer.redecode import MODEL_REVISION as REDECODE_MODEL_REVISION
+from vemoizer.whisper_transcriber import MODEL_ID as WHISPER_TURBO_MODEL_ID
+from vemoizer.whisper_transcriber import MODEL_REVISION as WHISPER_TURBO_MODEL_REVISION
 
 runner = CliRunner()
 
@@ -72,7 +77,13 @@ def _make_http_error(status_code: int, message: str):
 
 
 def _empty_sizes() -> dict[str, int]:
-    return {"parakeet": 0, "canary": 0, "whisper-finnish": 0}
+    return {
+        "parakeet": 0,
+        "canary": 0,
+        "whisper-finnish": 0,
+        "whisper-turbo": 0,
+        "pyannote": 0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +123,7 @@ def test_pull_calls_snapshot_download_per_model_with_full_sha() -> None:
         result = runner.invoke(app, ["models", "pull"])
 
     assert result.exit_code == 0
-    assert len(calls) == 3
+    assert len(calls) == 5
     for (repo_id, revision), spec in zip(calls, models_mod.MODELS, strict=True):
         assert repo_id == spec.repo_id
         assert revision == spec.revision
@@ -142,7 +153,7 @@ def test_pull_success_reports_all_models_and_cache_sizes() -> None:
     assert "cache:" in result.stdout
     assert "total" in result.stdout
     assert "100.0 MiB" in result.stdout
-    assert "300.0 MiB" in result.stdout
+    assert "500.0 MiB" in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +169,7 @@ def test_pull_warm_cache_no_redownload() -> None:
         result = runner.invoke(app, ["models", "pull"])
 
     assert result.exit_code == 0
-    assert mock_dl.call_count == 3
+    assert mock_dl.call_count == 5
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +255,7 @@ def test_pull_partial_failure_continues_to_remaining_models() -> None:
     ):
         result = runner.invoke(app, ["models", "pull"])
 
-    assert mock_dl.call_count == 3
+    assert mock_dl.call_count == 5
     assert result.exit_code == 1
     assert "FAILED" in result.stdout
 
@@ -333,6 +344,27 @@ def test_canary_constants_match_registry() -> None:
     assert registry.revision == CANARY_MODEL_REVISION
 
 
+def test_whisper_turbo_constants_match_registry() -> None:
+    """whisper_transcriber reads whisper-turbo from the registry (issue #79)."""
+    registry = {s.name: s for s in models_mod.MODELS}["whisper-turbo"]
+    assert registry.repo_id == WHISPER_TURBO_MODEL_ID
+    assert registry.revision == WHISPER_TURBO_MODEL_REVISION
+
+
+def test_whisper_finnish_redecode_constants_match_registry() -> None:
+    """redecode reads whisper-finnish from the registry (issue #79)."""
+    registry = {s.name: s for s in models_mod.MODELS}["whisper-finnish"]
+    assert registry.repo_id == REDECODE_MODEL_ID
+    assert registry.revision == REDECODE_MODEL_REVISION
+
+
+def test_diarization_constants_match_registry() -> None:
+    """diarization reads pyannote from the registry (issue #79)."""
+    registry = {s.name: s for s in models_mod.MODELS}["pyannote"]
+    assert registry.repo_id == DIARIZATION_REPO_ID
+    assert registry.revision == DIARIZATION_REVISION
+
+
 # ---------------------------------------------------------------------------
 # render_pull_report edge cases
 # ---------------------------------------------------------------------------
@@ -359,7 +391,10 @@ def test_render_pull_report_failure_line() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_transcribe_missing_file_fails_closed() -> None:
+def test_transcribe_missing_file_fails_closed(monkeypatch) -> None:
+    from test_pipeline import _patch_preflight_pass
+
+    _patch_preflight_pass(monkeypatch)
     result = runner.invoke(app, ["transcribe", "memo.m4a"])
     assert result.exit_code == 1
     assert result.stdout == ""

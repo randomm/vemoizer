@@ -215,3 +215,27 @@ def test_notes_strings_get_corrections() -> None:
     out = apply_corrections_to_notes(notes, {"Click Sense": "Qlik Sense"})
     assert out["title"] == "Qlik Sense -siirtymä"
     assert out["key_points"] == ["Qlik Sense korvataan"]
+
+
+def test_whole_word_backslash_in_right_side_is_literal() -> None:
+    """REGRESSION (issue #79): a backslash in the right side must be
+    literal in the output, not interpreted as a re.sub group reference."""
+    paras = [{"start": 0.0, "end": 1.0, "text": "sanoi foo bar"}]
+    out = apply_corrections(paras, {"foo": "bar\\baz"})
+    assert out[0]["text"] == "sanoi bar\\baz bar"
+
+
+def test_prefix_backslash_in_right_side_is_literal() -> None:
+    """REGRESSION (issue #79): a backslash in the right side of a
+    prefix correction must be literal in the output."""
+    paras = [{"start": 0.0, "end": 1.0, "text": "testi epittä x"}]
+    out = apply_corrections(paras, {"epit*": "EBITDA\\suffix"})
+    assert out[0]["text"] == "testi EBITDA\\suffix x"
+
+
+def test_whole_word_group_ref_in_right_side_is_literal() -> None:
+    """REGRESSION (issue #79): a right side containing a backslash-digit
+    (which re.sub would treat as a group reference) must be literal."""
+    paras = [{"start": 0.0, "end": 1.0, "text": "sanoi foo"}]
+    out = apply_corrections(paras, {"foo": "a\\1b"})
+    assert out[0]["text"] == "sanoi a\\1b"

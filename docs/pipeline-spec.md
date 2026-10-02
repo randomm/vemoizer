@@ -443,8 +443,16 @@ nothing clip-related is ever written to a persistent location, and no
 | Decode A | `nvidia/parakeet-tdt-0.6b-v3` | `mlx-community/parakeet-tdt-0.6b-v3` | `ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15` | parakeet-mlx; ~1.25 GB; word timestamps built in |
 | Decode B | `nvidia/canary-1b-v2` | community MLX port, e.g. `Mediform/canary-1b-v2-mlx-q8` | `0b6b32ee...` (full SHA at implementation) | loads the MLX port, not the F32 checkpoint |
 | Re-decode | `Finnish-NLP/whisper-large-finnish-v3` | `FredrikKarlssonSpeech/whisper-large-finnish-v3-mlx` | `f51f0310c1b2a3e5acb16905c1a7245bb9476846` | community MLX conversion (mlx-whisper cannot read the raw HF checkpoint); `word_timestamps=True` |
+| Meeting decode | `openai/whisper-large-v3-turbo` | `mlx-community/whisper-large-v3-turbo` | `a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb` | MLX community conversion; decoded in 30 s windows so the glossary `initial_prompt` re-seeds every window (issue #76) |
 | Diarization | `pyannote/speaker-diarization-community-1` | n/a (pyannote.audio 4.0.7) | `3533c8cf8e369892e6b79ff1bf80f7b0286a54ee` | CC-BY-4.0, HF-gated (form + token) |
 | VAD | silero-vad | bundled in `silero-vad==6.2.1` pip package | package version | ONNX mode, no separate download |
+
+The first five rows are the `MODELS` registry in `src/vemoizer/models.py`
+in pipeline order (parakeet, canary, whisper-finnish, whisper-turbo,
+pyannote); `vemoizer models pull` downloads all five at their pinned
+revisions. The transcriber, re-decode, and diarization modules read their
+repo ID and revision from this registry — no repo/SHA pair is defined in
+two places (issue #79; drift tests guard the constants).
 
 All downloads use `huggingface_hub.snapshot_download(repo_id,
 revision=<full-SHA>)` and load from the returned local path, never from the

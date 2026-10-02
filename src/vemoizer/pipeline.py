@@ -326,6 +326,27 @@ def transcribe_file(
     if profile not in PROFILES:
         known = ", ".join(PROFILES)
         raise ValueError(f"unknown profile {profile!r} (known: {known})")
+
+    # Inline preflight (issue #79): ~2s, fully local (no network) — ffmpeg,
+    # config parse, all pinned models cached, and the HF token when the
+    # meeting profile runs or diarization is requested (spec d4: the token
+    # check fires when profile=="meeting" OR diarize; a meeting run with
+    # --no-diarize still goes through the gated-model path).  A red check
+    # aborts before a single decode, so a gated pyannote model cannot fail
+    # open into a long run with no speaker labels (M1).
+    from .preflight import run_preflight
+
+    preflight = run_preflight(
+        diarize=diarize or profile == "meeting", echo=lambda line: logger.error(line)
+    )
+    if preflight.red:
+        return {
+            "text": "",
+            "segments": [],
+            "error": "preflight failed: "
+            + "; ".join(reason for _label, reason in preflight.red),
+        }
+
     run_start = time.monotonic()
     logger.info("transcribe: %s (profile: %s)", path, profile)
     ingest_start = time.monotonic()

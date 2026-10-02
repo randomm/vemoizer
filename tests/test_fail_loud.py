@@ -22,6 +22,7 @@ from test_pipeline import (
     _patch_decoders,
     _patch_diarize,
     _patch_ingest,
+    _patch_preflight_pass,
     _patch_redecode,
     _patch_vad,
 )
@@ -144,6 +145,7 @@ def test_latched_decode_total_failure_fails_loud(tmp_path, monkeypatch) -> None:
     """Latched-load total failure (ctor succeeds, transcribe raises) must
     produce ``result["error"]`` with the exact #73 wording — not a truthy
     empty dict that looks like a successful empty transcript."""
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     _latch_both(monkeypatch)
@@ -161,6 +163,7 @@ def test_latched_decode_two_slices_counts_slices_in_error(
     tmp_path, monkeypatch
 ) -> None:
     """The slice count in the error message reflects the VAD slice count."""
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _n_slice_vad(monkeypatch, 2)
     _latch_both(monkeypatch)
@@ -172,6 +175,7 @@ def test_latched_decode_two_slices_counts_slices_in_error(
 def test_silent_audio_still_ships_empty_without_error(tmp_path, monkeypatch) -> None:
     """Positive control: a decode that SUCCEEDS with empty text (silent
     speech) is not a total failure — no error key, empty output."""
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     _patch_decoders(monkeypatch, {"text": ""}, None)
@@ -209,6 +213,7 @@ def test_latched_decode_b_failure_still_fails_open(tmp_path, monkeypatch) -> Non
 def test_meeting_fallback_appends_exactly_one_warning(tmp_path, monkeypatch) -> None:
     """decode_meeting returns None and the dictation path succeeds: exactly
     the fallback warning lands in ``result["warnings"]``."""
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     monkeypatch.setattr(
@@ -234,6 +239,7 @@ def test_meeting_fallback_total_failure_is_error_not_warning(
     """decode_meeting fails AND the dictation fallback totally fails: the
     result is the #73 error. The fallback warning must NOT be appended
     (error takes precedence over warning-plus-empty-success)."""
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     monkeypatch.setattr(
@@ -253,6 +259,7 @@ def test_meeting_fallback_total_failure_is_error_not_warning(
 def test_successful_meeting_decode_appends_no_warning(tmp_path, monkeypatch) -> None:
     """A successful meeting decode must add NOTHING to the warnings channel
     (catches an unconditional warnings-append regression)."""
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     _patch_meeting_success(monkeypatch)
@@ -384,6 +391,7 @@ def test_cli_latched_total_failure_exits_nonzero_and_writes_nothing(
 
     from vemoizer.cli import app as cli_app
 
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     _patch_decoders(monkeypatch, None, None, latched_a=True)

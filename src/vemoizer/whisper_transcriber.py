@@ -36,14 +36,17 @@ from typing import Any
 import mlx.core as mx
 import numpy as np
 
+from .models import get_model
 from .selfheal import heal
 from .transcriber import TranscriptionResult
 
 logger = logging.getLogger(__name__)
 
-#: The MLX community conversion of OpenAI's whisper-large-v3-turbo.
-MODEL_ID = "mlx-community/whisper-large-v3-turbo"
-MODEL_REVISION = "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb"
+#: The MLX community conversion of OpenAI's whisper-large-v3-turbo,
+#: read from the central registry so no repo/SHA pair lives in two places
+#: (issue #79); the drift test in tests/test_cli_models.py pins it.
+MODEL_ID = get_model("whisper-turbo").repo_id
+MODEL_REVISION = get_model("whisper-turbo").revision
 
 #: Audio contract (project invariant #6): 16 kHz mono float32.
 SAMPLE_RATE = 16_000

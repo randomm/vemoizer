@@ -8,17 +8,16 @@ ref, so every entry in :data:`MODELS` carries a 40-char SHA, and
 entry ever regresses to a branch name or short SHA.
 
 This module is the single source of truth for which repo each transcriber
-loads from. The transcriber modules keep their own ``MODEL_ID`` /
-``MODEL_REVISION`` constants (they were written first); a drift test pins the
-two against each other so they cannot drift. The re-decode model
-(whisper-large-finnish-v3, issue #8) lives only here until its
-transcriber lands.
+loads from (issue #79): the whisper-turbo, whisper-finnish (re-decode) and
+pyannote (diarization) modules read ``repo_id`` + ``revision`` from the
+registry via :func:`get_model`, so no repo/SHA pair lives in two places.
+Drift tests pin the module-level constants against the registry.
 
 ``MODELS`` is the canonical tuple of :class:`ModelSpec` (friendly name,
 HF repo, pinned SHA) in pipeline order. ``MODEL_REGISTRY`` and
 :func:`get_model` expose the same models as :class:`ModelEntry` for
 name-keyed lookup. ``pull_model`` / ``pull_all`` download a single model or
-all three and return local snapshot paths; ``pull_models`` is the
+all five and return local snapshot paths; ``pull_models`` is the
 CLI-facing variant that captures per-model failures instead of aborting.
 """
 
@@ -57,7 +56,7 @@ _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 class ModelSpec:
     """One revision-pinned model in the consensus set."""
 
-    name: str  # friendly name: "parakeet", "canary", "whisper-finnish"
+    name: str  # friendly name: "parakeet", "canary", "whisper-finnish", ...
     repo_id: str
     revision: str  # full-SHA commit, never a branch name
 
@@ -87,6 +86,16 @@ MODELS: tuple[ModelSpec, ...] = (
         name="whisper-finnish",
         repo_id="FredrikKarlssonSpeech/whisper-large-finnish-v3-mlx",
         revision="f51f0310c1b2a3e5acb16905c1a7245bb9476846",
+    ),
+    ModelSpec(
+        name="whisper-turbo",
+        repo_id="mlx-community/whisper-large-v3-turbo",
+        revision="a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb",
+    ),
+    ModelSpec(
+        name="pyannote",
+        repo_id="pyannote/speaker-diarization-community-1",
+        revision="3533c8cf8e369892e6b79ff1bf80f7b0286a54ee",
     ),
 )
 
@@ -236,7 +245,8 @@ def pull_model(name: str, cache_dir: str | None = None) -> str:
 def pull_all(cache_dir: str | None = None) -> dict[str, str]:
     """Pre-warm every registry model; returns ``{name: local_path}``.
 
-    Iterates in pipeline order (parakeet, canary, whisper-finnish).
+    Iterates in pipeline order (parakeet, canary, whisper-finnish,
+    whisper-turbo, pyannote).
     """
     return {
         entry.name: pull_model(entry.name, cache_dir=cache_dir)

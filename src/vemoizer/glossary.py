@@ -132,13 +132,15 @@ def load_corrections(path: str | Path | None) -> dict[str, str]:
 def _compile_corrections(
     corrections: dict[str, str],
 ) -> list[tuple[re.Pattern[str], Any]]:
-    """Compile correction pairs to (pattern, replacer) tuples.
+    """Compile correction pairs to (pattern, callable) tuples.
 
-    A trailing ``*`` on the wrong side matches Finnish inflections and
-    compounds ("epit*" covers epittä and epitävaikutuksia): the matched
-    stem becomes the canonical term, and a surviving suffix of at least
-    three characters (leading vowel joints stripped) is re-attached with
-    a hyphen ("EBITDA-vaikutuksia").
+    Both branches use a callable replacement so that backslashes in the
+    right side are treated as literal characters rather than re.sub group
+    references or escape sequences. A trailing ``*`` on the wrong side
+    matches Finnish inflections and compounds ("epit*" covers epittä and
+    epitävaikutuksia): the matched stem becomes the canonical term, and a
+    surviving suffix of at least three characters (leading vowel joints
+    stripped) is re-attached with a hyphen ("EBITDA-vaikutuksia").
     """
     compiled: list[tuple[re.Pattern[str], Any]] = []
     for wrong, right in corrections.items():
@@ -146,16 +148,20 @@ def _compile_corrections(
             stem = re.escape(wrong[:-1])
             pattern = re.compile(rf"\b{stem}(\w*)", re.IGNORECASE)
 
-            def _repl(match: re.Match[str], right: str = right) -> str:
+            def _repl_prefix(match: re.Match[str], r: str = right) -> str:
                 suffix = match.group(1).lstrip("aeiouyäö")
                 if len(suffix) >= 3:
-                    return f"{right}-{suffix}"
-                return right
+                    return f"{r}-{suffix}"
+                return r
 
-            compiled.append((pattern, _repl))
+            compiled.append((pattern, _repl_prefix))
         else:
+
+            def _repl_whole(match: re.Match[str], r: str = right) -> str:
+                return r
+
             compiled.append(
-                (re.compile(rf"\b{re.escape(wrong)}\b", re.IGNORECASE), right)
+                (re.compile(rf"\b{re.escape(wrong)}\b", re.IGNORECASE), _repl_whole)
             )
     return compiled
 
