@@ -102,20 +102,27 @@ def _reset_notice() -> None:
 
 
 def reset_run_log() -> None:
-    """Reset the once-per-run notice flag (test helper; design 5)."""
+    """Reset the run-log module state (test helper): the once-per-run notice
+    flag, the re-entrancy guard, and the sanitised-collision owner map."""
     _reset_notice()
+    _open_paths.clear()
+    _stem_owner.clear()
 
 
 # --- re-entrant span guard ------------------------------------------------
-# ``_open_stems`` is the set of stems that currently have an open ``file_log``
-# span in this process. The guard makes the span re-entrant-safe: a nested
-# ``file_log`` for the SAME stem is a no-op (the outer handler already owns
-# the file — a nested ``mode="w"`` handler would truncate the log mid-run and
-# the detach would strip the outer handler from every logger). Different stems
-# are never nested in practice, but the guard is per-stem so a hypothetical
-# same-stem nesting can never lose records.
+# ``_open_paths`` is the set of LOG PATHS that currently have an open
+# ``file_log`` span in this process. The guard makes the span re-entrant-
+# safe: a nested ``file_log`` whose path is already owned by an open span
+# is a no-op (the outer handler owns the file — a nested ``mode="w"``
+# handler would truncate the log mid-run and the detach would strip the
+# outer handler from every logger). Two DISTINCT raw stems are never the
+# same key, so a sanitised collision (``a/b`` vs ``a_b``) can never be
+# treated as one span: ``_log_path`` disambiguates the second one to
+# ``<sanitised>.2.log`` (and ``.3`` ...) deterministically, so distinct
+# inputs never share a log. (In practice the four CLI seams pass bare
+# filename stems with no ``/``, so the disambiguation is defensive.)
 
-_open_stems: set[str] = set()
+_open_paths: set[str] = set()
 
 
 # --- run context (design 5) ----------------------------------------------
@@ -255,8 +262,38 @@ def _sanitise_stem(stem: str) -> str:
     return stem.replace("/", "_").replace("\x00", "_")
 
 
+# Maps a sanitised name to the raw stem that owns its ``.log``/``.N`` file
+# in this process, so a re-run over the SAME raw stem keeps (and truncates)
+# its own file, while a DIFFERENT raw stem that sanitises to the same name
+# deterministically gets ``.2.log``, ``.3.log", ...`` and never shares a
+# log with the owner. (In practice the four CLI seams pass bare filename
+# stems with no ``/``, so the disambiguation is defensive for hostile stems.)
+_stem_owner: dict[str, str] = {}
+
+
 def _log_path(base_dir: Path, stem: str) -> Path:
-    return base_dir / LOG_DIR_NAME / LOG_SUBDIR / f"{_sanitise_stem(stem)}.log"
+    """The log path for *stem*, disambiguating sanitised collisions.
+
+    Two different raw stems that sanitise to the same name (``a/b`` and
+    ``a_b``) would otherwise share one file; the second (and any later)
+    colliding raw stem deterministically gets ``<sanitised>.2.log``,
+    ``<sanitised>.3.log", ...`` — the first raw stem keeps the plain name,
+    so a re-run over the same input still truncates its own log and distinct
+    inputs never share a log (see ``_stem_owner``).
+    """
+    sanitised = _sanitise_stem(stem)
+    base = base_dir / LOG_DIR_NAME / LOG_SUBDIR
+    if _stem_owner.get(sanitised) == stem:
+        # A re-run over the same raw stem keeps its own (plain) file.
+        return base / f"{sanitised}.log"
+    if sanitised not in _stem_owner:
+        _stem_owner[sanitised] = stem
+        return base / f"{sanitised}.log"
+    n = 2
+    while f"{sanitised}.{n}" in _stem_owner:
+        n += 1
+    _stem_owner[f"{sanitised}.{n}"] = stem
+    return base / f"{sanitised}.{n}.log"
 
 
 def _notice(message: str, quiet: bool | None) -> None:
@@ -368,7 +405,9 @@ def file_log(
     """Write ``base_dir/.vemoizer/logs/<stem>.log`` for the duration.
 
     *stem* is the already-NFC stem (or a group's first-part label); ``/``
-    and NUL are sanitised so the path cannot escape the log directory.
+    and NUL are sanitised so the path cannot escape the log directory, and
+    two different raw stems that sanitise to the same name are written to
+    distinct files (``<sanitised>.log`` and ``<sanitised>.2.log``).
     *base_dir* defaults to the CWD. *verbose* / *quiet* default to the
     run context set by :func:`configure` (design 5).
 
@@ -376,8 +415,9 @@ def file_log(
     modes, and — only when ``huggingface_hub.propagate`` is False — to the
     ``huggingface_hub`` logger directly (never twice, design 1). When the
     span opens it writes its own first record — one INFO ``log started
-    for <stem>`` line — so the log is never indistinguishable from an
-    empty file; a nested same-stem span (a no-op) adds no second line.
+    for <original stem>`` line — so the log is never indistinguishable
+    from an empty file; a nested span writing to the same file (a no-op)
+    adds no second line.
 
     Fail-open: any error creating the directory/file degrades to no file
     logging with at most one short stderr notice per invocation (design 5);
@@ -389,13 +429,13 @@ def file_log(
     path = _log_path(base, stem)
     eff_verbose = verbose if verbose is not None else _context.verbose
     eff_quiet = quiet if quiet is not None else _context.quiet
-    key = _sanitise_stem(stem)
-    if key in _open_stems:
-        # Re-entrant: the outer span for this stem already owns the file
+    key = str(path)
+    if key in _open_paths:
+        # Re-entrant: an outer span for this exact log file is already open
         # (a nested open would truncate it mid-run). Yield a no-op.
         yield
         return
-    _open_stems.add(key)
+    _open_paths.add(key)
     handler: _QuietFileHandler | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -407,17 +447,18 @@ def file_log(
         with contextlib.suppress(OSError):
             path.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600 (best-effort)
     except Exception as e:  # noqa: BLE001 - fail-open: never change the run
-        _open_stems.discard(key)
+        _open_paths.discard(key)
         _notice(f"vemoizer: could not open run log {path}: {e}", quiet=eff_quiet)
         yield
         return
     assert handler is not None
     undo = _attach(handler, bool(eff_verbose))
     try:
-        # The span's own first record: one "log started" line per open span.
-        logging.getLogger("vemoizer.run_log").info("log started for %s", key)
+        # The span's own first record: one "log started" line per open span,
+        # naming the ORIGINAL stem (the sanitised path is only for the file).
+        logging.getLogger("vemoizer.run_log").info("log started for %s", stem)
         yield
     finally:
         _detach(undo)
         handler.close()
-        _open_stems.discard(key)
+        _open_paths.discard(key)

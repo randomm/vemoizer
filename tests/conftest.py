@@ -241,6 +241,7 @@ def _snapshot_all_loggers() -> dict[str, tuple[list[logging.Handler], int, bool]
 
 def _restore_all_loggers(
     snap: dict[str, tuple[list[logging.Handler], int, bool]],
+    handler_filters: dict[int, list[logging._FilterType]] | None = None,
 ) -> None:
     """Restore the three loggers to their snapshot."""
     for name, (handlers, level, propagate) in snap.items():
@@ -251,6 +252,14 @@ def _restore_all_loggers(
             lg.addHandler(h)
         lg.setLevel(level)
         lg.propagate = propagate
+        if handler_filters is not None:
+            for h in lg.handlers:
+                snap_filters = handler_filters.get(id(h))
+                if snap_filters is not None:
+                    for f in list(h.filters):
+                        h.removeFilter(f)
+                    for f in snap_filters:
+                        h.addFilter(f)
 
 
 @pytest.fixture(autouse=True)
@@ -271,16 +280,7 @@ def _guard_logging_state():
             handler_filters[id(h)] = _handler_filter_snapshot(h)
     yield
     _assert_logging_state(before)
-    _restore_all_loggers(before)
-    for name, (_handlers, _level, _prop) in before.items():
-        lg = logging.getLogger(name)
-        for h in lg.handlers:
-            snap = handler_filters.get(id(h))
-            if snap is not None:
-                for f in list(h.filters):
-                    h.removeFilter(f)
-                for f in snap:
-                    h.addFilter(f)
+    _restore_all_loggers(before, handler_filters)
 
 
 def _assert_logging_state(

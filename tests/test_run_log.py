@@ -15,6 +15,10 @@ directly):
   vemoizer WARNING lands in the file (and on stderr via last-resort when
   no root handler exists);
 - hostile stems (``/`` and NUL) cannot escape the log directory;
+- two distinct raw stems whose sanitised forms collide (``a/b`` vs ``a_b``)
+  get distinct log files (``a_b.log`` / ``a_b.2.log``), never shared;
+- the ``log started for <stem>`` line names the ORIGINAL stem (``sub/memo``)
+  while the file uses the sanitised name (``sub_memo.log``);
 - the redaction formatter rewrites ``hf_…``, ``Bearer …`` (case-
   insensitive), and the configured LLM API-key value in both the message
   and the exception text;
@@ -103,6 +107,59 @@ class TestLogFile:
         assert entries[0].parent == logs
         assert "/" not in entries[0].name
         assert "\x00" not in entries[0].name
+
+    def test_sanitised_collision_gets_distinct_log_files(self, tmp_path: Path):
+        """Item 1: two DISTINCT raw stems whose sanitised forms collide
+        (``a/b`` and ``a_b``) must never be treated as the same span — the
+        first keeps ``a_b.log`` and the second deterministically gets
+        ``a_b.2.log`` (the guard is keyed by the log path, not the
+        sanitised stem). Nothing is shared or truncated."""
+        with file_log("a/b", base_dir=tmp_path, verbose=False, quiet=True):
+            logging.getLogger("vemoizer.t").info("first span activity")
+        with file_log("a_b", base_dir=tmp_path, verbose=False, quiet=True):
+            logging.getLogger("vemoizer.t").info("second span activity")
+        names = sorted(p.name for p in _logs_dir(tmp_path).iterdir())
+        assert names == ["a_b.2.log", "a_b.log"]
+        first = (_logs_dir(tmp_path) / "a_b.log").read_text(encoding="utf-8")
+        second = (_logs_dir(tmp_path) / "a_b.2.log").read_text(encoding="utf-8")
+        assert "first span activity" in first
+        assert "second span activity" not in first
+        assert "second span activity" in second
+        assert "first span activity" not in second
+        # Each file has exactly its own start line, naming its own raw stem.
+        assert first.count("log started for a/b") == 1
+        assert second.count("log started for a_b") == 1
+
+    def test_sanitised_collision_nested_gets_distinct_log_files(self, tmp_path: Path):
+        """Item 1: a collision pair with the colliding stem NESTED inside the
+        first still gets its own file (``a_b.2.log``) — the guard must not
+        no-op the nested span because the sanitised forms match."""
+        with file_log("a/b", base_dir=tmp_path, verbose=False, quiet=True):
+            logging.getLogger("vemoizer.t").info("outer")
+            with file_log("a_b", base_dir=tmp_path, verbose=False, quiet=True):
+                logging.getLogger("vemoizer.t").info("inner distinct")
+            logging.getLogger("vemoizer.t").info("outer two")
+        names = sorted(p.name for p in _logs_dir(tmp_path).iterdir())
+        assert names == ["a_b.2.log", "a_b.log"]
+        inner = (_logs_dir(tmp_path) / "a_b.2.log").read_text(encoding="utf-8")
+        assert "log started for a_b" in inner
+        assert "inner distinct" in inner
+        # The outer file keeps its records around the nested span and is not
+        # truncated by the nested span's open.
+        outer = (_logs_dir(tmp_path) / "a_b.log").read_text(encoding="utf-8")
+        assert "outer" in outer
+        assert "outer two" in outer
+        assert outer.index("outer") < outer.index("outer two")
+
+    def test_start_line_logs_original_stem_not_sanitised(self, tmp_path: Path):
+        """Item 2: the ``log started for %s`` line names the ORIGINAL stem
+        (``sub/memo``), while the file is the sanitised ``sub_memo.log"."""
+        with file_log("sub/memo", base_dir=tmp_path, verbose=False, quiet=True):
+            pass
+        log = _logs_dir(tmp_path) / "sub_memo.log"
+        text = log.read_text(encoding="utf-8")
+        assert "log started for sub/memo" in text
+        assert "log started for sub_memo" not in text
 
     def test_default_base_dir_is_cwd(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)

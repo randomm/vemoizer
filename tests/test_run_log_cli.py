@@ -345,15 +345,15 @@ def test_meeting_grouped_configure_once(tmp_path, monkeypatch):
 # --- real configure (not mocked): end-to-end with file_log seam ---------------
 
 
-def test_transcribe_real_configure_file_log_written(tmp_path, monkeypatch):
-    """With the real (un-mocked) ``configure()`` and a real ``file_log``
-    seam, the run log file is created at the expected path."""
+def test_transcribe_wires_file_log_with_stem(tmp_path, monkeypatch):
+    """Transcribe wiring: with the real (un-mocked) ``configure()`` the
+    seam calls the ``file_log`` seam exactly once with the file's NFC
+    stem. ``file_log`` is patched here (no log file is created — the real
+    on-disk test lives in ``test_run_log_paths``)."""
     touch_files(["a.m4a"], tmp_path)
     record: list[str] = []
     fake_transcribe(monkeypatch, record)
     isolate_home(monkeypatch, tmp_path)
-    # Patch file_log to verify it was called with the right stem, but
-    # let the real configure() run.
     with _patch_file_log() as mock_fl:
         result = runner.invoke(app, ["transcribe", "a.m4a"])
     assert result.exit_code == 0
@@ -365,8 +365,11 @@ def test_transcribe_real_configure_file_log_written(tmp_path, monkeypatch):
     assert stem == "a"
 
 
-def test_meeting_real_configure_file_log_written(tmp_path, monkeypatch):
-    """Meeting: real configure() + patched file_log; verify stem."""
+def test_meeting_wires_file_log_with_stem(tmp_path, monkeypatch):
+    """Meeting wiring: real ``configure()``; the seam calls the ``file_log``
+    seam exactly once with the file's NFC stem (``file_log`` patched — no
+    log file is created; the real on-disk test lives in
+    ``test_run_log_paths``)."""
     touch_files(["a.m4a"], tmp_path)
     record: list[str] = []
     fake_transcribe(monkeypatch, record, title="Team Sync")
@@ -380,8 +383,11 @@ def test_meeting_real_configure_file_log_written(tmp_path, monkeypatch):
     assert stem == "a"
 
 
-def test_memo_real_configure_file_log_written(tmp_path, monkeypatch):
-    """Memo: real configure() + patched file_log; verify stem."""
+def test_memo_wires_file_log_with_stem(tmp_path, monkeypatch):
+    """Memo wiring: real ``configure()``; the seam calls the ``file_log``
+    seam exactly once with the file's NFC stem (``file_log`` patched — no
+    log file is created; the real on-disk test lives in
+    ``test_run_log_paths``)."""
     touch_files(["a.m4a"], tmp_path)
     record: list[str] = []
     fake_transcribe(monkeypatch, record)

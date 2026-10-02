@@ -152,9 +152,10 @@ def test_run_log_coverage_matrix(
         text = p.read_text(encoding="utf-8")
         assert text.strip(), f"{name} is empty"
         # The span's own start line is present exactly once (item 5):
-        # a re-entrant no-op span adds no second one.
-        stem = p.stem
-        start_line = f"log started for {stem}"
+        # a re-entrant no-op span adds no second one. (The start line names
+        # the ORIGINAL raw stem, which is the same as the log's filename
+        # stem in these cases — the fakes use bare stems with no ``/``.)
+        start_line = f"log started for {p.stem}"
         assert text.count(start_line) == 1, f"{name}: start line count != 1"
 
 
