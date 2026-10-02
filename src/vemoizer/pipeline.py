@@ -29,7 +29,7 @@ from .canary_transcriber import CanaryTranscriber
 from .confidence import flag_suspect_segments
 from .decode_stage import decode_all
 from .diarization import ATTRIBUTION as DIARIZATION_ATTRIBUTION
-from .diarization import SpeakerCount, diarize, speaker_for_span
+from .diarization import SpeakerCount, run_diarization_stage, speaker_for_span
 from .glossary import (
     apply_corrections,
     glossary_prompt,
@@ -326,6 +326,22 @@ def transcribe_file(
     if profile not in PROFILES:
         known = ", ".join(PROFILES)
         raise ValueError(f"unknown profile {profile!r} (known: {known})")
+
+    # Inline preflight (issue #79): ~2s, fully local (no network) — ffmpeg,
+    # config parse, all pinned models cached, and the HF token when the
+    # meeting profile runs or diarization is requested (spec d4: the token
+    # check fires when profile=="meeting" OR diarize; a meeting run with
+    # --no-diarize still goes through the gated-model path).  A red check
+    # aborts before a single decode, so a gated pyannote model cannot fail
+    # open into a long run with no speaker labels (M1).
+    from .preflight import preflight_gate
+
+    gate = preflight_gate(
+        diarize=diarize, profile=profile, echo=lambda line: logger.error(line)
+    )
+    if gate is not None:
+        return gate
+
     run_start = time.monotonic()
     logger.info("transcribe: %s (profile: %s)", path, profile)
     ingest_start = time.monotonic()
@@ -411,7 +427,7 @@ def transcribe_file(
     if diarize:
         logger.info("diarization: starting")
         diarize_start = time.monotonic()
-        speaker_segments = _run_diarization_stage(audio, speakers)
+        speaker_segments = run_diarization_stage(audio, speakers)
         diarization_ran = speaker_segments is not None
         logger.info(
             "diarization: %s speaker segments in %s",
@@ -479,22 +495,3 @@ def transcribe_file(
         len(result.get("segments", [])),
     )
     return result
-
-
-def _run_diarization_stage(
-    audio: np.ndarray,
-    speakers: SpeakerCount | None = None,
-) -> list[tuple[float, float, str]] | None:
-    """Run the diarization stage; ``None`` (fail-open) on any failure.
-
-    ``None`` and ``[]`` are distinct to callers: the orchestrator passes
-    ``None`` when diarization was skipped or failed, and ``[]`` when the
-    stage ran but found no speakers — either way the downstream overlap step
-    leaves the ``speaker`` key off every segment.
-    """
-    try:
-        result = diarize(audio, num_speakers=speakers)
-    except Exception as e:  # noqa: BLE001 - fail-open stage boundary
-        logger.warning("diarization failed, continuing without speaker labels: %s", e)
-        return None
-    return list(result.segments)

@@ -20,7 +20,7 @@ config/glossary search never sees the dev machine's live
 
 from __future__ import annotations
 
-from test_pipeline import _llm_config, _patch_ingest, _patch_vad
+from test_pipeline import _llm_config, _patch_ingest, _patch_preflight_pass, _patch_vad
 
 import vemoizer.batch as batch
 import vemoizer.pipeline as pipeline
@@ -95,6 +95,7 @@ def test_transcribe_file_real_glossary_at_terms_end_to_end(
 
     seen: dict = {}
     _clean_env(monkeypatch, tmp_path)
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     _patch_whisper_meeting(monkeypatch, seen)
@@ -132,6 +133,7 @@ def test_transcribe_file_real_glossary_at_only_gives_no_prompt(
 
     seen: dict = {}
     _clean_env(monkeypatch, tmp_path)
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     _patch_whisper_meeting(monkeypatch, seen)

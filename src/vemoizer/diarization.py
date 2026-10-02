@@ -18,12 +18,16 @@ from dataclasses import dataclass
 
 import numpy as np
 
-#: HuggingFace repo for the diarization weights (CC-BY-4.0, gated).
-DIARIZATION_REPO_ID = "pyannote/speaker-diarization-community-1"
+from .models import get_model
+
+#: HuggingFace repo for the diarization weights (CC-BY-4.0, gated), read
+#: from the central registry so no repo/SHA pair lives in two places
+#: (issue #79); the drift test in tests/test_cli_models.py pins it.
+DIARIZATION_REPO_ID = get_model("pyannote").repo_id
 
 #: Pinned full-SHA commit of the diarization weights (invariant #4): loading
 #: from a bare repo ID would cache a moving ref.
-DIARIZATION_REVISION = "3533c8cf8e369892e6b79ff1bf80f7b0286a54ee"
+DIARIZATION_REVISION = get_model("pyannote").revision
 
 #: Mandatory CC-BY-4.0 attribution (weights license, not code license).
 ATTRIBUTION = (
@@ -156,3 +160,26 @@ def speaker_for_span(
             best_overlap = overlap
             best = speaker
     return best
+
+
+def run_diarization_stage(
+    audio: np.ndarray,
+    speakers: SpeakerCount | None = None,
+) -> list[tuple[float, float, str]] | None:
+    """Run the diarization stage; ``None`` (fail-open) on any failure.
+
+    ``None`` and ``[]`` are distinct to callers: the orchestrator passes
+    ``None`` when diarization was skipped or failed, and ``[]`` when the
+    stage ran but found no speakers — either way the downstream overlap step
+    leaves the ``speaker`` key off every segment.
+    """
+    try:
+        result = diarize(audio, num_speakers=speakers)
+    except Exception as e:  # noqa: BLE001 - fail-open stage boundary
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "diarization failed, continuing without speaker labels: %s", e
+        )
+        return None
+    return list(result.segments)

@@ -355,17 +355,14 @@ def run_preset(
                 effective_glossary = str(temp_path)
         else:
             effective_glossary = options.glossary_path
-            # Memo seam with an explicit --glossary (issue #82): the file
-            # replaces both layers, but the whisper initial_prompt must
-            # stay empty — so filter it to correction pairs only (same
-            # invariant as the layered memo path) via a temp file.
+            # Memo explicit --glossary (issue #82): correction pairs only
+            # (whisper prompt stays empty). A non-UTF-8 file raises
+            # ValueError, caught below (one clean line; finally cleans up).
             if command == "memo":
                 from vemoizer.glossary import load_corrections
 
-                lines = [
-                    f"{w} => {r}"
-                    for w, r in load_corrections(effective_glossary).items()
-                ]
+                corr = load_corrections(effective_glossary)
+                lines = [f"{w} => {r}" for w, r in corr.items()]
                 if lines:
                     temp_path = Path(_write_temp_glossary(lines))
                     effective_glossary = str(temp_path)
@@ -487,6 +484,12 @@ def run_preset(
         # Temp-glossary write failure: clean error, non-zero exit, no
         # leaked file (the finally still cleans up what exists).
         typer.echo(f"error: could not write glossary: {e}", err=True)
+        return 1
+    except ValueError as e:
+        # Non-UTF-8 layered glossary (loader re-raises UnicodeDecodeError
+        # as ValueError, issue #79): one clean line, no traceback, no
+        # leaked file (the finally still cleans up).
+        typer.echo(f"error: glossary {glossary_path}: {e}", err=True)
         return 1
     finally:
         # The temp glossary file is deleted after the run (issue #82).

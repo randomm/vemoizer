@@ -47,6 +47,7 @@ from typing import Any
 import mlx.core as mx
 import numpy as np
 
+from .models import get_model
 from .spans import Span
 from .transcriber import TranscriptionResult
 
@@ -56,11 +57,12 @@ logger = logging.getLogger(__name__)
 #: (base_model: Finnish-NLP/whisper-large-finnish-v3). mlx-whisper cannot
 #: consume the raw HF transformers checkpoint, and the pip package ships no
 #: converter — the MLX port is the load repo, same pattern as decode B's
-#: Canary port (see docs/pipeline-spec.md).
-MODEL_ID = "FredrikKarlssonSpeech/whisper-large-finnish-v3-mlx"
-#: Pinned commit on the model repo so upstream pushes cannot change the
-#: weights we run (project invariant #4).
-MODEL_REVISION = "f51f0310c1b2a3e5acb16905c1a7245bb9476846"
+#: Canary port (see docs/pipeline-spec.md). Read from the central
+#: registry so no repo/SHA pair lives in two places (issue #79); the
+#: pinned commit keeps upstream pushes from changing the weights we run
+#: (project invariant #4).
+MODEL_ID = get_model("whisper-finnish").repo_id
+MODEL_REVISION = get_model("whisper-finnish").revision
 
 #: Sample rate of the audio contract (project invariant #6).
 SAMPLE_RATE = 16_000

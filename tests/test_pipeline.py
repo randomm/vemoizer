@@ -3,6 +3,11 @@
 All stages are mocked — no models, no network, no ffmpeg. The orchestrator's
 job is to chain ingest -> VAD -> decode A -> decode B -> align -> disputed
 spans -> re-decode -> LLM adjudicate, and to fail open at every stage.
+
+``_preflight_ok`` is an autouse fixture that forces the inline preflight
+(issue #79) to pass, so the decode-stage tests don't need real model
+caches or a real HF token.  Individual preflight tests opt out by
+explicitly patching the preflight helpers.
 """
 
 from __future__ import annotations
@@ -12,10 +17,27 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import vemoizer.diarization as diarization_mod
 import vemoizer.eval_cli as eval_cli
 import vemoizer.pipeline as pipeline
+import vemoizer.preflight as preflight
 import vemoizer.progress as progress
 from vemoizer.pipeline import transcribe_file
+
+
+@pytest.fixture(autouse=True)
+def _preflight_ok(monkeypatch):
+    """Force the inline preflight green for every pipeline test.
+
+    Individual preflight tests (test_preflight_*) override these patches
+    via their own explicit monkeypatch.setattr calls, which take precedence
+    because they run after the fixture setup (monkeypatch reverts in LIFO
+    order, so the test's patch is the active one during the test body).
+    """
+    monkeypatch.setattr(preflight, "ffmpeg_ok", lambda: True)
+    monkeypatch.setattr(preflight, "config_parse_ok", lambda: True)
+    monkeypatch.setattr(preflight, "models_cached", lambda: [])
+    monkeypatch.setattr(preflight, "hf_token_present", lambda: True)
 
 
 def _audio(seconds: float = 2.0) -> np.ndarray:
@@ -24,6 +46,30 @@ def _audio(seconds: float = 2.0) -> np.ndarray:
 
 def _patch_ingest(monkeypatch) -> None:
     monkeypatch.setattr(pipeline, "ingest_audio", lambda path: _audio())
+
+
+def _patch_preflight_pass(monkeypatch) -> None:
+    """Make the inline preflight green without touching ffmpeg/HF/cache."""
+    monkeypatch.setattr(preflight, "ffmpeg_ok", lambda: True)
+    monkeypatch.setattr(preflight, "config_parse_ok", lambda: True)
+    monkeypatch.setattr(preflight, "models_cached", lambda: [])
+    monkeypatch.setattr(preflight, "hf_token_present", lambda: True)
+
+
+def _patch_preflight_ffmpeg_fail(monkeypatch) -> None:
+    """The inline preflight reports a red ffmpeg check (everything else green)."""
+    monkeypatch.setattr(preflight, "ffmpeg_ok", lambda: False)
+    monkeypatch.setattr(preflight, "config_parse_ok", lambda: True)
+    monkeypatch.setattr(preflight, "models_cached", lambda: [])
+    monkeypatch.setattr(preflight, "hf_token_present", lambda: True)
+
+
+def _patch_preflight_token_fail(monkeypatch) -> None:
+    """The inline preflight reports a red HF-token check (diarize=True only)."""
+    monkeypatch.setattr(preflight, "ffmpeg_ok", lambda: True)
+    monkeypatch.setattr(preflight, "config_parse_ok", lambda: True)
+    monkeypatch.setattr(preflight, "models_cached", lambda: [])
+    monkeypatch.setattr(preflight, "hf_token_present", lambda: False)
 
 
 def _patch_vad(monkeypatch) -> None:
@@ -137,7 +183,7 @@ def _patch_diarize(
         segs = default if segments is None else segments
         return DiarizationResult(segments=list(segs))
 
-    monkeypatch.setattr(pipeline, "diarize", _fake_diarize)
+    monkeypatch.setattr(diarization_mod, "diarize", _fake_diarize)
 
 
 def _patch_redecode(monkeypatch, text: str = "moottori") -> None:
@@ -239,10 +285,14 @@ def test_fail_open_on_ingest_error(monkeypatch) -> None:
 
 
 def test_empty_audio_short_circuits(monkeypatch) -> None:
+    _patch_preflight_pass(monkeypatch)
     monkeypatch.setattr(pipeline, "ingest_audio", lambda path: _audio(0.0))
     result = transcribe_file("/nonexistent.m4a")
     assert result["text"] == ""
     assert result["segments"] == []
+
+
+# The inline preflight tests (issue #79, M7) live in test_inline_preflight.py
 
 
 def test_diarize_off_by_default_skips_diarization(tmp_path, monkeypatch) -> None:
@@ -258,7 +308,7 @@ def test_diarize_off_by_default_skips_diarization(tmp_path, monkeypatch) -> None
     def _boom(audio, **kw):
         raise AssertionError("diarize() must not be called when diarize=False")
 
-    monkeypatch.setattr(pipeline, "diarize", _boom)
+    monkeypatch.setattr(diarization_mod, "diarize", _boom)
     result = transcribe_file("/nonexistent.m4a")
     assert result["segments"] == []
 
@@ -602,6 +652,7 @@ def test_decode_only_backend_failure_fails_open(monkeypatch) -> None:
 
 
 def _consensus_setup(monkeypatch, *, b_words=None):
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     words_a = [

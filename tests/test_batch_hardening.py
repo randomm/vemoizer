@@ -28,7 +28,7 @@ import os
 from pathlib import Path
 
 import pytest
-from test_pipeline import _llm_config, _patch_ingest, _patch_vad
+from test_pipeline import _llm_config, _patch_ingest, _patch_preflight_pass, _patch_vad
 
 import vemoizer.batch as batch
 import vemoizer.llm as llm
@@ -100,7 +100,12 @@ def _fake_result() -> dict:
 
 def _patch_transcribe(monkeypatch, fake) -> None:
     """Patch ``vemoizer.pipeline.transcribe_file`` (the name both batch
-    entry points resolve through their local imports)."""
+    entry points resolve through their local imports).  Patches the
+    preflight pass too so the patched ``transcribe_file``'s import is
+    consistent (issue #79 inline preflight)."""
+    from test_pipeline import _patch_preflight_pass
+
+    _patch_preflight_pass(monkeypatch)
     monkeypatch.setattr(pipeline, "transcribe_file", fake)
 
 
@@ -111,6 +116,7 @@ def test_at_terms_reach_llm_tail_not_whisper_prompt(tmp_path, monkeypatch) -> No
     """transcribe_file with an @-term glossary: the whisper prompt never
     contains the @-term; repair and notes receive it with the @ stripped."""
     seen: dict = {}
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     _patch_whisper_meeting(monkeypatch, seen)
@@ -143,6 +149,7 @@ def test_at_only_glossary_yields_empty_whisper_prompt(tmp_path, monkeypatch) -> 
     """A glossary of @-terms only must leave the whisper prompt None while
     still delivering the @-stripped terms to repair and notes."""
     seen: dict = {}
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     _patch_whisper_meeting(monkeypatch, seen)
@@ -169,6 +176,7 @@ def test_at_term_with_space_is_stripped_for_llm_tail(tmp_path, monkeypatch) -> N
     the repair/notes stages as ``Janni`` — the strip is ``t[1:].lstrip()``.
     """
     seen: dict = {}
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     _patch_whisper_meeting(monkeypatch, seen)

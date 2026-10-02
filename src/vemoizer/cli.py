@@ -33,6 +33,7 @@ import typer
 from vemoizer.battery import on_battery
 from vemoizer.diarization import SpeakerCount
 from vemoizer.eval_cli import register_eval
+from vemoizer.glossary_check import register_glossary
 from vemoizer.low_memory import apply_low_memory_mode, default_low_memory
 from vemoizer.names_cli import register_names
 from vemoizer.render_cli import register_render
@@ -51,6 +52,19 @@ app.add_typer(models_app, name="models")
 register_eval(app)
 register_render(app)
 register_names(app)
+
+
+register_glossary(app)
+
+
+@app.command()
+def doctor() -> None:
+    """Run local health checks; exit non-zero on any red check."""
+    from .doctor import run_doctor
+
+    report = run_doctor(echo=lambda line: typer.echo(line))
+    if not report.ok:
+        raise typer.Exit(code=1)
 
 
 def _warn_on_battery() -> None:

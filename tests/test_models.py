@@ -36,6 +36,14 @@ EXPECTED = {
         "FredrikKarlssonSpeech/whisper-large-finnish-v3-mlx",
         "f51f0310c1b2a3e5acb16905c1a7245bb9476846",
     ),
+    "whisper-turbo": (
+        "mlx-community/whisper-large-v3-turbo",
+        "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb",
+    ),
+    "pyannote": (
+        "pyannote/speaker-diarization-community-1",
+        "3533c8cf8e369892e6b79ff1bf80f7b0286a54ee",
+    ),
 }
 
 _HEX40 = "0123456789abcdef"
@@ -50,9 +58,15 @@ def _entry(name: str) -> ModelEntry:
 # ---------------------------------------------------------------------------
 
 
-def test_registry_has_exactly_three_models() -> None:
-    assert sorted(MODEL_REGISTRY) == ["canary", "parakeet", "whisper-finnish"]
-    assert len(MODELS) == 3
+def test_registry_has_exactly_five_models() -> None:
+    assert sorted(MODEL_REGISTRY) == [
+        "canary",
+        "parakeet",
+        "pyannote",
+        "whisper-finnish",
+        "whisper-turbo",
+    ]
+    assert len(MODELS) == 5
 
 
 def test_models_tuple_is_in_pipeline_order() -> None:
@@ -60,6 +74,8 @@ def test_models_tuple_is_in_pipeline_order() -> None:
         "parakeet",
         "canary",
         "whisper-finnish",
+        "whisper-turbo",
+        "pyannote",
     ]
 
 
@@ -108,7 +124,7 @@ def test_get_model_unknown_raises_keyerror_with_known_names() -> None:
     with pytest.raises(KeyError) as exc:
         get_model("gpt-so-v4")
     message = str(exc.value)
-    for name in ("canary", "parakeet", "whisper-finnish"):
+    for name in ("canary", "parakeet", "pyannote", "whisper-finnish", "whisper-turbo"):
         assert name in message
 
 
@@ -163,11 +179,13 @@ def test_pull_model_result_is_str() -> None:
         assert isinstance(pull_model("canary"), str)
 
 
-def test_pull_all_warms_all_three_in_pipeline_order() -> None:
+def test_pull_all_warms_all_five_in_pipeline_order() -> None:
     paths = {
         "parakeet": "/p",
         "canary": "/c",
         "whisper-finnish": "/w",
+        "whisper-turbo": "/t",
+        "pyannote": "/d",
     }
     with patch("huggingface_hub.snapshot_download") as snap:
         snap.side_effect = lambda repo_id, **kw: {
@@ -176,13 +194,18 @@ def test_pull_all_warms_all_three_in_pipeline_order() -> None:
             "FredrikKarlssonSpeech/whisper-large-finnish-v3-mlx": paths[
                 "whisper-finnish"
             ],
+            "mlx-community/whisper-large-v3-turbo": paths["whisper-turbo"],
+            "pyannote/speaker-diarization-community-1": paths["pyannote"],
         }[repo_id]
         result = pull_all()
 
     assert result == paths
-    assert snap.call_count == 3
+    assert snap.call_count == 5
     order = [c.args[0] for c in snap.call_args_list]
-    assert order == [EXPECTED[n][0] for n in ("parakeet", "canary", "whisper-finnish")]
+    assert order == [
+        EXPECTED[n][0]
+        for n in ("parakeet", "canary", "whisper-finnish", "whisper-turbo", "pyannote")
+    ]
 
 
 def test_pull_all_revises_every_call_with_full_sha() -> None:

@@ -309,7 +309,7 @@ def test_render_non_utf8_glossary_warns_and_proceeds(
     assert result.exit_code == 0
     # The warning names the exception class, not raw exception text.
     assert "warning: could not read glossary" in result.stderr
-    assert "UnicodeDecodeError" in result.stderr
+    assert "ValueError" in result.stderr
     md_files = list(tmp_path.glob("*.md"))
     assert len(md_files) == 1
 

@@ -15,10 +15,12 @@ from test_pipeline import (  # noqa: F401 - shared orchestrator fixtures
     _patch_decoders,
     _patch_diarize,
     _patch_ingest,
+    _patch_preflight_pass,
     _patch_redecode,
     _patch_vad,
 )
 
+import vemoizer.diarization as diarization_mod
 import vemoizer.pipeline as pipeline
 from vemoizer.pipeline import transcribe_file
 
@@ -139,6 +141,7 @@ def _patch_whisper_a(monkeypatch, text="hei maailma"):
 def test_meeting_profile_is_whisper_only_no_consensus(tmp_path, monkeypatch) -> None:
     """Measured (issue #71): consensus rewriting on top of the whole-file
     Whisper read injects noise. The meeting profile runs NO other decoder."""
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     _patch_whisper_a(monkeypatch)
@@ -164,6 +167,7 @@ def test_meeting_profile_is_whisper_only_no_consensus(tmp_path, monkeypatch) -> 
 def test_meeting_profile_whisper_failure_fails_open_to_empty(
     tmp_path, monkeypatch
 ) -> None:
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
 
@@ -195,6 +199,7 @@ def test_unknown_profile_raises() -> None:
 
 
 def test_dictation_profile_never_touches_whisper(tmp_path, monkeypatch) -> None:
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
 
@@ -260,6 +265,7 @@ def test_speakers_attach_to_all_segments_not_just_verdicts(
     """Regression (issue #71 QA): in the whisper-only meeting path there are
     zero verdicts, so speaker labels attached only to verdicts meant
     diarization ran and was then thrown away."""
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     _patch_whisper_a(monkeypatch)
@@ -276,6 +282,7 @@ def test_speakers_attach_to_all_segments_not_just_verdicts(
 
 
 def test_paragraphs_exist_even_without_disputes(tmp_path, monkeypatch) -> None:
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     _patch_whisper_a(monkeypatch)
@@ -291,6 +298,7 @@ def test_paragraphs_exist_even_without_disputes(tmp_path, monkeypatch) -> None:
 def test_glossary_reaches_whisper_and_notes(tmp_path, monkeypatch) -> None:
     """The glossary must reach the recognizer (initial_prompt) and the
     notes stage (canonical spellings) — issue #71 QA."""
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     gl = tmp_path / "glossary.txt"
@@ -336,6 +344,7 @@ def test_glossary_reaches_whisper_and_notes(tmp_path, monkeypatch) -> None:
 def test_speakers_hint_reaches_diarization(tmp_path, monkeypatch) -> None:
     """--speakers pins pyannote clustering (5 labels for 4 people was a
     real forensics finding)."""
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     _patch_whisper_a(monkeypatch)
@@ -347,7 +356,7 @@ def test_speakers_hint_reaches_diarization(tmp_path, monkeypatch) -> None:
         seen["num_speakers"] = num_speakers
         return DiarizationResult(segments=[(0.0, 2.0, "SPEAKER_00")])
 
-    monkeypatch.setattr(pipeline, "diarize", fake_diarize)
+    monkeypatch.setattr(diarization_mod, "diarize", fake_diarize)
     transcribe_file(
         "/nonexistent.m4a",
         config_path=str(tmp_path / "none.toml"),
@@ -360,6 +369,7 @@ def test_speakers_hint_reaches_diarization(tmp_path, monkeypatch) -> None:
 
 def test_paragraph_hygiene_runs_in_the_pipeline(tmp_path, monkeypatch) -> None:
     """A recognizer repetition loop must not survive into the output."""
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
 
@@ -382,6 +392,7 @@ def test_paragraph_hygiene_runs_in_the_pipeline(tmp_path, monkeypatch) -> None:
 
 
 def test_glossary_corrections_apply_deterministically(tmp_path, monkeypatch) -> None:
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     gl = tmp_path / "glossary.txt"
@@ -409,6 +420,7 @@ def test_glossary_corrections_apply_deterministically(tmp_path, monkeypatch) -> 
 
 def test_fused_qa_splits_by_word_level_speakers(tmp_path, monkeypatch) -> None:
     """A question and answer inside ONE whisper segment must not fuse."""
+    _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
 
