@@ -220,8 +220,8 @@ class _QuietFileHandler(logging.FileHandler):
 
     ``handle`` is overridden so a write failure (ENOSPC, EROFS, ...) is
     routed to ``handleError`` — which swallows it and disables further
-    writes — instead of propagating to the caller (a mid-run write
-    failure must behave identically to no file logging, design 7).
+    writes — instead of propagating (a mid-run write failure must behave
+    identically to no file logging, design 7).
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -237,8 +237,6 @@ class _QuietFileHandler(logging.FileHandler):
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception:
-                # Fail-open: a write error (ENOSPC, EROFS, ...) must never
-                # escape the handler; disable further writes and close.
                 self.handleError(record)
         return True
 
