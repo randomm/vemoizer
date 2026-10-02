@@ -17,7 +17,10 @@ verbose mode via basicConfig's root stderr handler. ``huggingface_hub``
 is the special case: when its own ``propagate`` flag is False (HF-style
 configuration) its records never reach root, so the same file handler is
 attached to that logger directly — never twice (that would double-write
-every record), design 1.
+every record), design 1. When a span opens it writes its own first record
+— one INFO ``log started for <stem>`` line — so the log is never
+indistinguishable from an empty file; a nested same-stem span (a no-op)
+adds no second line.
 
 Privacy: a :class:`_RedactingFormatter` on the file handler rewrites the
 formatted message AND exception text, so HuggingFace access tokens
@@ -42,10 +45,36 @@ import stat
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 __all__ = ["configure", "file_log", "reset_run_log"]
+
+
+@dataclass
+class _Undo:
+    """The exact logging state one span changed (relative, identity-based).
+
+    Every field holds the *instances* this span added and the old values it
+    changed; ``_detach`` reverts only those, so anything another component
+    (pytest's ``caplog``, another thread, a library) added mid-span is left
+    untouched. Calling ``_detach`` twice is a no-op: already-removed
+    instances are gone and ``removeHandler``/``removeFilter`` by identity
+    are idempotent.
+    """
+
+    _added_handlers: list[tuple[logging.Logger, logging.Handler]] = field(
+        default_factory=list
+    )
+    _added_filters: list[tuple[logging.Handler, logging.Filter]] = field(
+        default_factory=list
+    )
+    _old_levels: list[tuple[logging.Logger, int]] = field(default_factory=list)
+
+    def record_level(self, logger: logging.Logger, old_level: int) -> None:
+        self._old_levels.append((logger, old_level))
+
 
 #: The log directory name under the base directory (the CWD by default).
 LOG_DIR_NAME = ".vemoizer"
@@ -53,10 +82,11 @@ LOG_DIR_NAME = ".vemoizer"
 #: The sub-directory that holds the per-file ``<stem>.log`` files.
 LOG_SUBDIR = "logs"
 
-#: ``hf_`` + 8-64 alphanumerics — the HuggingFace access-token shape
-#: (real tokens are 36 chars; the 64 cap stops a runaway match in a long
-#: base64 blob from eating the rest of the line).
-_HF_TOKEN_RE = re.compile(r"hf_[A-Za-z0-9]{8,64}")
+#: ``hf_`` + 8-or-more alphanumerics — the HuggingFace access-token shape
+#: (real tokens are 36 chars). The unbounded quantifier still matches in
+#: linear time (no alternation, no nested quantifier), and a token longer
+#: than any real one is redacted in full instead of leaking its tail.
+_HF_TOKEN_RE = re.compile(r"hf_[A-Za-z0-9]{8,}")
 #: ``Bearer <token>`` — any HTTP auth header form, case-insensitive.
 _BEARER_RE = re.compile(r"Bearer\s+\S+", re.IGNORECASE)
 
@@ -213,7 +243,11 @@ class _QuietFileHandler(logging.FileHandler):
 
     def handleError(self, record: logging.LogRecord) -> None:  # noqa: D102
         self._disabled = True
-        self.close()
+        # Fail-open: a close() failure (already-closed stream, EBADF, ...)
+        # must not escape the handler either — the run must behave as if
+        # the log never existed (design 7).
+        with contextlib.suppress(Exception):
+            self.close()
 
 
 def _sanitise_stem(stem: str) -> str:
@@ -236,8 +270,8 @@ def _notice(message: str, quiet: bool | None) -> None:
     print(message, file=sys.stderr)
 
 
-def _attach(handler: logging.Handler, verbose: bool) -> list[tuple[Any, Any, Any]]:
-    """Attach *handler* to the loggers that need it; return the undo list.
+def _attach(handler: logging.Handler, verbose: bool) -> _Undo:
+    """Attach *handler* to the loggers that need it; return the undo state.
 
     The file handler is attached to the ROOT logger in both modes (so
     every propagating logger writes INFO+ to the file exactly once).
@@ -247,74 +281,77 @@ def _attach(handler: logging.Handler, verbose: bool) -> list[tuple[Any, Any, Any
     venv) HF records reach the file via the root handler and attaching
     here would double-write every record.
 
-    The ROOT logger's level is raised to INFO only if it is currently
-    higher (non-verbose runs default to WARNING), so the file log
-    captures third-party INFO regardless of ``-v``; the raise is always
-    undone (state snapshot). In non-verbose mode a ``_NoThirdPartyInfoFilter``
-    is added to HF's own stream handlers (so its INFO stays off the
-    terminal) and its level is raised to INFO only if it is currently 0
-    (NOTSET); a level HF set explicitly is never lowered (design 2).
+    The ROOT logger's level is raised to INFO whenever it is currently
+    higher (non-verbose runs default to WARNING) so the file log captures
+    third-party INFO regardless of ``-v``; the raise is always undone. A
+    level that already sits at or below INFO is never touched.
 
-    Returns a list of ``(kind, target, snapshot)`` entries; ``_detach``
-    restores each to its exact snapshot (handler list, level, or
-    per-handler filters).
+    In non-verbose mode a ``_NoThirdPartyInfoFilter`` is added to the
+    terminal (non-file) stream handlers so third-party INFO stays off the
+    terminal while vemoizer INFO and WARNING+ pass; the file handler
+    itself never carries this filter — it records everything at INFO. On
+    the HF logger itself the same suppression applies to its own stream
+    handlers, and its level is raised to INFO whenever it is NOTSET or
+    above INFO (an explicit level above INFO would otherwise filter HF
+    INFO records before they reach the file, decision 2); a level at or
+    below INFO is never raised.
+
+    Returns an :class:`_Undo` recording the exact handler and filter
+    instances added and the old level values, so :func:`_detach` can revert
+    only this span's changes.
     """
-    undo: list[tuple[Any, Any, Any]] = []
     root = logging.getLogger()
     hf_logger = logging.getLogger("huggingface_hub")
     attached_to_hf = not hf_logger.propagate
-    targets: list[logging.Logger] = [root]
-    if attached_to_hf:
-        targets.append(hf_logger)
+    targets: list[logging.Logger] = [root, hf_logger] if attached_to_hf else [root]
+    undo = _Undo()
     for target in targets:
-        undo.append(("state", target, (list(target.handlers), target.level)))
         target.addHandler(handler)
-    # Raise the root level to INFO so the file log sees third-party INFO
-    # in non-verbose runs; never lower an explicitly-set level.
+        undo._added_handlers.append((target, handler))
+    # A logger level above INFO (or NOTSET, which inherits the effective
+    # level) drops INFO records before any handler sees them; raise to
+    # INFO only, and only when needed, remembering the exact old level.
     if root.level > logging.INFO:
-        undo.append(("level", root, root.level))
+        undo.record_level(root, root.level)
         root.setLevel(logging.INFO)
+    if attached_to_hf and hf_logger.level not in (10, 20):
+        # NOTSET (0) or explicitly above INFO (WARNING 30+): raise to INFO.
+        undo.record_level(hf_logger, hf_logger.level)
+        hf_logger.setLevel(logging.INFO)
     if not verbose:
         # Design 2: keep third-party INFO off the terminal in non-verbose
-        # mode. A root stderr stream handler (basicConfig's under -v, or
-        # one a third-party lib installed) gets the filter so third-party
-        # INFO stays off the terminal while vemoizer INFO and WARNING+ pass.
-        # The file handler itself never carries this filter — it records
-        # everything at INFO.
-        for h in root.handlers:
-            if isinstance(h, logging.StreamHandler) and not isinstance(
-                h, logging.FileHandler
-            ):
-                undo.append(("filters", h, list(h.filters)))
-                h.addFilter(_NoThirdPartyInfoFilter())
-        if attached_to_hf:
-            for h in list(hf_logger.handlers):
-                if isinstance(h, logging.StreamHandler):
-                    undo.append(("filters", h, list(h.filters)))
-                    h.addFilter(_NoThirdPartyInfoFilter())
-            if hf_logger.level == 0:
-                undo.append(("level", hf_logger, hf_logger.level))
-                hf_logger.setLevel(logging.INFO)
+        # mode. Terminal stream handlers (basicConfig's under -v, or one a
+        # third-party lib installed) get the filter; the file handler never
+        # does (it records everything at INFO).
+        for target in targets:
+            for h in list(target.handlers):
+                if isinstance(h, logging.StreamHandler) and not isinstance(
+                    h, logging.FileHandler
+                ):
+                    f = _NoThirdPartyInfoFilter()
+                    h.addFilter(f)
+                    undo._added_filters.append((h, f))
     return undo
 
 
-def _detach(undo: list[tuple[Any, Any, Any]]) -> None:
-    """Restore every logged logger/handler to its entry snapshot."""
-    for kind, target, snapshot in reversed(undo):
-        if kind == "state":
-            handlers, level = snapshot
-            for h in list(target.handlers):
-                target.removeHandler(h)
-            for h in handlers:
-                target.addHandler(h)
-            target.setLevel(level)
-        elif kind == "filters":
-            for f in list(target.filters):
-                target.removeFilter(f)
-            for f in snapshot:
-                target.addFilter(f)
-        else:  # "level"
-            target.setLevel(snapshot)
+def _detach(undo: _Undo) -> None:
+    """Revert exactly the handlers, filters, and levels this span changed.
+
+    Identity-based and idempotent: a handler or filter another component
+    added mid-span is never removed, a level the span did not change is
+    never touched, and calling ``_detach`` twice is a no-op. Each removal
+    and level restore is exception-guarded so one failed step cannot
+    abort the remaining restorations.
+    """
+    for logger, handler in undo._added_handlers:
+        with contextlib.suppress(Exception):
+            logger.removeHandler(handler)
+    for handler, f in undo._added_filters:
+        with contextlib.suppress(Exception):
+            handler.removeFilter(f)
+    for logger, level in undo._old_levels:
+        with contextlib.suppress(Exception):
+            logger.setLevel(level)
 
 
 # --- the public context manager (design 5/6/7) ----------------------------
@@ -337,7 +374,10 @@ def file_log(
 
     The file handler is attached to the ROOT logger at INFO level in both
     modes, and — only when ``huggingface_hub.propagate`` is False — to the
-    ``huggingface_hub`` logger directly (never twice, design 1).
+    ``huggingface_hub`` logger directly (never twice, design 1). When the
+    span opens it writes its own first record — one INFO ``log started
+    for <stem>`` line — so the log is never indistinguishable from an
+    empty file; a nested same-stem span (a no-op) adds no second line.
 
     Fail-open: any error creating the directory/file degrades to no file
     logging with at most one short stderr notice per invocation (design 5);
@@ -374,6 +414,8 @@ def file_log(
     assert handler is not None
     undo = _attach(handler, bool(eff_verbose))
     try:
+        # The span's own first record: one "log started" line per open span.
+        logging.getLogger("vemoizer.run_log").info("log started for %s", key)
         yield
     finally:
         _detach(undo)
