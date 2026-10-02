@@ -8,7 +8,6 @@ macOS UX polish (issue #14):
 - ``--copy`` — copy transcript text to the clipboard via pbcopy
 - Battery warning — warn before long transcription on battery power
 - Caffeinate — hold a wake assertion during transcription
-- ``--low-memory`` / ``--no-low-memory`` — low-memory model-loading mode
 
 Model management (issue #3):
 - ``models pull`` — pre-download the three revision-pinned consensus models
@@ -34,7 +33,6 @@ from vemoizer.battery import on_battery
 from vemoizer.diarization import SpeakerCount
 from vemoizer.eval_cli import register_eval
 from vemoizer.glossary_check import register_glossary
-from vemoizer.low_memory import apply_low_memory_mode, default_low_memory
 from vemoizer.names_cli import register_names
 from vemoizer.render_cli import register_render
 
@@ -86,19 +84,6 @@ def models_pull() -> None:
     typer.echo(render_pull_report(results, sizes))
     if any(r.error is not None for r in results):
         raise typer.Exit(code=1)
-
-
-def _resolve_low_memory(
-    low_memory: bool | None,
-) -> bool:
-    """Resolve the low-memory flag to a final boolean.
-
-    If the user explicitly set --low-memory or --no-low-memory, use that.
-    Otherwise, auto-detect based on total system RAM.
-    """
-    if low_memory is not None:
-        return low_memory
-    return default_low_memory()
 
 
 def _parse_speakers(value: str | None) -> SpeakerCount | None:
@@ -153,15 +138,6 @@ def transcribe(
         False,
         "--copy",
         help="Copy the transcript text to the clipboard (macOS only).",
-    ),
-    low_memory: bool | None = typer.Option(  # noqa: B008
-        None,
-        "--low-memory",
-        "--no-low-memory",
-        help=(
-            "Enable low-memory model-loading mode (auto-detected when "
-            "not set; on by default for <=16 GiB RAM)."
-        ),
     ),
     config: Path | None = typer.Option(  # noqa: B008
         None,
@@ -222,10 +198,6 @@ def transcribe(
     ),
 ) -> None:
     """Transcribe one or more voice memos and write transcript files."""
-    # Resolve low-memory mode (auto-detect or explicit flag)
-    lm = _resolve_low_memory(low_memory)
-    apply_low_memory_mode(lm)
-
     # Battery warning (fail-open: pmset errors are silent)
     _warn_on_battery()
 
@@ -329,15 +301,6 @@ def meeting(
         "-v",
         help="Emit per-stage progress logging to stderr.",
     ),
-    low_memory: bool | None = typer.Option(  # noqa: B008
-        None,
-        "--low-memory",
-        "--no-low-memory",
-        help=(
-            "Enable low-memory model-loading mode (auto-detected when "
-            "not set; on by default for <=16 GiB RAM)."
-        ),
-    ),
     config: Path | None = typer.Option(  # noqa: B008
         None,
         "--config",
@@ -384,8 +347,6 @@ def meeting(
     ),
 ) -> None:
     """Transcribe a meeting: whisper decode, diarization, repair, .md+.json."""
-    lm = _resolve_low_memory(low_memory)
-    apply_low_memory_mode(lm)
     _warn_on_battery()
 
     if verbose:
@@ -429,15 +390,6 @@ def memo(
         "-v",
         help="Emit per-stage progress logging to stderr.",
     ),
-    low_memory: bool | None = typer.Option(  # noqa: B008
-        None,
-        "--low-memory",
-        "--no-low-memory",
-        help=(
-            "Enable low-memory model-loading mode (auto-detected when "
-            "not set; on by default for <=16 GiB RAM)."
-        ),
-    ),
     config: Path | None = typer.Option(  # noqa: B008
         None,
         "--config",
@@ -456,8 +408,6 @@ def memo(
     ),
 ) -> None:
     """Transcribe a memo: whisper decode, no diarization, repair, .md+.json."""
-    lm = _resolve_low_memory(low_memory)
-    apply_low_memory_mode(lm)
     _warn_on_battery()
 
     if verbose:

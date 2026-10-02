@@ -513,7 +513,6 @@ changes the run's exit code, and a per-sidecar naming failure only warns
 | `--no-diarize` | off (diarize on) | skip speaker diarization |
 | `--yes` | off | group mode for 2+ files: run the boundary decodes and accept every continuation proposal without a prompt (mutually exclusive with `--no-group`) |
 | `--no-group` | off | skip split-recording grouping entirely — each file is transcribed standalone (no boundary decode, no concat, no part markers); mutually exclusive with `--yes` |
-| `--low-memory` / `--no-low-memory` | auto | low-memory model-loading mode |
 
 ### `vemoizer memo FILES... [options]` (issue #82)
 
@@ -542,7 +541,6 @@ the same empty-prompt invariant (prompt terms ignored).
 | `--config` | layered search | explicit LLM config path (replaces the search) |
 | `--glossary` | layered merge | explicit glossary file (correction pairs only for memo) |
 | `--repair` / `--no-repair` | on | LLM repair pass over the final paragraphs |
-| `--low-memory` / `--no-low-memory` | auto | low-memory model-loading mode |
 
 ### `vemoizer render X.json [options]` (issue #89, M5a)
 
@@ -593,7 +591,6 @@ and `memo` presets can reuse it.
 | `--copy` | off | copy transcript text to the clipboard via pbcopy (macOS only; single-file runs — a warning is printed when 2+ files are passed) |
 | `--yes` | off | group mode for 2+ files: run the 20 s boundary decodes and accept every continuation proposal without a prompt (mutually exclusive with `--no-group`) |
 | `--no-group` | off | skip split-recording grouping entirely — each file is transcribed standalone (no boundary decode, no concat, no part markers) |
-| `--low-memory` / `--no-low-memory` | auto | low-memory model-loading mode; auto-detected by total RAM when unset (on at ≤16 GiB, off if detection fails) |
 
 Split-recording grouping (issue #77, 2+ files only): the inputs are
 naturally sorted (NFC stem, trailing integer as the numeric key), the
@@ -743,7 +740,7 @@ glossary for the `meeting` and `memo` presets:
 - **Models live in the HuggingFace cache** (`~/.cache/huggingface/hub`).
   Budget ~5–6 GB for the three-model consensus set (Parakeet ~1.25 GB,
   Canary port ~0.7–1 GB, Whisper-large-f16 ~3.3 GB); all three fit on a
-  16 GB Mac when loaded lazily and sequentially (see `--low-memory`).
+  16 GB Mac when loaded lazily and sequentially.
 - **LLM**: optional, any OpenAI-compatible endpoint via config; API key
   from an environment variable named in the config.
 - Transcription is local, full stop: audio and transcripts never leave the
