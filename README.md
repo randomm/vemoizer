@@ -47,6 +47,7 @@ revision-pinned models (~6 GB):
 ```bash
 uv tool install --editable ~/projects/vemoizer
 vemoizer models pull
+vemoizer doctor           # optional: verify the local setup
 ```
 
 ## Setup (developers)

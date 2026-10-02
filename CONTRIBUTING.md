@@ -32,7 +32,8 @@ Requires macOS on Apple Silicon, Python ≥ 3.11, and `ffmpeg` on PATH.
 
 ## Local quality gates
 
-Run all four before pushing. CI verifies; it does not discover.
+Run all four locally before pushing — checks must pass locally, not be
+left to discovery after the push.
 
 ```bash
 uv run pytest tests/
