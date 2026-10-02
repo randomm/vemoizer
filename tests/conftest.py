@@ -12,9 +12,23 @@ transcript outputs into the actual working directory (the repo root).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
+
+# Hermetic CLI help output: typer.rich_utils reads GITHUB_ACTIONS / FORCE_COLOR /
+# PY_COLORS at IMPORT time (rich_utils.py, lines 77-84) to force a coloured
+# terminal, and NO_COLOR/TERM/COLUMNS affect rich's Console sizing. GitHub
+# Actions sets GITHUB_ACTIONS=true, which makes --help emit ANSI + box-drawing
+# and breaks substring assertions (issue #102, run 36991883722). typer is not
+# imported yet at this point (conftest runs before test-module imports), so
+# pinning the environment here keeps the suite environment-independent.
+for _var in ("GITHUB_ACTIONS", "FORCE_COLOR", "PY_COLORS", "CI"):
+    os.environ.pop(_var, None)
+os.environ["NO_COLOR"] = "1"
+os.environ["TERM"] = "dumb"
+os.environ["COLUMNS"] = "120"
 
 # Extensions the test suite can write as transcript outputs.
 _OUTPUT_EXTS = {".txt", ".json", ".srt", ".vtt", ".md"}
