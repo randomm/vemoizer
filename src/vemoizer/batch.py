@@ -50,6 +50,7 @@ from vemoizer.output.naming import (  # noqa: F401
 )
 from vemoizer.presets import RunOptions
 from vemoizer.progress_wiring import set_batch_prefix
+from vemoizer.run_log import file_log
 
 
 def _write_temp_glossary(lines: list[str]) -> str:
@@ -134,90 +135,12 @@ from vemoizer.batch_guard import (  # noqa: F401,E402
     _transcribe_guarded,
     _transcribe_one,
 )
+
+# Plain per-file loop, moved to batch_plain.py for the 500-line cap on this
+# file (the M4c issue #111 log seam fits there); re-exported so
+# ``batch._run_plain`` keeps working.
+from vemoizer.batch_plain import _run_plain  # noqa: F401,E402
 from vemoizer.transcribe_loop import transcribe_batch  # noqa: F401,E402
-
-
-def _run_plain(
-    ordered: list[Path],
-    options: RunOptions,
-    *,
-    formats: Sequence[str],
-    out: Path | None,
-    quiet: bool,
-    write_group_fn: Callable[[Path | str, dict[str, Any]], None] | None = None,
-    display: ProgressDisplay | None = None,
-) -> int:
-    """The plain per-file loop (single file / --no-group).
-
-    No --copy; per-file config-error continue. ``write_group_fn``
-    (issue #87): when set, each result goes through the preset seam
-    (one dated .md/.json pair per file) instead of _process_result.
-    ``display`` (issue #105 M4b): the CLI-level display, threaded into
-    ``_transcribe_guarded`` and prefixed with ``[i/N] stem`` when N > 1.
-    """
-    exit_code = 0
-    with caffeinate_context():
-        for index, file in enumerate(ordered, start=1):
-            # M4b (issue #105): prefix the active stage with ``[i/N] stem``
-            # for multi-file runs; the prefix is part of the description,
-            # not a separate echo line.  No-op when display is None or N=1.
-            stem, _ = nfc_stem_and_suffix(file)
-            set_batch_prefix(display, index, len(ordered), stem)
-            if (
-                result := _transcribe_guarded(file, options, file.name, display=display)
-            ) is None:
-                exit_code = 1
-                continue
-            if write_group_fn is not None:
-                # The preset write seam (issue #87): shared _check_and_write
-                # helper. M4a (issue #100), seam (c): failure notifications
-                # for this seam live HERE (check failed — the ``error:``
-                # line is on stderr); the SUCCESS notification lives at the
-                # seam's own write point (write_group), so a partial-pair
-                # write failure is a failure, never a success.
-                if not _check_and_write(
-                    write_group_fn,
-                    file,
-                    result,
-                    diarize=options.diarize,
-                    diarize_label="diarize",
-                ):
-                    from vemoizer.notify import notify_result
-
-                    reason = check_failure_reason(
-                        file, result, diarize=options.diarize, diarize_label="diarize"
-                    )
-                    notify_result(file, "failed", reason or "")
-                    exit_code = 1
-                continue
-            if not _process_result(
-                file,
-                result,
-                formats=list(formats),
-                out=out,
-                quiet=quiet,
-                options=options,
-                diarize=options.diarize,
-            ):
-                # M4a (issue #100), seam (a): one failure notification per
-                # file that failed the checks or the output write (expert
-                # plain loop / --no-group; the preset seam path above never
-                # reaches this branch).
-                from vemoizer.notify import notify_result
-
-                reason = check_failure_reason(
-                    file, result, diarize=options.diarize, diarize_label="--diarize"
-                )
-                notify_result(file, "failed", reason or "")
-                exit_code = 1
-                continue
-            # M4a (issue #100), seam (a): one success notification per file
-            # that was transcribed AND its output written (expert plain /
-            # --no-group; the preset seam's write point covers preset runs).
-            from vemoizer.notify import notify_result
-
-            notify_result(file, "done")
-    return exit_code
 
 
 def run_batch(
@@ -361,114 +284,125 @@ def run_batch(
             # files; the stem is the group's first part (deterministic).
             first_stem, _ = nfc_stem_and_suffix(group[0])
             set_batch_prefix(display, index, len(groups), first_stem)
-            if len(group) == 1:
-                # A per-file decode/write failure is a clean one-line error.
-                result = _transcribe_guarded(
-                    group[0], options, group[0].name, display=display
-                )
-                if result is None:
-                    exit_code = 1
-                    continue
-                label = group[0].name
-            else:
-                try:
-                    merged = concat_groups(group)
-                except GroupingError as e:
-                    # Fail this group, continue with the rest (the
-                    # _check_result pattern): the remaining groups are
-                    # transcribed, and the failure is visible.
-                    typer.echo(f"error: {e}", err=True)
-                    exit_code = 1
-                    continue
-                merged_is_temp = merged != group[0]
-                try:
-                    # A per-part ingest failure (missing/corrupt file) is
-                    # a group failure, not a crash: clean error line and
-                    # continue with the remaining groups.
-                    offsets = part_offsets(group)
-                except IngestError as e:
-                    if merged_is_temp:
-                        remove_concat_output(merged)
-                    typer.echo(f"error: {e}", err=True)
-                    exit_code = 1
-                    continue
-                try:
-                    # An unexpected per-group decode failure is a clean
-                    # one-line error, not a traceback mid-batch: name the
-                    # group's first part's file, mark the group failed,
-                    # keep going.
+            # M4c (issue #111), seam (c): per-group file log named after the
+            # group's first part NFC stem (not the '+'-joined label), wrapping
+            # the transcribe call AND the per-group result handling so a
+            # group that fails immediately still leaves a log file (decision 6).
+            with file_log(first_stem):
+                if len(group) == 1:
+                    # A per-file decode/write failure is a clean one-line error.
                     result = _transcribe_guarded(
-                        merged,
-                        options,
-                        f"group {group[0].name} (+{len(group) - 1} more part(s))",
-                        display=display,
+                        group[0], options, group[0].name, display=display
                     )
-                finally:
-                    if merged_is_temp:
-                        remove_concat_output(merged)
-                if result is None:
-                    # The transcribe for this group failed: the finally
-                    # already cleaned the temp concat file, so skip the
-                    # write and move on to the next group.
-                    exit_code = 1
-                    continue
-                if "error" not in result:
-                    # Multi-part groups only: single-part groups get no
-                    # part_markers key at all (issue #77). with_part_markers
-                    # returns a NEW dict, so the pipeline result is never
-                    # mutated in place.
-                    result = with_part_markers(result, offsets)
-                label = "+".join(p.name for p in group)
+                    if result is None:
+                        exit_code = 1
+                        continue
+                    label = group[0].name
+                else:
+                    try:
+                        merged = concat_groups(group)
+                    except GroupingError as e:
+                        # Fail this group, continue with the rest (the
+                        # _check_result pattern): the remaining groups are
+                        # transcribed, and the failure is visible.
+                        typer.echo(f"error: {e}", err=True)
+                        exit_code = 1
+                        continue
+                    merged_is_temp = merged != group[0]
+                    try:
+                        # A per-part ingest failure (missing/corrupt file) is
+                        # a group failure, not a crash: clean error line and
+                        # continue with the remaining groups.
+                        offsets = part_offsets(group)
+                    except IngestError as e:
+                        if merged_is_temp:
+                            remove_concat_output(merged)
+                        typer.echo(f"error: {e}", err=True)
+                        exit_code = 1
+                        continue
+                    try:
+                        # An unexpected per-group decode failure is a clean
+                        # one-line error, not a traceback mid-batch: name the
+                        # group's first part's file, mark the group failed,
+                        # keep going.
+                        result = _transcribe_guarded(
+                            merged,
+                            options,
+                            f"group {group[0].name} (+{len(group) - 1} more part(s))",
+                            display=display,
+                        )
+                    finally:
+                        if merged_is_temp:
+                            remove_concat_output(merged)
+                    if result is None:
+                        # The transcribe for this group failed: the finally
+                        # already cleaned the temp concat file, so skip the
+                        # write and move on to the next group.
+                        exit_code = 1
+                        continue
+                    if "error" not in result:
+                        # Multi-part groups only: single-part groups get no
+                        # part_markers key at all (issue #77). with_part_markers
+                        # returns a NEW dict, so the pipeline result is never
+                        # mutated in place.
+                        result = with_part_markers(result, offsets)
+                    label = "+".join(p.name for p in group)
 
-            if write_group_fn is not None:
-                # Preset write seam (issue #87): shared _check_and_write
-                # helper — fail-loud _check_result first, then the seam (an
-                # unexpected seam exception degrades per-group via
-                # _call_write_seam). M4a (issue #100), seam (c): failure
-                # notifications for the grouped preset seam live HERE
-                # (check failed — the ``error:`` line is on stderr); the
-                # SUCCESS notification lives at the seam's own write point
-                # (write_group).
-                if not _check_and_write(
-                    write_group_fn,
+                if write_group_fn is not None:
+                    # Preset write seam (issue #87): shared _check_and_write
+                    # helper — fail-loud _check_result first, then the seam (an
+                    # unexpected seam exception degrades per-group via
+                    # _call_write_seam). M4a (issue #100), seam (c): failure
+                    # notifications for the grouped preset seam live HERE
+                    # (check failed — the ``error:`` line is on stderr); the
+                    # SUCCESS notification lives at the seam's own write point
+                    # (write_group).
+                    if not _check_and_write(
+                        write_group_fn,
+                        label,
+                        result,
+                        diarize=options.diarize,
+                        diarize_label="diarize",
+                    ):
+                        from vemoizer.notify import notify_result
+
+                        reason = check_failure_reason(
+                            label,
+                            result,
+                            diarize=options.diarize,
+                            diarize_label="diarize",
+                        )
+                        notify_result(label, "failed", reason or "")
+                        exit_code = 1
+                    continue
+                if not _process_result(
                     label,
                     result,
+                    formats=list(formats),
+                    out=out,
+                    quiet=quiet,
+                    options=options,
                     diarize=options.diarize,
-                    diarize_label="diarize",
                 ):
+                    # M4a (issue #100), seam (a): one failure notification per
+                    # group that failed the checks or the output write (expert
+                    # group path, no preset seam; a multi-part group's label
+                    # names its first part).
                     from vemoizer.notify import notify_result
 
                     reason = check_failure_reason(
-                        label, result, diarize=options.diarize, diarize_label="diarize"
+                        label,
+                        result,
+                        diarize=options.diarize,
+                        diarize_label="--diarize",
                     )
                     notify_result(label, "failed", reason or "")
                     exit_code = 1
-                continue
-            if not _process_result(
-                label,
-                result,
-                formats=list(formats),
-                out=out,
-                quiet=quiet,
-                options=options,
-                diarize=options.diarize,
-            ):
-                # M4a (issue #100), seam (a): one failure notification per
-                # group that failed the checks or the output write (expert
-                # group path, no preset seam; a multi-part group's label
-                # names its first part).
+                    continue
+                # M4a (issue #100), seam (a): one success notification per group
+                # that was transcribed AND its output written (expert group
+                # loop, no preset seam).
                 from vemoizer.notify import notify_result
 
-                reason = check_failure_reason(
-                    label, result, diarize=options.diarize, diarize_label="--diarize"
-                )
-                notify_result(label, "failed", reason or "")
-                exit_code = 1
-                continue
-            # M4a (issue #100), seam (a): one success notification per group
-            # that was transcribed AND its output written (expert group
-            # loop, no preset seam).
-            from vemoizer.notify import notify_result
-
-            notify_result(label, "done")
+                notify_result(label, "done")
     return exit_code

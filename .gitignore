@@ -16,6 +16,9 @@ tmp/
 # macOS
 .DS_Store
 
+# Per-file run logs (issue #111 M4c)
+.vemoizer/
+
 # Local agent state
 .claude/
 .pi/

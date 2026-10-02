@@ -27,6 +27,7 @@ from vemoizer.diarization import SpeakerCount
 from vemoizer.llm import ConfigError
 from vemoizer.output.naming import nfc_stem_and_suffix
 from vemoizer.progress_wiring import set_batch_prefix
+from vemoizer.run_log import file_log
 
 if TYPE_CHECKING:
     from vemoizer.progress import ProgressDisplay
@@ -82,59 +83,63 @@ def transcribe_batch(
                 # attempt (issue #100, M4a decision 6).
                 typer.echo(f"error: {e}", err=True)
                 return 1
-            try:
-                result = transcribe_file(
+            # M4c (issue #111), seam (a): per-file log at
+            # .vemoizer/logs/<stem>.log, starting AFTER the _resolve_llm_config
+            # check so a ConfigError abort creates no log file (decision 6).
+            with file_log(stem):
+                try:
+                    result = transcribe_file(
+                        file,
+                        diarize=diarize,
+                        config_path=config_path,
+                        profile=profile,
+                        repair=repair,
+                        glossary_path=glossary_path,
+                        speakers=speakers,
+                        display=display,
+                    )
+                except (KeyboardInterrupt, SystemExit):
+                    # ConfigError is handled by the try above; only the two
+                    # non-Exception control-flow signals need re-raising here.
+                    raise
+                except Exception as e:
+                    # A per-file decode/write failure is a clean one-line error.
+                    typer.echo(f"error: {file.name}: {e}", err=True)
+                    exit_code = 1
+                    # M4a (issue #100), seam (a): one failure notification per
+                    # file whose transcribe raised. The one-line reason is the
+                    # stderr line above; never changes the exit code.
+                    from vemoizer.notify import notify_result
+
+                    notify_result(file, "failed", f"error: {file.name}: {e}")
+                    continue
+                if not _process_result(
                     file,
+                    result,
+                    formats=list(formats),
+                    out=out,
+                    quiet=quiet,
+                    # The expert transcribe loop: --copy is honored here (the
+                    # group path never copies); the diarize flag comes from the
+                    # function parameter, so both are passed explicitly.
+                    options=None,
                     diarize=diarize,
-                    config_path=config_path,
-                    profile=profile,
-                    repair=repair,
-                    glossary_path=glossary_path,
-                    speakers=speakers,
-                    display=display,
-                )
-            except (KeyboardInterrupt, SystemExit):
-                # ConfigError is handled by the try above; only the two
-                # non-Exception control-flow signals need re-raising here.
-                raise
-            except Exception as e:
-                # A per-file decode/write failure is a clean one-line error.
-                typer.echo(f"error: {file.name}: {e}", err=True)
-                exit_code = 1
-                # M4a (issue #100), seam (a): one failure notification per
-                # file whose transcribe raised. The one-line reason is the
-                # stderr line above; never changes the exit code.
+                    copy=copy,
+                ):
+                    # M4a (issue #100), seam (a): one failure notification per
+                    # file that failed the per-file checks or the output write.
+                    # The reason is the ``error:`` line the check (or the
+                    # write) already printed.
+                    from vemoizer.notify import notify_result
+
+                    reason = check_failure_reason(file, result, diarize=diarize)
+                    notify_result(file, "failed", reason or "")
+                    exit_code = 1
+                    continue
+                # M4a (issue #100), seam (a): one success notification per file
+                # that was transcribed AND its output written. Independent of
+                # --quiet (the quiet echo above is display only).
                 from vemoizer.notify import notify_result
 
-                notify_result(file, "failed", f"error: {file.name}: {e}")
-                continue
-            if not _process_result(
-                file,
-                result,
-                formats=list(formats),
-                out=out,
-                quiet=quiet,
-                # The expert transcribe loop: --copy is honored here (the
-                # group path never copies); the diarize flag comes from the
-                # function parameter, so both are passed explicitly.
-                options=None,
-                diarize=diarize,
-                copy=copy,
-            ):
-                # M4a (issue #100), seam (a): one failure notification per
-                # file that failed the per-file checks or the output write.
-                # The reason is the ``error:`` line the check (or the
-                # write) already printed.
-                from vemoizer.notify import notify_result
-
-                reason = check_failure_reason(file, result, diarize=diarize)
-                notify_result(file, "failed", reason or "")
-                exit_code = 1
-                continue
-            # M4a (issue #100), seam (a): one success notification per file
-            # that was transcribed AND its output written. Independent of
-            # --quiet (the quiet echo above is display only).
-            from vemoizer.notify import notify_result
-
-            notify_result(file, "done")
+                notify_result(file, "done")
     return exit_code

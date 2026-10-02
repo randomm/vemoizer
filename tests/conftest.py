@@ -12,6 +12,7 @@ transcript outputs into the actual working directory (the repo root).
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -161,3 +162,74 @@ def _guard_no_repo_root_output_files():
             f"monkeypatch.chdir(tmp_path) (or the file pre-existed and "
             f"the snapshot missed it)."
         )
+
+
+# --- logging-state snapshot (issue #111 M4c) ---------------------------------
+# The ``file_log`` context manager attaches a ``_QuietFileHandler`` to the
+# root logger (and optionally the ``huggingface_hub`` logger) and raises
+# the root level to INFO. If a test forgets to exit the ``with`` block (or
+# the context manager raises before ``finally``), the handler and level
+# change leak into subsequent tests, breaking ``caplog``-based tests and
+# polluting the test environment. This autouse fixture snapshots the
+# handler list, level, and per-handler filters of the three loggers the
+# design names (root, ``vemoizer``, ``huggingface_hub``) before each test
+# and asserts+restores them after, so any leak is caught and rolled back.
+
+
+def _logger_snapshot(name: str) -> tuple[list[logging.Handler], int]:
+    """Snapshot a logger's handler list and level."""
+    lg = logging.getLogger(name)
+    return list(lg.handlers), lg.level
+
+
+def _handler_filter_snapshot(handler: logging.Handler) -> list[logging._FilterType]:
+    """Snapshot a handler's filter list."""
+    return list(handler.filters)
+
+
+def _snapshot_all_loggers() -> dict[str, tuple[list[logging.Handler], int]]:
+    """Snapshot the three loggers the design names."""
+    return {
+        "": _logger_snapshot(""),
+        "vemoizer": _logger_snapshot("vemoizer"),
+        "huggingface_hub": _logger_snapshot("huggingface_hub"),
+    }
+
+
+def _restore_all_loggers(snap: dict[str, tuple[list[logging.Handler], int]]) -> None:
+    """Restore the three loggers to their snapshot."""
+    for name, (handlers, level) in snap.items():
+        lg = logging.getLogger(name)
+        for h in list(lg.handlers):
+            lg.removeHandler(h)
+        for h in handlers:
+            lg.addHandler(h)
+        lg.setLevel(level)
+
+
+@pytest.fixture(autouse=True)
+def _guard_logging_state():
+    """Snapshot+restore logging state around every test (issue #111 M4c).
+
+    Catches any handler or level leaked by ``file_log`` (or any other
+    logging mutation) so it cannot poison ``caplog``-based tests or
+    subsequent tests in the same session.
+    """
+    before = _snapshot_all_loggers()
+    # Also snapshot per-handler filters for the three loggers.
+    handler_filters: dict[int, list[logging._FilterType]] = {}
+    for _name, (handlers, _level) in before.items():
+        for h in handlers:
+            handler_filters[id(h)] = _handler_filter_snapshot(h)
+    yield
+    _restore_all_loggers(before)
+    # Restore per-handler filters.
+    for name, (_handlers, _level) in before.items():
+        lg = logging.getLogger(name)
+        for h in lg.handlers:
+            snap = handler_filters.get(id(h))
+            if snap is not None:
+                for f in list(h.filters):
+                    h.removeFilter(f)
+                for f in snap:
+                    h.addFilter(f)
