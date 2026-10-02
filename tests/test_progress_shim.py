@@ -350,6 +350,40 @@ def test_transcribe_result_identical_with_and_without_display(
     assert len(result_off["words"]) == len(result_on["words"])
 
 
+def test_shim_never_raises_when_add_stage_fails(
+    tty_stderr: io.StringIO,
+) -> None:
+    """If display.add_stage raises (e.g. a broken rich Console mid-decode),
+    the shim degrades to an unpatched pass-through: no exception, module
+    untouched, and the display task is never finished (task id unavailable)."""
+    fake_tr = MagicMock()
+    fake_tqdm_mod = MagicMock()
+    fake_tr.tqdm = fake_tqdm_mod
+    original_tqdm = fake_tr.tqdm
+
+    display = ProgressDisplay()
+    display.start()
+    display.add_stage = MagicMock(side_effect=RuntimeError("rich broken"))
+
+    fake_mods = {
+        "mlx_whisper": MagicMock(transcribe=fake_tr),
+        "mlx_whisper.transcribe": fake_tr,
+    }
+    with (
+        patch.dict("sys.modules", fake_mods),
+        with_whisper_progress(
+            display,
+            window_offset_seconds=0,
+            window_seconds=30.0,
+            file_total_minutes=1.0,
+        ),
+    ):
+        # Must not raise, and the module attribute was never replaced.
+        assert fake_tr.tqdm is original_tqdm
+    # No task was registered, so nothing to finish.
+    display.close()
+
+
 def test_transcribe_with_display_patches_tqdm_during_call(
     tty_stderr: io.StringIO,
 ) -> None:

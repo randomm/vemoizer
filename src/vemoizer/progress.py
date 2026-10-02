@@ -305,8 +305,16 @@ def with_whisper_progress(
     if file_total_minutes is None:
         file_total_minutes = (window_offset_seconds + window_seconds) / 60.0
 
-    task_id = display.add_stage("decode", total=file_total_minutes)
+    task_id: TaskID | None = None
     try:
+        try:
+            task_id = display.add_stage("decode", total=file_total_minutes)
+        except Exception:  # noqa: BLE001 - shim must never break a decode
+            # A rich failure (e.g. a broken console mid-decode) must not
+            # propagate: degrade to an unpatched decode, identical result.
+            logger.debug("shim: add_stage failed; degrading", exc_info=True)
+            yield
+            return
         # The package __init__ re-exports the `transcribe` FUNCTION as
         # `mlx_whisper.transcribe`, shadowing the submodule of the same name.
         # `import mlx_whisper.transcribe as tr_mod` binds to the function
@@ -341,10 +349,13 @@ def with_whisper_progress(
             with suppress(Exception):
                 tr_mod.tqdm = original_tqdm_module
     finally:
-        # Close the display task so it is never stranded on the status line
-        # (e.g. when the meeting->dictation fallback takes over after this).
-        with suppress(Exception):
-            display.finish(task_id, file_total_minutes)
+        # Close the display task so it is never stranded on the status
+        # line (e.g. when the meeting->dictation fallback takes over
+        # after this). A task registered with a broken display is never
+        # finished — skip when add_stage failed (task_id is None).
+        if task_id is not None:
+            with suppress(Exception):
+                display.finish(task_id, file_total_minutes)
 
 
 class _ShimmedBar:

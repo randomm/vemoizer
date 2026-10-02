@@ -431,11 +431,43 @@ def test_whole_transcribe_wrapping_monotonic_progress(
             }
         ],
     }
-    mock = MagicMock()
-    mock.transcribe = MagicMock(return_value=raw)
-    mock.tqdm = MagicMock()  # tqdm attribute for the shim
-
     from vemoizer.whisper_transcriber import WhisperTranscriber
+
+    # A fake tqdm module whose factory returns a bar whose n/total advance
+    # as update() is called, so the shim's minutes conversion is exercised
+    # (an auto-mocking MagicMock attribute would leave the assertion vacuous).
+    class FakeBar:
+        """A real tqdm-bar stand-in with a working n/total that the shim's
+        minutes conversion can read, in contrast to an auto-mocking MagicMock
+        attribute (whose values would make the monotonic assertion vacuous).
+        """
+
+        def __init__(self, total: float = 3000) -> None:
+            self.n = 0.0
+            self.total = total
+            self.updates: list[float] = []
+
+        def __enter__(self) -> FakeBar:
+            return self
+
+        def __exit__(self, *exc_info: object) -> None:
+            pass
+
+        def update(self, n: float = 1, *a: object, **kw: object) -> None:
+            self.n = float(n)
+            self.updates.append(float(n))
+
+    bars_created: list[FakeBar] = []
+
+    class FakeTqdmModule:
+        def tqdm(self, *args: object, **kwargs: object) -> FakeBar:
+            bar = FakeBar()
+            bars_created.append(bar)
+            return bar
+
+    fake_tr = MagicMock()
+    fake_tr.tqdm = FakeTqdmModule()
+    mock = MagicMock()
 
     # Track completed values on the display
     completed_values: list[float] = []
@@ -451,20 +483,38 @@ def test_whole_transcribe_wrapping_monotonic_progress(
     with (
         patch.dict(
             "sys.modules",
-            {"mlx_whisper": mock, "mlx_whisper.transcribe": mock},
+            {"mlx_whisper": mock, "mlx_whisper.transcribe": fake_tr},
         ),
         patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
     ):
         t = WhisperTranscriber()
         t._model_path = "/tmp/turbo"
         t._mlx_whisper = mock
+
+        def _fake_whisper_transcribe(audio, *a, **kw):
+            # Emulate mlx_whisper's internal loop: resolve the (patched)
+            # tqdm module via sys.modules — the same path mlx_whisper uses
+            # — then create the bar and drive it to a fraction of the
+            # window's total frames. The shim reads bar.n after each
+            # update, so this makes the minutes conversion non-vacuous.
+            import importlib
+
+            tr_mod = importlib.import_module("mlx_whisper.transcribe")
+            bar = tr_mod.tqdm.tqdm(total=3000, unit="frames")
+            bar.__enter__()
+            for frac in (0.25, 0.5, 0.75, 1.0):
+                bar.update(int(3000 * frac))
+            bar.__exit__(None, None, None)
+            return raw
+
+        mock.transcribe = _fake_whisper_transcribe
         # 120 s audio → 4 windows
         t.transcribe(np.zeros(120 * 16_000, dtype=np.float32), display=display)
     display.close()
 
     # The shim must have driven the display at least once
     assert len(completed_values) > 0
-    # Monotonic non-decreasing
+    # Monotonic non-decreasing file-level minutes across windows
     for i in range(1, len(completed_values)):
         assert completed_values[i] >= completed_values[i - 1] - 1e-9
 
