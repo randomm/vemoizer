@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from vemoizer.llm import LLMConfig
+    from vemoizer.progress import ProgressDisplay
 
 import numpy as np
 import typer
@@ -42,13 +43,13 @@ import typer
 from vemoizer.caffeinate import caffeinate_context
 from vemoizer.grouping_common import with_part_markers
 from vemoizer.ingest import IngestError
-from vemoizer.llm import ConfigError
 from vemoizer.output.naming import (  # noqa: F401
     collision_free_paths,
     dated_basename,
     nfc_stem_and_suffix,
 )
 from vemoizer.presets import RunOptions
+from vemoizer.progress_wiring import set_batch_prefix
 
 
 def _write_temp_glossary(lines: list[str]) -> str:
@@ -127,61 +128,13 @@ def _resolve_llm_config(config_path: str | None) -> LLMConfig | None:
 # The loop resolves its seams through this module's namespace
 # (``_resolve_llm_config`` / ``_process_result``), so the
 # ``batch._resolve_llm_config`` test patches still patch the name it calls.
+# Re-export the guarded transcribe helpers (now in batch_guard.py) so
+# existing imports from vemoizer.batch continue to work.
+from vemoizer.batch_guard import (  # noqa: F401,E402
+    _transcribe_guarded,
+    _transcribe_one,
+)
 from vemoizer.transcribe_loop import transcribe_batch  # noqa: F401,E402
-
-
-def _transcribe_guarded(
-    target: Path,
-    options: RunOptions,
-    description: str,
-) -> dict[str, Any] | None:
-    """One guarded transcribe (issue #77 merge gate).
-
-    The single per-file/per-group guard shared by the plain loop and both
-    branches of the group loop: an unexpected exception degrades to a clean
-    one-line ``error:`` naming *description* (never a raw traceback);
-    ``KeyboardInterrupt``/``SystemExit`` propagate; returns ``None`` when
-    the target failed.
-    """
-    try:
-        return _transcribe_one(target, options)
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except Exception as e:  # noqa: BLE001 - per-file fail-loud boundary
-        typer.echo(f"error: {description}: {e}", err=True)
-        # M4a (issue #100), seam (c): one failure notification per
-        # file/group whose transcribe raised; reason = the stderr line above.
-        from vemoizer.notify import notify_result
-
-        notify_result(description, "failed", f"error: {description}: {e}")
-        return None
-
-
-def _transcribe_one(file: Path, options: RunOptions) -> dict[str, Any]:
-    """One ``transcribe_file`` call with the fail-loud config check.
-
-    Returns ``TranscriptionResult``-shaped (``text`` required) — or the
-    ``{"text", "segments", "error"}`` triple when the config check fails.
-    The ``error`` key is contract: ``_check_result`` turns it into a clean
-    error line, so it must stay visible.
-    """
-    from vemoizer.pipeline import transcribe_file
-
-    try:
-        # Fail loud on a malformed project config (issue #78): clean error
-        # line, never a traceback (issue #78).
-        _resolve_llm_config(options.config_path)
-    except ConfigError as e:
-        return {"text": "", "segments": [], "error": str(e)}
-    return transcribe_file(
-        file,
-        diarize=options.diarize,
-        config_path=options.config_path,
-        profile=options.profile,
-        repair=options.repair,
-        glossary_path=options.glossary_path,
-        speakers=options.speakers,
-    )
 
 
 def _run_plain(
@@ -192,17 +145,27 @@ def _run_plain(
     out: Path | None,
     quiet: bool,
     write_group_fn: Callable[[Path | str, dict[str, Any]], None] | None = None,
+    display: ProgressDisplay | None = None,
 ) -> int:
     """The plain per-file loop (single file / --no-group).
 
     No --copy; per-file config-error continue. ``write_group_fn``
     (issue #87): when set, each result goes through the preset seam
     (one dated .md/.json pair per file) instead of _process_result.
+    ``display`` (issue #105 M4b): the CLI-level display, threaded into
+    ``_transcribe_guarded`` and prefixed with ``[i/N] stem`` when N > 1.
     """
     exit_code = 0
     with caffeinate_context():
-        for file in ordered:
-            if (result := _transcribe_guarded(file, options, file.name)) is None:
+        for index, file in enumerate(ordered, start=1):
+            # M4b (issue #105): prefix the active stage with ``[i/N] stem``
+            # for multi-file runs; the prefix is part of the description,
+            # not a separate echo line.  No-op when display is None or N=1.
+            stem, _ = nfc_stem_and_suffix(file)
+            set_batch_prefix(display, index, len(ordered), stem)
+            if (
+                result := _transcribe_guarded(file, options, file.name, display=display)
+            ) is None:
                 exit_code = 1
                 continue
             if write_group_fn is not None:
@@ -271,6 +234,7 @@ def run_batch(
     print_fn: Callable[[str], None] | None = None,
     tty_isatty: Callable[[], bool] | None = None,
     write_group_fn: Callable[[Path | str, dict[str, Any]], None] | None = None,
+    display: ProgressDisplay | None = None,
 ) -> int:
     """Transcribe *files* with M3 split-recording grouping (issue #77).
 
@@ -296,6 +260,11 @@ def run_batch(
     ``caffeinate_context``. The ``_run_plain`` short-circuit (single
     file / ``--no-group``) honours it too: each file's result goes
     through the seam instead of ``_process_result``.
+
+    ``display`` (issue #105 M4b) is the CLI-level
+    :class:`~vemoizer.progress.ProgressDisplay`, threaded through the
+    plain loop and the per-group transcribe calls; ``None`` keeps the
+    default.
 
     ``--out`` with 2+ files is only honored for a single group (else
     every group would overwrite the same target — fail up front, 2)
@@ -325,6 +294,7 @@ def run_batch(
             out=out,
             quiet=quiet,
             write_group_fn=write_group_fn,
+            display=display,
         )
 
     # The TTY guard is BEFORE any boundary decode or model load, so a
@@ -385,10 +355,17 @@ def run_batch(
         )
         return 2
     with caffeinate_context():
-        for group in groups:
+        for index, group in enumerate(groups, start=1):
+            # M4b (issue #105): prefix the active stage with ``[i/N]`` where
+            # N is the number of transcribe invocations (groups), not source
+            # files; the stem is the group's first part (deterministic).
+            first_stem, _ = nfc_stem_and_suffix(group[0])
+            set_batch_prefix(display, index, len(groups), first_stem)
             if len(group) == 1:
                 # A per-file decode/write failure is a clean one-line error.
-                result = _transcribe_guarded(group[0], options, group[0].name)
+                result = _transcribe_guarded(
+                    group[0], options, group[0].name, display=display
+                )
                 if result is None:
                     exit_code = 1
                     continue
@@ -424,6 +401,7 @@ def run_batch(
                         merged,
                         options,
                         f"group {group[0].name} (+{len(group) - 1} more part(s))",
+                        display=display,
                     )
                 finally:
                     if merged_is_temp:

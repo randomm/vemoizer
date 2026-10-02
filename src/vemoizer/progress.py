@@ -10,6 +10,12 @@ Contract (issue #10): progress goes to **stderr** via ``rich.progress``
 — the display is disabled so progress spam never pollutes captured stderr.
 ``verbose=False`` forces the same off-switch regardless of TTY state.
 
+The mlx-whisper progress shim (issue #105) lives in
+:mod:`vemoizer.progress_shim`: a context manager that patches the ``tqdm``
+referenced by ``mlx_whisper.transcribe`` for the duration of a decode so
+its internal frame counter drives a :class:`ProgressDisplay` task in
+*minutes* (``decode 38/56 min``) rather than raw frames.
+
 This module only owns the reporting. The pipeline stages own *when* to
 advance; CLI wiring that constructs the display belongs to the CLI task.
 """
@@ -43,6 +49,22 @@ def format_duration(seconds: float) -> str:
         return f"{minutes}m{secs:02d}s"
     hours, minutes = divmod(minutes, 60)
     return f"{hours}h{minutes:02d}m"
+
+
+def frames_to_minutes(
+    frames: float, *, hop_length: int = 160, sample_rate: int = 16_000
+) -> float:
+    """Convert mel-spectrogram *frames* to minutes of audio.
+
+    ``mlx_whisper``'s progress bar counts frames (one frame = ``HOP_LENGTH``
+    samples), not seconds — see ``mlx_whisper.audio.HOP_LENGTH`` /
+    ``SAMPLE_RATE``. The progress shim (``vemoizer.progress_shim``) applies
+    this conversion before handing the counter to a :class:`ProgressDisplay`.
+    Defaults match the installed 0.4.3 values (``HOP_LENGTH=160``,
+    ``SAMPLE_RATE=16000``) so the function is usable without the dependency
+    imported (the test suite mocks ``mlx_whisper`` throughout).
+    """
+    return frames * hop_length / sample_rate / 60.0
 
 
 class StageProgress:
@@ -154,6 +176,10 @@ class ProgressDisplay:
     def __init__(self, verbose: bool = True) -> None:
         is_tty: bool = sys.stderr.isatty()
         self.disable: bool = not (verbose and is_tty)
+        # Exact batch prefix last applied per task id, so a re-prefix can
+        # strip the previous prefix precisely instead of inferring it from
+        # content (a stem containing ` · ` would otherwise be corrupted).
+        self._prefixes: dict[TaskID, str] = {}
         self._console = Console(
             stderr=True,
             no_color=not is_tty,
@@ -166,6 +192,10 @@ class ProgressDisplay:
             transient=False,
         )
         self._started = False
+        # Exact batch prefix last applied per task id, so a re-prefix can
+        # strip the previous prefix precisely instead of inferring it from
+        # content (a stem containing ` · ` would otherwise be corrupted).
+        self._prefixes: dict[TaskID, str] = {}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -208,6 +238,41 @@ class ProgressDisplay:
     def update_text(self, task_id: TaskID, description: str) -> None:
         """Replace a running stage's status text (e.g. 'loading model...')."""
         self._progress.update(task_id, description=description)
+
+    def prefix_active_stage(self, prefix: str) -> None:
+        """Prepend *prefix* (e.g. ``"[1/3] memo · "``) to the active stage.
+
+        Used by the batch layer (issue #105 M4b) to show ``[i/N] <stem> ·
+        decode 38/56 min`` for multi-file runs.  The prefix is part of the
+        description, not a separate echo line.  A re-prefix with a new
+        value *replaces* any previous ``[i/N] stem · `` batch prefix (no
+        accumulation), and a completed task is never re-prefixed.  A no-op
+        when no stage is active or when the display is disabled.
+        """
+        if self.disable:
+            return
+        task = self._progress.tasks[-1] if self._progress.tasks else None
+        if task is None:
+            return
+        # A completed task has its description replaced by the completion
+        # marker; skip it so a re-prefix never resurrects a finished stage.
+        if task.description.startswith("[green]"):
+            return
+        description = task.description
+        # The exact prefix last applied to this task (or None on first use).
+        previous = self._prefixes.get(task.id)
+        if previous is not None:
+            if description.startswith(prefix):
+                self._prefixes[task.id] = prefix
+                return
+            # Replace exactly the recorded previous prefix (if still
+            # present); a description someone else changed is prefixed as-is.
+            if description.startswith(previous):
+                description = description[len(previous) :]
+        elif description.startswith(prefix):
+            return
+        self._progress.update(task.id, description=f"{prefix}{description}")
+        self._prefixes[task.id] = prefix
 
 
 def _stderr_file() -> IO[str]:

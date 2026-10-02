@@ -9,6 +9,7 @@ derived from the word timestamps.
 
 from __future__ import annotations
 
+import sys
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -333,3 +334,112 @@ def test_decode_meeting_falls_back_to_prompt_free_redecode() -> None:
     assert fallback["condition_on_previous_text"] is False
     assert "Janni" not in result["text"]
     assert "data platform" in result["text"]
+
+
+# -- verbose kwarg pinning (issue #105, lens MEDIUM) ------------------------
+
+
+def test_verbose_false_only_when_display_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With an active (non-disabled) display, every window call receives
+    verbose=False (which enables the real tqdm bar in mlx-whisper 0.4.3 —
+    the shim intercepts it). With display=None or a disabled display,
+    NO verbose kwarg is passed (library default: no bar, no print)."""
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
+    raw = _raw(
+        [
+            _seg(
+                "moro vaan",
+                [
+                    {"word": " moro", "start": 0.0, "end": 0.5},
+                    {"word": " vaan", "start": 0.6, "end": 1.0},
+                ],
+            )
+        ]
+    )
+
+    # Case 1: active display → verbose=False passed
+    from vemoizer.progress import ProgressDisplay
+
+    display_on = ProgressDisplay(verbose=True)
+    display_on.start()
+    mock_on = _mock_whisper(raw)
+    with (
+        patch.dict("sys.modules", {"mlx_whisper": mock_on}),
+        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
+    ):
+        t = WhisperTranscriber()
+        t._model_path = "/tmp/turbo"
+        t._mlx_whisper = mock_on
+        t.transcribe(_audio(60.0), display=display_on)
+    display_on.close()
+    kwargs_on = mock_on.transcribe.call_args.kwargs
+    assert kwargs_on.get("verbose") is False, (
+        f"Expected verbose=False with active display, got {kwargs_on.get('verbose')}"
+    )
+
+    # Case 2: display=None → no verbose kwarg
+    mock_off = _mock_whisper(raw)
+    with (
+        patch.dict("sys.modules", {"mlx_whisper": mock_off}),
+        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
+    ):
+        t = WhisperTranscriber()
+        t._model_path = "/tmp/turbo"
+        t._mlx_whisper = mock_off
+        t.transcribe(_audio(60.0))
+    kwargs_off = mock_off.transcribe.call_args.kwargs
+    assert "verbose" not in kwargs_off, (
+        f"Expected no verbose kwarg with display=None, got {kwargs_off.get('verbose')}"
+    )
+
+    # Case 3: disabled display → no verbose kwarg
+    display_disabled = ProgressDisplay(verbose=False)  # disable=True
+    mock_disabled = _mock_whisper(raw)
+    with (
+        patch.dict("sys.modules", {"mlx_whisper": mock_disabled}),
+        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
+    ):
+        t = WhisperTranscriber()
+        t._model_path = "/tmp/turbo"
+        t._mlx_whisper = mock_disabled
+        t.transcribe(_audio(60.0), display=display_disabled)
+    kwargs_disabled = mock_disabled.transcribe.call_args.kwargs
+    assert "verbose" not in kwargs_disabled, (
+        f"Expected no verbose kwarg with disabled display, "
+        f"got {kwargs_disabled.get('verbose')}"
+    )
+
+
+def test_heal_redecode_never_gets_verbose_true() -> None:
+    """The self-heal re-decode (condition_on_previous_text=False) must never
+    receive verbose=True. The heal path calls transcribe with display=None
+    (the heal lambdas do not pass a display), so no verbose kwarg is set."""
+    raw = _raw(
+        [
+            _seg(
+                "moro",
+                [{"word": " moro", "start": 0.0, "end": 0.5}],
+            )
+        ]
+    )
+    mock = _mock_whisper(raw)
+    with (
+        patch.dict("sys.modules", {"mlx_whisper": mock}),
+        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
+    ):
+        t = WhisperTranscriber()
+        t._model_path = "/tmp/turbo"
+        t._mlx_whisper = mock
+        # Simulate the heal re-decode call
+        t.transcribe(_audio(10.0), condition_on_previous_text=False)
+
+    kwargs = mock.transcribe.call_args.kwargs
+    assert kwargs.get("verbose") is not True, (
+        f"heal re-decode must not get verbose=True, got {kwargs.get('verbose')}"
+    )
+    # The heal path does not pass a display, so no verbose kwarg
+    assert "verbose" not in kwargs, (
+        f"Expected no verbose kwarg on heal path, got {kwargs.get('verbose')}"
+    )

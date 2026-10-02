@@ -42,7 +42,7 @@ from .llm_tail import apply_llm_tail
 from .notes import generate_notes  # noqa: F401
 from .parakeet_transcriber import ParakeetTranscriber
 from .presets import _normalize_language
-from .progress import StageProgress, format_duration
+from .progress import ProgressDisplay, StageProgress, format_duration
 from .readability import paragraphs, splice_verdicts, tidy_paragraphs
 from .redecode import WhisperReDecodeTranscriber
 from .repair import repair_paragraphs  # noqa: F401
@@ -304,6 +304,7 @@ def transcribe_file(
     repair: bool = False,
     glossary_path: str | None = None,
     speakers: SpeakerCount | None = None,
+    display: ProgressDisplay | None = None,
 ) -> dict:
     """Run the full consensus pipeline over one audio file.
 
@@ -315,6 +316,11 @@ def transcribe_file(
             default) and label each disputed segment with the speaker whose
             segment overlaps it the most; any failure is swallowed
             (fail-open, no speaker labels).
+        display: Optional :class:`~vemoizer.progress.ProgressDisplay`
+            (issue #105) threaded from the CLI/batch layer; when given and
+            the profile is ``meeting``, it is passed to ``decode_meeting``
+            so the mlx-whisper tqdm shim drives the display's decode task.
+            ``None`` (the default) keeps every existing call site unchanged.
 
     Returns:
         ``{"text": str, "segments": list[dict]}`` — the full transcript
@@ -380,20 +386,15 @@ def transcribe_file(
     glossary = load_glossary(glossary_path)
     corrections = load_corrections(glossary_path)
     if profile == "meeting":
-        result_a = decode_meeting(
-            audio, slices, initial_prompt=glossary_prompt(glossary)
-        )
+        kwargs: dict[str, Any] = {"initial_prompt": glossary_prompt(glossary)}
+        if display is not None:
+            kwargs["display"] = display
+        result_a = decode_meeting(audio, slices, **kwargs)
         if result_a is not None:
-            # Measured on the reference meeting (issue #71): consensus
-            # rewriting ON TOP of the whole-file Whisper read changes only
-            # ~2.6% of words and mostly injects noise — short-span
-            # re-decodes are exactly Whisper's hallucination mode. The
-            # meeting profile therefore skips decode B / re-decode /
-            # adjudication entirely (invariant #2 allows skip-by-flag).
+            # Meeting profile skips decode B / re-decode / adjudication
+            # entirely (invariant #2 allows skip-by-flag; see issue #71).
             run_consensus = False
         else:
-            # Whisper failed: dictation is the fallback; the warning is
-            # appended after it succeeds (a total failure is an error, #73).
             logger.warning("meeting decode failed; falling back to dictation path")
             meeting_fallback = True
     if result_a is None:
@@ -449,7 +450,6 @@ def transcribe_file(
             + " slices (model may have failed to load)"
         )
         return result
-
     logger.info("assemble: adjudicating spans")
     assembled = _assemble(
         result_a, result_b, redecoded, llm_config, speaker_segments, spans=spans
