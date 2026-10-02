@@ -13,7 +13,9 @@ transcript outputs into the actual working directory (the repo root).
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -37,6 +39,100 @@ _OUTPUT_EXTS = {".txt", ".json", ".srt", ".vtt", ".md"}
 def _repo_root() -> Path:
     # tests/ lives one level below the repo root.
     return Path(__file__).parent.parent
+
+
+@pytest.fixture(autouse=True)
+def _no_real_system_effects(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> Iterator[dict[str, list[list[str]]] | None]:
+    """Stub the three real-system-call seams so the suite never posts a
+    macOS notification, spawns ``caffeinate``, or plays audio.
+
+    The production code keeps NO test awareness (no PYTEST_CURRENT_TEST
+    checks); each side-effect module exposes one tiny private seam that
+    performs the real system call, and this autouse fixture replaces those
+    seams with recorders/no-ops. Patching ``subprocess`` or ``sys`` globally
+    is deliberately avoided: it would break the unrelated ffmpeg/ingest
+    tests that run real ``subprocess.run``.
+
+    Opt-out: tests (or their module) marked ``real_system_calls`` exercise
+    the *real* seam and patch ``subprocess`` themselves; for those the
+    fixture is a no-op so the real seam (and the test's own subprocess
+    patches) run. The per-test patches in test_notify.py / test_caffeinate.py
+    / test_speaker_clips.py keep working because the real seam is restored.
+    """
+    if request.node.get_closest_marker("real_system_calls") is not None:
+        # This test (or its module/class) opts out: the real seam runs and
+        # the test patches subprocess itself. Do not install the stubs.
+        yield None
+        return
+
+    from vemoizer import caffeinate, notify, speaker_clips
+
+    # The per-test recorder, published to dependents (the ``system_effects``
+    # fixture) through the fixture's own yielded value — no closure
+    # introspection required.
+    recorded: dict[str, list[list[str]]] = {
+        "notify": [],
+        "caffeinate": [],
+        "afplay": [],
+    }
+
+    def _post(argv: list[str]) -> None:
+        recorded["notify"].append(argv)
+
+    class _FakeProcess:
+        """A stand-in for the ``caffeinate`` Popen.
+
+        ``terminate``/``wait``/``kill``/``poll`` satisfy
+        ``caffeinate_context``'s exit path without touching a real process.
+        """
+
+        def terminate(self) -> None:  # pragma: no cover - trivial no-op
+            pass
+
+        def kill(self) -> None:  # pragma: no cover - trivial no-op
+            pass
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+        def poll(self) -> int | None:
+            return 0
+
+    def _spawn(argv: list[str]) -> Any:
+        recorded["caffeinate"].append(argv)
+        return _FakeProcess()
+
+    def _run_player(argv: list[str]) -> int:
+        recorded["afplay"].append(argv)
+        return 0
+
+    monkeypatch.setattr(notify, "_post", _post)
+    monkeypatch.setattr(caffeinate, "_spawn", _spawn)
+    monkeypatch.setattr(speaker_clips, "_run_player", _run_player)
+    yield recorded
+
+
+@pytest.fixture
+def system_effects(
+    _no_real_system_effects: dict[str, list[list[str]]] | None,
+) -> dict[str, list[list[str]]]:
+    """The recorded system effects for the current test.
+
+    Depends on the autouse ``_no_real_system_effects`` fixture, which yields
+    the per-test ``recorded`` dict (or ``None`` when the test opted out via
+    the ``real_system_calls`` marker) so this fixture can hand it to the test
+    for asserting on the recorded argv lists.
+    """
+    if _no_real_system_effects is None:
+        raise RuntimeError(
+            "system_effects: this test is marked ``real_system_calls`` and "
+            "opted out of the autouse system-effects stub, so no effects "
+            "are being recorded. Remove the marker (or drop the "
+            "``system_effects`` fixture) to use this fixture."
+        )
+    return _no_real_system_effects
 
 
 def _snapshot_root() -> set[str]:

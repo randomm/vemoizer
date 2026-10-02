@@ -24,6 +24,8 @@ from vemoizer.speaker_clips import (
     talk_share,
 )
 
+pytestmark = pytest.mark.real_system_calls
+
 FFMPEG = pytest.mark.skipif(
     shutil.which("ffmpeg") is None, reason="ffmpeg not available"
 )

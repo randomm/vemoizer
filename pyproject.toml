@@ -43,6 +43,7 @@ testpaths = ["tests"]
 addopts = "-m 'not models'"
 markers = [
     "models: model-backed tests that download real weights; opt-in via `uv run pytest -m models` (AGENTS.md: unit tests must not touch the network)",
+    "real_system_calls: unit tests that exercise the real subprocess seam (notify/caffeinate/speaker_clips); they patch subprocess themselves and opt out of the autouse system-effects stub",
 ]
 
 [tool.ruff]
