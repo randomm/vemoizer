@@ -747,6 +747,53 @@ glossary for the `meeting` and `memo` presets:
   machine for ASR; the only network access in the ASR path is the one-time
   (revision-pinned) model download (invariant #1).
 
+## Per-file run log (issue #111, M4c)
+
+Every transcribed file (or group) writes a full log to
+`./.vemoizer/logs/<NFC-stem>.log` regardless of `-v`. The span per seam
+(see the three seams below) opens the file with `'w'` at block start, so a
+re-run truncates the same file and a file that fails immediately still
+leaves a (possibly near-empty) log. The directory is `0700`, the file
+`0600`.
+
+Terminal noise: in non-verbose runs a `level < WARNING` filter is added to
+the **existing** terminal stderr handlers only (the root `basicConfig`
+handler under `-v`, and `huggingface_hub`'s own `StreamHandler`) — nothing
+is added to the root logger, so `vemoizer.*` and third-party `WARNING+`
+reach stderr exactly as today via the last-resort handler. In verbose mode
+no filter is added (INFO flows to both the terminal and the file).
+
+`huggingface_hub` is the special case: the same file handler is attached
+directly to that logger **only when `propagate` is `False` at block entry**
+(runtime check, not an assumption); when `propagate` is `True` (the
+default) nothing is attached there and HF records reach the file via root
+propagation. All handler/level/filter changes are restored in a `finally`
+on every exit path (normal, exception, `KeyboardInterrupt`).
+
+Redaction: the file handler's `Formatter` subclass rewrites the formatted
+message *and* exception text, replacing `hf_[A-Za-z0-9]{8,}` →
+`hf_<redacted>`, case-insensitive `Bearer\s+\S+` → `Bearer <redacted>`, and
+the value of the env var named by the LLM config's `api_key_env` (when set
+and ≥ 8 chars). Transcript text is never logged by any stage.
+
+Fail-open: if the log directory/file cannot be created or opened (read-only
+CWD, permissions, ENOSPC, hostile stem), the run behaves identically to no
+file logging — at most one short stderr notice per CLI invocation
+(`--quiet` suppresses it), no exception leaks. A mid-run write failure is
+swallowed silently.
+
+The three seams (`with file_log(stem)` per output):
+
+- **seam (a)** `transcribe_batch` (expert single file): the span starts
+  *after* the `_resolve_llm_config` check so a `ConfigError` abort creates
+  no log file.
+- **seam (b)** the `run_preset` plain per-file loop (single / memo /
+  `--no-group`): the span wraps the entire per-file iteration (transcribe
+  through the write/notification).
+- **seam (c)** the `run_batch` group loop (grouped meeting): the span
+  wraps the per-group transcribe + result handling; the log is named after
+  the group's **first part** NFC stem.
+
 ## Invariants (authoritative: AGENTS.md "Project Invariants")
 
 1. Transcription is local, full stop. No cloud-ASR fallback.
