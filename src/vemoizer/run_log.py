@@ -111,7 +111,7 @@ def reset_run_log() -> None:
 # handler would truncate the log mid-run and the detach would strip the
 # outer handler from every logger). Two DISTINCT raw stems are never the
 # same key, so a sanitised collision (``a/b`` vs ``a_b``) can never be
-# treated as one span: ``_log_path`` disambiguates the second one to
+# treated as one span: ``_resolve_log_path`` disambiguates the second one to
 # ``<sanitised>.2.log`` (and ``.3`` ...) deterministically, so distinct
 # inputs never share a log. (In practice the four CLI seams pass bare
 # filename stems with no ``/``, so the disambiguation is defensive.)
@@ -265,7 +265,7 @@ def _sanitise_stem(stem: str) -> str:
 _stem_owner: dict[str, str] = {}
 
 
-def _log_path(base_dir: Path, stem: str) -> Path:
+def _resolve_log_path(base_dir: Path, stem: str) -> tuple[Path, str]:
     """The log path for *stem*, disambiguating sanitised collisions.
 
     Two different raw stems that sanitise to the same name (``a/b`` and
@@ -274,20 +274,24 @@ def _log_path(base_dir: Path, stem: str) -> Path:
     ``<sanitised>.3.log", ...`` — the first raw stem keeps the plain name,
     so a re-run over the same input still truncates its own log and distinct
     inputs never share a log (see ``_stem_owner``).
+
+    Pure: reads ``_stem_owner`` but never mutates it. Returns the resolved
+    path and the map key that would be written if this stem were a new
+    claimant (the plain sanitised name for a first-claimant or re-run, the
+    ``<sanitised>.N`` slot for a collision); the caller decides whether to
+    actually claim it.
     """
     sanitised = _sanitise_stem(stem)
     base = base_dir / LOG_DIR_NAME / LOG_SUBDIR
     if _stem_owner.get(sanitised) == stem:
         # A re-run over the same raw stem keeps its own (plain) file.
-        return base / f"{sanitised}.log"
+        return base / f"{sanitised}.log", sanitised
     if sanitised not in _stem_owner:
-        _stem_owner[sanitised] = stem
-        return base / f"{sanitised}.log"
+        return base / f"{sanitised}.log", sanitised
     n = 2
     while f"{sanitised}.{n}" in _stem_owner:
         n += 1
-    _stem_owner[f"{sanitised}.{n}"] = stem
-    return base / f"{sanitised}.{n}.log"
+    return base / f"{sanitised}.{n}.log", f"{sanitised}.{n}"
 
 
 def _notice(message: str, quiet: bool | None) -> None:
@@ -420,21 +424,10 @@ def file_log(
     base = base_dir if base_dir is not None else Path.cwd()
     eff_verbose = verbose if verbose is not None else _context.verbose
     eff_quiet = quiet if quiet is not None else _context.quiet
-    # Read-only path computation (no ``_stem_owner`` mutation): a nested
-    # no-op span for the same raw stem never calls the allocating
-    # ``_log_path``. The read-only logic mirrors ``_log_path`` exactly.
-    sanitised = _sanitise_stem(stem)
-    base_logs = base / LOG_DIR_NAME / LOG_SUBDIR
-    if _stem_owner.get(sanitised) == stem:
-        path = base_logs / f"{sanitised}.log"  # re-run: same raw stem
-    elif sanitised not in _stem_owner:
-        path = base_logs / f"{sanitised}.log"  # first claimant
-    else:
-        n = 2
-        while f"{sanitised}.{n}" in _stem_owner:
-            n += 1
-        path = base_logs / f"{sanitised}.{n}.log"  # collision slot
-    key = str(path)
+    # Pure path resolution for the guard key (no ``_stem_owner`` mutation):
+    # a nested no-op span for the same stem never claims a slot.
+    resolved_path, claim_key = _resolve_log_path(base, stem)
+    key = str(resolved_path)
     if key in _open_paths:
         # Re-entrant: an outer span for this exact log file is already open
         # (a nested open would truncate it mid-run). Yield a no-op.
@@ -442,10 +435,10 @@ def file_log(
         return
     _open_paths.add(key)
     try:
-        # Allocate under the guard: this mutates ``_stem_owner`` if needed.
-        # For the same raw stem, the owner is already us so no mutation
-        # occurs; for a new raw stem, the slot is claimed here.
-        _log_path(base, stem)
+        # Claim the slot under the guard: for a re-run the owner is already
+        # us (the write is idempotent); for a new raw stem this is what
+        # makes the collision disambiguation visible to later spans.
+        _claim(base, stem, claim_key)
         handler = _open_log_file(base, stem, key, eff_quiet)
         if handler is None:
             # Fail-open: the directory/file could not be created; degrade
@@ -467,6 +460,19 @@ def file_log(
         # KeyboardInterrupt, SystemExit — so a setup failure can never
         # leak the key and no-op the next span for the same stem.
         _open_paths.discard(key)
+
+
+def _claim(base_dir: Path, stem: str, claim_key: str) -> Path:
+    """Record *stem* as the owner of *claim_key* in ``_stem_owner``.
+
+    The single place the owner map is mutated: the pure
+    :func:`_resolve_log_path` decides *which* key to claim, and this step
+    makes that decision stick. The write is idempotent for a re-run (the
+    owner is already *stem*). Returns the claimed path, so a fresh claim
+    reproduces exactly what the pure resolver resolved.
+    """
+    _stem_owner[claim_key] = stem
+    return base_dir / LOG_DIR_NAME / LOG_SUBDIR / f"{claim_key}.log"
 
 
 def _open_log_file(

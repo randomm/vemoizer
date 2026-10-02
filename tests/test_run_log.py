@@ -672,7 +672,35 @@ class TestRelativeUndo:
             root.removeHandler(sh)
 
 
-# --- helpers ----------------------------------------------------------------
+class TestResolveLogPath:
+    """The pure resolver: one implementation of the path decision tree, no
+    ``_stem_owner`` mutation, and its result matches the claim path in all
+    three cases (first-claimant, re-run, collision)."""
+
+    def test_resolver_is_pure_and_matches_claim(self, tmp_path: Path) -> None:
+        # First-claimant: two consecutive calls return the same plain path
+        # and leave the owner map untouched.
+        run_log_module._stem_owner.clear()
+        first = run_log_module._resolve_log_path(tmp_path, "a/b")
+        assert first == run_log_module._resolve_log_path(tmp_path, "a/b")
+        assert run_log_module._stem_owner == {}
+        assert first[0] == tmp_path / ".vemoizer" / "logs" / "a_b.log"
+        # Claiming the first-claimant slot, then resolving the colliding stem
+        # must deterministically pick ``a_b.2.log`` — and the collision call
+        # itself must be pure (two calls, map unchanged).
+        run_log_module._claim(tmp_path, "a/b", first[1])
+        collision = run_log_module._resolve_log_path(tmp_path, "a_b")
+        assert collision == run_log_module._resolve_log_path(tmp_path, "a_b")
+        assert run_log_module._stem_owner == {"a_b": "a/b"}
+        assert collision[0] == tmp_path / ".vemoizer" / "logs" / "a_b.2.log"
+        # Re-run over the same raw stem as the owner keeps the plain path.
+        rerun = run_log_module._resolve_log_path(tmp_path, "a/b")
+        assert rerun[0] == first[0]
+        assert run_log_module._stem_owner == {"a_b": "a/b"}
+        # Resolver result == claim result for all three cases.
+        assert run_log_module._claim(tmp_path, "a_b", collision[1]) == collision[0]
+        assert run_log_module._claim(tmp_path, "a/b", rerun[1]) == first[0]
+        assert run_log_module._stem_owner == {"a_b": "a/b", "a_b.2": "a_b"}
 
 
 def _find_file_handler() -> logging.FileHandler | None:
