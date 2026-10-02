@@ -49,6 +49,17 @@ def test_loads_one_term_per_line_skipping_comments(tmp_path: Path) -> None:
     assert load_glossary(f) == ["Flagship-hanke", "Riihimäki", "Movescount"]
 
 
+def test_non_utf8_explicit_glossary_fails_loud(tmp_path: Path) -> None:
+    """A non-UTF-8 ``--glossary`` file is a user error: ValueError (fail-loud),
+    not a raw UnicodeDecodeError and not a silent empty glossary."""
+    bad = tmp_path / "bad.txt"
+    bad.write_bytes(b"\xff\xfe\x00bad")
+    with pytest.raises(ValueError, match="not valid UTF-8"):
+        load_glossary(bad)
+    with pytest.raises(ValueError, match="not valid UTF-8"):
+        load_corrections(bad)
+
+
 def test_missing_file_is_empty_glossary(tmp_path: Path) -> None:
     assert load_glossary(tmp_path / "nope.txt") == []
 

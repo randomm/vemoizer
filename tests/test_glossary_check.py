@@ -207,6 +207,43 @@ def test_prefix_pattern_unmatchable_check(tmp_path) -> None:
     assert any("*bad*" in u for u in report.unmatchable)
 
 
+def test_at_term_under_budget_not_reported_dropped(tmp_path, monkeypatch) -> None:
+    """``@``-prefixed terms are LLM-only (M2): never budgeted into the
+    whisper prompt, so an under-budget @-term must NOT appear in the
+    'Dropped terms (over budget)' line."""
+    _patch_tokenizer(monkeypatch, _FakeTokenizer())
+    f = tmp_path / "g.txt"
+    f.write_text("foo\n@bar\n", encoding="utf-8")
+    report = gc.check_file(f)
+    assert "@bar" not in report.dropped_terms
+    assert "foo" not in report.dropped_terms
+    text = gc.render_report(report)
+    assert "Dropped terms" not in text
+
+
+def test_genuinely_over_budget_plain_term_still_dropped(tmp_path, monkeypatch) -> None:
+    """A plain (non-@) term over budget is still reported, alongside @-terms."""
+    _patch_tokenizer(monkeypatch, _FakeTokenizer())
+    f = tmp_path / "g.txt"
+    f.write_text("a" * 200 + "\n@bar\n", encoding="utf-8")
+    report = gc.check_file(f)
+    assert "a" * 200 in report.dropped_terms
+    assert "@bar" not in report.dropped_terms
+
+
+def test_cli_check_non_utf8_file_clean_error(tmp_path, monkeypatch) -> None:
+    """A non-UTF-8 glossary file: one clean stderr line, exit 1, no traceback."""
+    _patch_tokenizer(monkeypatch, _FakeTokenizer())
+    bad = tmp_path / "bad.txt"
+    bad.write_bytes(b"\xff\xfe\x00bad")
+    result = runner.invoke(app, ["glossary", "check", str(bad)], catch_exceptions=False)
+    assert result.exit_code == 1
+    assert "error: could not read" in result.stderr
+    assert "UnicodeDecodeError" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert "Traceback" not in result.stdout
+
+
 # ---------------------------------------------------------------------------
 # Merged layers (no file argument)
 # ---------------------------------------------------------------------------

@@ -70,6 +70,16 @@ def _read_lines(path: str | Path | None) -> list[str]:
     except OSError:
         logger.warning("glossary not readable: %s (continuing without)", path)
         return []
+    except UnicodeDecodeError as e:
+        # A non-UTF-8 EXPLICIT --glossary file is a user error, not a
+        # missing file: the transcribe/batch path has no UnicodeDecodeError
+        # handler, so re-raise as ValueError (the nearest existing type the
+        # generic ``except Exception`` CLI boundaries already turn into
+        # one clean line). The render command catches ValueError explicitly
+        # and degrades to a warning (fail-open, proceed without the
+        # glossary) — that path is unaffected. Never silently ignore
+        # the file.
+        raise ValueError(f"glossary file is not valid UTF-8: {path}") from e
     return [
         line.strip()
         for line in text.splitlines()

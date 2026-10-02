@@ -100,7 +100,9 @@ def _load_corrections(files: list[Path]) -> dict[str, str]:
     for path in files:
         try:
             file_corrections = load_corrections(path)
-        except (OSError, UnicodeDecodeError) as e:
+        except (OSError, UnicodeDecodeError, ValueError) as e:
+            # UnicodeDecodeError is re-raised as ValueError by the loader
+            # (fail-loud for transcribe); render degrades to a warning.
             typer.echo(
                 f"warning: could not read glossary {path}: "
                 f"{type(e).__name__} (proceeding without)",

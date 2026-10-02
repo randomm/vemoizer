@@ -15,7 +15,8 @@ file is given) and prints:
   pattern matches no probe text, so the pair can never fire);
 - ignored/malformed lines (no ``=>``, empty side, duplicate wrong side).
 
-Fail-open: a missing file reports empty (never an error).
+Fail-open: a missing file reports empty (never an error); a present but
+non-UTF-8 file is a clean one-line error (exit 1).
 """
 
 from __future__ import annotations
@@ -64,7 +65,14 @@ class CheckReport:
 
 
 def _read_raw_lines(path: Path | str | None) -> list[str]:
-    """The non-comment, non-blank lines of *path*; ``[]`` when absent."""
+    """The non-comment, non-blank lines of *path*; ``[]`` when absent.
+
+    A missing file stays fail-open (``[]``); an EXISTING file that cannot
+    be decoded as UTF-8 re-raises ``UnicodeDecodeError`` — the command
+    handler turns that into one clean stderr line and exit 1 (the check
+    tool audits the file the user named, silently auditing nothing would
+    be a lie).
+    """
     if path is None:
         return []
     try:
@@ -198,7 +206,7 @@ def _dropped_terms(
         prompt_body = prompt_body[len("Sanasto: ") :]
     if prompt_body.endswith("."):
         prompt_body = prompt_body[:-1]
-    return [t for t in terms if t not in prompt_body]
+    return [t for t in terms if t not in prompt_body and not t.startswith("@")]
 
 
 def _layer_lines() -> list[str]:
@@ -231,9 +239,12 @@ def _layer_lines() -> list[str]:
 def check_file(path: Path | str | None = None) -> CheckReport:
     """Audit *path*; ``None`` reads the merged ``.vemoizer`` layers.
 
-    Fail-open: a missing or unreadable file reports empty (never an
-    error).  The merged-layer path uses the two ``.vemoizer`` glossary
-    files (project first); an explicit path replaces both layers.
+    Fail-open: a missing file reports empty (never an error).  An
+    EXISTING but non-UTF-8 file is an error (``UnicodeDecodeError``
+    name printed to stderr, exit 1) — the check tool audits the file the
+    user named, so silently auditing nothing would be a lie.  The
+    merged-layer path uses the two ``.vemoizer`` glossary files (project
+    first); an explicit path replaces both layers.
     """
     lines = _read_raw_lines(path) if path is not None else _layer_lines()
 
@@ -329,10 +340,17 @@ def register_glossary(app: typer.Typer) -> None:
             None,
             help=(
                 "Glossary file to check; omitted = the merged .vemoizer "
-                "layers (fail-open: missing file reports empty)."
+                "layers (missing file reports empty; non-UTF-8 file is "
+                "an error)."
             ),
         ),
     ) -> None:
         """Print merged layers, the whisper prompt + token count, and audit findings."""
-        report = check_file(path)
+        try:
+            report = check_file(path)
+        except UnicodeDecodeError as e:
+            # A present but non-UTF-8 glossary is a clean one-line error
+            # (exit 1), never a raw traceback (M1 fail-loud).
+            typer.echo(f"error: could not read {path}: {type(e).__name__}", err=True)
+            raise typer.Exit(code=1) from e
         typer.echo(render_report(report))
