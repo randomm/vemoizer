@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import vemoizer.diarization as diarization_mod
 import vemoizer.eval_cli as eval_cli
 import vemoizer.pipeline as pipeline
 import vemoizer.preflight as preflight
@@ -182,7 +183,7 @@ def _patch_diarize(
         segs = default if segments is None else segments
         return DiarizationResult(segments=list(segs))
 
-    monkeypatch.setattr(pipeline, "diarize", _fake_diarize)
+    monkeypatch.setattr(diarization_mod, "diarize", _fake_diarize)
 
 
 def _patch_redecode(monkeypatch, text: str = "moottori") -> None:
@@ -307,7 +308,7 @@ def test_diarize_off_by_default_skips_diarization(tmp_path, monkeypatch) -> None
     def _boom(audio, **kw):
         raise AssertionError("diarize() must not be called when diarize=False")
 
-    monkeypatch.setattr(pipeline, "diarize", _boom)
+    monkeypatch.setattr(diarization_mod, "diarize", _boom)
     result = transcribe_file("/nonexistent.m4a")
     assert result["segments"] == []
 

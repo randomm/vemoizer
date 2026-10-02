@@ -20,6 +20,7 @@ from test_pipeline import (  # noqa: F401 - shared orchestrator fixtures
     _patch_vad,
 )
 
+import vemoizer.diarization as diarization_mod
 import vemoizer.pipeline as pipeline
 from vemoizer.pipeline import transcribe_file
 
@@ -355,7 +356,7 @@ def test_speakers_hint_reaches_diarization(tmp_path, monkeypatch) -> None:
         seen["num_speakers"] = num_speakers
         return DiarizationResult(segments=[(0.0, 2.0, "SPEAKER_00")])
 
-    monkeypatch.setattr(pipeline, "diarize", fake_diarize)
+    monkeypatch.setattr(diarization_mod, "diarize", fake_diarize)
     transcribe_file(
         "/nonexistent.m4a",
         config_path=str(tmp_path / "none.toml"),

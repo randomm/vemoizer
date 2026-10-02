@@ -24,6 +24,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import typer
+
 from . import glossary as _glossary_mod
 from .glossary import glossary_prompt
 
@@ -310,3 +312,27 @@ def render_report(report: CheckReport) -> str:
         lines.append("Ignored/malformed lines:")
         lines.extend(f"  {i}" for i in report.ignored)
     return "\n".join(lines) if lines else "(glossary is empty — nothing to check)"
+
+
+def register_glossary(app: typer.Typer) -> None:
+    """Attach the ``glossary`` sub-app (``check`` subcommand)."""
+    glossary_app = typer.Typer(
+        name="glossary",
+        help="Inspect and audit the glossary file(s).",
+        no_args_is_help=True,
+    )
+    app.add_typer(glossary_app, name="glossary")
+
+    @glossary_app.command("check")
+    def glossary_check(
+        path: Path | None = typer.Argument(  # noqa: B008
+            None,
+            help=(
+                "Glossary file to check; omitted = the merged .vemoizer "
+                "layers (fail-open: missing file reports empty)."
+            ),
+        ),
+    ) -> None:
+        """Print merged layers, the whisper prompt + token count, and audit findings."""
+        report = check_file(path)
+        typer.echo(render_report(report))

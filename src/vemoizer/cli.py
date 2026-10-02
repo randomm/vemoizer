@@ -33,6 +33,7 @@ import typer
 from vemoizer.battery import on_battery
 from vemoizer.diarization import SpeakerCount
 from vemoizer.eval_cli import register_eval
+from vemoizer.glossary_check import register_glossary
 from vemoizer.low_memory import apply_low_memory_mode, default_low_memory
 from vemoizer.names_cli import register_names
 from vemoizer.render_cli import register_render
@@ -51,32 +52,6 @@ app.add_typer(models_app, name="models")
 register_eval(app)
 register_render(app)
 register_names(app)
-
-
-def register_glossary(app: typer.Typer) -> None:
-    """Attach the ``glossary`` sub-app (``check`` subcommand)."""
-    from .glossary_check import check_file, render_report
-
-    glossary_app = typer.Typer(
-        name="glossary",
-        help="Inspect and audit the glossary file(s).",
-        no_args_is_help=True,
-    )
-    app.add_typer(glossary_app, name="glossary")
-
-    @glossary_app.command("check")
-    def glossary_check(
-        path: Path | None = typer.Argument(  # noqa: B008
-            None,
-            help=(
-                "Glossary file to check; omitted = the merged .vemoizer "
-                "layers (fail-open: missing file reports empty)."
-            ),
-        ),
-    ) -> None:
-        """Print merged layers, the whisper prompt + token count, and audit findings."""
-        report = check_file(path)
-        typer.echo(render_report(report))
 
 
 register_glossary(app)

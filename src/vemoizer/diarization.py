@@ -160,3 +160,26 @@ def speaker_for_span(
             best_overlap = overlap
             best = speaker
     return best
+
+
+def run_diarization_stage(
+    audio: np.ndarray,
+    speakers: SpeakerCount | None = None,
+) -> list[tuple[float, float, str]] | None:
+    """Run the diarization stage; ``None`` (fail-open) on any failure.
+
+    ``None`` and ``[]`` are distinct to callers: the orchestrator passes
+    ``None`` when diarization was skipped or failed, and ``[]`` when the
+    stage ran but found no speakers — either way the downstream overlap step
+    leaves the ``speaker`` key off every segment.
+    """
+    try:
+        result = diarize(audio, num_speakers=speakers)
+    except Exception as e:  # noqa: BLE001 - fail-open stage boundary
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "diarization failed, continuing without speaker labels: %s", e
+        )
+        return None
+    return list(result.segments)

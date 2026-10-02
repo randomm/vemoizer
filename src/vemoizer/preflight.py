@@ -17,6 +17,7 @@ inline preflight — it lives in :mod:`vemoizer.doctor` only.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from .models import MODELS
 
@@ -155,3 +156,31 @@ def run_preflight(
     for label, reason in red:
         echo(f"preflight: {label}: {reason}")
     return PreflightResult(red=red, seconds=seconds)
+
+
+def preflight_gate(
+    *,
+    diarize: bool = False,
+    profile: str = "dictation",
+    echo=print,
+) -> dict[str, Any] | None:
+    """Run the inline preflight and return an error dict on red.
+
+    Convenience wrapper for the pipeline: returns ``None`` when the
+    preflight passes, or a ``{"text", "segments", "error"}`` dict when
+    any check is red.  The *profile* argument encodes the meeting-always-
+    diarize rule (issue #79 d4): the token check fires when *diarize* is
+    true OR the profile is ``"meeting"``.
+    """
+    result = run_preflight(
+        diarize=diarize or profile == "meeting",
+        echo=echo,
+    )
+    if not result.red:
+        return None
+    return {
+        "text": "",
+        "segments": [],
+        "error": "preflight failed: "
+        + "; ".join(reason for _label, reason in result.red),
+    }
