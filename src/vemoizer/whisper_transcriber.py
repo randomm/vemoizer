@@ -27,11 +27,12 @@ honored downstream, where per-slice language from decode B wins on spans).
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
 from contextlib import suppress
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import mlx.core as mx
 import numpy as np
@@ -39,6 +40,9 @@ import numpy as np
 from .models import get_model
 from .selfheal import heal
 from .transcriber import TranscriptionResult
+
+if TYPE_CHECKING:
+    from .progress import ProgressDisplay
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +109,7 @@ class WhisperTranscriber:
         self,
         audio: np.ndarray,
         *,
-        display: Any | None = None,
+        display: ProgressDisplay | None = None,
         **kwargs: Any,
     ) -> TranscriptionResult:
         """Transcribe the recording in :data:`WINDOW_SECONDS` windows.
@@ -154,56 +158,38 @@ class WhisperTranscriber:
             "no_speech_threshold": 0.6,
             "hallucination_silence_threshold": 2.0,
             "initial_prompt": self._initial_prompt,
-            # In mlx-whisper 0.4.3 verbose=False ENABLES the tqdm bar and
-            # SUPPRESSES the per-segment print (inverted vs upstream
-            # whisper); the contract test in tests/test_mlx_whisper_contract.py
-            # pins this. The progress shim (issue #105) patches the tqdm
-            # for the duration of the call.
-            "verbose": False,
         }
+        # In mlx-whisper 0.4.3 verbose=False ENABLES the real tqdm bar and
+        # SUPPRESSES the per-segment print (inverted vs upstream whisper);
+        # the contract test in tests/test_mlx_whisper_contract.py pins
+        # both. Only pass it on a call wrapped by an ACTIVE progress shim
+        # (the patch intercepts the bar before it can render). On every
+        # other path the library default (verbose=None: no bar, no print)
+        # is left intact, and a caller's own verbose is never overwritten.
+        if display is not None and not display.disable:
+            options.setdefault("verbose", False)
         options.update(kwargs)
 
         window_frames = int(WINDOW_SECONDS * SAMPLE_RATE)
         raws: list[dict[str, Any]] = []
-        # mlx_whisper can return None on transient GPU/MLX faults; the
-        # guard below names the failing window, so the annotation matches
-        # the runtime contract.
-        from .progress import with_whisper_progress
-
         # The display (when threaded in) is driven by the shim: it patches
         # the tqdm referenced by mlx_whisper.transcribe for the duration of
-        # every window call so the bar's frame counter becomes file-level
-        # minutes on the display's decode task. When display is None or
-        # disabled (non-TTY) the shim is a pass-through and the decode
-        # result is identical.
-        if display is not None:
-            file_total_min = (len(audio) / SAMPLE_RATE) / 60.0
-            # The shim wraps the whole window loop: each window's internal
-            # tqdm.tqdm call hits the patched tqdm; window_offset_seconds
-            # advances the display by the window's file-level position.
-            for index, offset in enumerate(range(0, len(audio), window_frames)):
-                window_offset_seconds = offset / SAMPLE_RATE
-                with with_whisper_progress(
-                    display,
-                    window_offset_seconds=window_offset_seconds,
-                    window_seconds=WINDOW_SECONDS,
-                    file_total_minutes=file_total_min,
-                ):
-                    raw = self._mlx_whisper.transcribe(
-                        audio[offset : offset + window_frames],
-                        path_or_hf_repo=self._model_path,
-                        word_timestamps=True,
-                        language=self._language,
-                        task="transcribe",
-                        **options,
-                    )
-                if raw is None:
-                    raise RuntimeError(
-                        f"whisper window {index} (offset {offset / SAMPLE_RATE:.0f}s) "
-                        "returned None"
-                    )
-                raws.append(raw)
+        # the window loop, so every window's frame counter becomes
+        # file-level minutes on the display's decode task. When display is
+        # None or disabled (non-TTY) the shim is a pass-through and the
+        # decode result is identical.
+        from .progress_shim import with_whisper_progress
+
+        file_total_min = (len(audio) / SAMPLE_RATE) / 60.0
+        if display is not None and not display.disable:
+            shim_cm = with_whisper_progress(
+                display,
+                window_seconds=WINDOW_SECONDS,
+                file_total_minutes=file_total_min,
+            )
         else:
+            shim_cm = contextlib.nullcontext()
+        with shim_cm:
             for index, offset in enumerate(range(0, len(audio), window_frames)):
                 raw = self._mlx_whisper.transcribe(
                     audio[offset : offset + window_frames],
@@ -346,7 +332,7 @@ def decode_meeting(
     audio: np.ndarray,
     slices: list[tuple[int, np.ndarray]],
     initial_prompt: str | None = None,
-    display: Any | None = None,
+    display: ProgressDisplay | None = None,
 ) -> dict[str, Any] | None:
     """Per-window Whisper decode A for the meeting profile (fail-open).
 

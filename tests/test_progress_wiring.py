@@ -413,9 +413,13 @@ def test_multi_file_prefix_set_per_invocation(
 def test_whole_transcribe_wrapping_monotonic_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When a display is passed to WhisperTranscriber.transcribe, the
-    shim patches tqdm for each window and the display's completed value
-    is monotonically non-decreasing across windows."""
+    """When a display is passed to WhisperTranscriber.transcribe, ONE
+    with_whisper_progress context wraps the whole window loop: the shim
+    patches the module-level tqdm attribute once, each window's bar
+    drives the display with strictly increasing file-level minutes, and
+    the display's completed value reaches the file total once (at the end
+    of the last window). 120 s audio → 4 × 30 s windows, file total 2 min.
+    """
     monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
     display = ProgressDisplay()
 
@@ -433,14 +437,10 @@ def test_whole_transcribe_wrapping_monotonic_progress(
     }
     from vemoizer.whisper_transcriber import WhisperTranscriber
 
-    # A fake tqdm module whose factory returns a bar whose n/total advance
-    # as update() is called, so the shim's minutes conversion is exercised
-    # (an auto-mocking MagicMock attribute would leave the assertion vacuous).
     class FakeBar:
-        """A real tqdm-bar stand-in with a working n/total that the shim's
-        minutes conversion can read, in contrast to an auto-mocking MagicMock
-        attribute (whose values would make the monotonic assertion vacuous).
-        """
+        """A tqdm-bar stand-in that records every factory + update call so
+        the shim's minutes conversion is exercised (an auto-mocking
+        MagicMock attribute would leave the assertion vacuous)."""
 
         def __init__(self, total: float = 3000) -> None:
             self.n = 0.0
@@ -457,19 +457,29 @@ def test_whole_transcribe_wrapping_monotonic_progress(
             self.n = float(n)
             self.updates.append(float(n))
 
-    bars_created: list[FakeBar] = []
+    # Track _ShimmedProgress bars created by the shim (one per full-window
+    # decode). The shim's factory is _make_bar (not the original module's
+    # __call__), so we track bar creation via _ShimmedProgress.__init__.
+    from vemoizer.progress_shim import _ShimmedProgress
 
-    class FakeTqdmModule:
-        def tqdm(self, *args: object, **kwargs: object) -> FakeBar:
-            bar = FakeBar()
-            bars_created.append(bar)
-            return bar
+    bars_created: list[_ShimmedProgress] = []
+    orig_shim_init = _ShimmedProgress.__init__
+
+    def tracked_shim_init(self, *args, **kwargs):
+        orig_shim_init(self, *args, **kwargs)
+        bars_created.append(self)
+
+    monkeypatch.setattr(_ShimmedProgress, "__init__", tracked_shim_init)
+
+    # Track factory calls: the shim's _make_bar is the factory. The fake
+    # tqdm module in sys.modules is replaced by the shim's _ShimmedBar,
+    # so we can't record via the original module. Instead, record via
+    # the _ShimmedProgress bars created (one per window).
 
     fake_tr = MagicMock()
-    fake_tr.tqdm = FakeTqdmModule()
+    fake_tr.tqdm = MagicMock()  # will be replaced by the shim
     mock = MagicMock()
 
-    # Track completed values on the display
     completed_values: list[float] = []
     orig_update = display._progress.update
 
@@ -492,14 +502,11 @@ def test_whole_transcribe_wrapping_monotonic_progress(
         t._mlx_whisper = mock
 
         def _fake_whisper_transcribe(audio, *a, **kw):
-            # Emulate mlx_whisper's internal loop: resolve the (patched)
-            # tqdm module via sys.modules — the same path mlx_whisper uses
-            # — then create the bar and drive it to a fraction of the
-            # window's total frames. The shim reads bar.n after each
-            # update, so this makes the minutes conversion non-vacuous.
-            import importlib
-
-            tr_mod = importlib.import_module("mlx_whisper.transcribe")
+            # Emulate mlx_whisper's internal loop: create the bar via the
+            # (patched) tqdm module attribute — the shim has replaced
+            # ``tr_mod.tqdm`` with a _ShimmedBar, so ``tr_mod.tqdm.tqdm(...)``
+            # goes through the shim's factory.
+            tr_mod = fake_tr
             bar = tr_mod.tqdm.tqdm(total=3000, unit="frames")
             bar.__enter__()
             for frac in (0.25, 0.5, 0.75, 1.0):
@@ -512,11 +519,27 @@ def test_whole_transcribe_wrapping_monotonic_progress(
         t.transcribe(np.zeros(120 * 16_000, dtype=np.float32), display=display)
     display.close()
 
-    # The shim must have driven the display at least once
+    # One _ShimmedProgress bar per full-window decode (4 windows).
+    assert len(bars_created) == 4, f"expected 4 window bars, got {len(bars_created)}"
+    # Each bar's total was set from the factory call (total=3000 frames).
+    for b in bars_created:
+        assert b.total == pytest.approx(3000)
+
+    # The shim must have driven the display at least once.
     assert len(completed_values) > 0
-    # Monotonic non-decreasing file-level minutes across windows
+    # The display is driven once per window (4 windows → 4+ completed
+    # values). The per-window values are monotonic in file-level minutes
+    # because each window's bar resets n=0 at __exit__ but the window
+    # offset advances, so the next window's first update is higher than
+    # the previous window's last.
+    assert len(completed_values) >= 4
     for i in range(1, len(completed_values)):
-        assert completed_values[i] >= completed_values[i - 1] - 1e-9
+        assert completed_values[i] >= completed_values[i - 1] - 1e-9, (
+            f"non-monotonic: {completed_values}"
+        )
+    # The display reaches the file total (2.0 min) by the end of the last
+    # window — the decode stage finishes on the full total.
+    assert completed_values[-1] == pytest.approx(2.0)
 
 
 # ---------------------------------------------------------------------------
@@ -581,3 +604,22 @@ def test_dictation_fallback_no_stranded_decode_stage(
     # There should be no running "decode" task (it was finished)
     decode_running = [t for t in running_tasks if "decode" in t.description]
     assert len(decode_running) == 0, f"Stranded decode task: {decode_running}"
+
+
+def test_set_batch_prefix_nfc_normalizes_nfd_stem(
+    tty_display: ProgressDisplay,
+) -> None:
+    """The [i/N] prefix uses the NFC-normalised stem (decision 3): an NFD
+    (decomposed) stem is composed to NFC before being shown."""
+    # NFD: 'm' + combining acute + 'o' (decomposed) vs NFC 'mó'
+    nfd_stem = "mo\u0301"  # 'm', 'o', combining acute (NFD)
+    nfc_stem = "m\u00f3"  # 'm', 'ó' (NFC)
+    assert nfd_stem != nfc_stem  # they are different strings
+    task_id = tty_display.add_stage("decode")
+    set_batch_prefix(tty_display, 1, 2, nfd_stem)
+    desc = tty_display._progress.tasks[task_id].description
+    # The prefix must use the NFC form
+    assert f"[1/2] {nfc_stem} · decode" == desc, (
+        f"Expected NFC stem in prefix, got: {desc!r}"
+    )
+    tty_display.close()

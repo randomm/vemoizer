@@ -16,11 +16,10 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from vemoizer.progress import (
-    ProgressDisplay,
+from vemoizer.progress import ProgressDisplay, frames_to_minutes
+from vemoizer.progress_shim import (
     _NoopBar,
     _ShimmedBar,
-    frames_to_minutes,
     with_whisper_progress,
 )
 from vemoizer.whisper_transcriber import WhisperTranscriber
@@ -100,7 +99,6 @@ def test_shim_patches_and_restores_tqdm(
     try:
         with with_whisper_progress(
             display,
-            window_offset_seconds=0,
             window_seconds=30.0,
             file_total_minutes=1.0,
         ):
@@ -135,7 +133,6 @@ def test_shim_restores_tqdm_when_body_raises(
             pytest.raises(RuntimeError),
             with_whisper_progress(
                 display,
-                window_offset_seconds=0,
                 window_seconds=30.0,
                 file_total_minutes=1.0,
             ),
@@ -154,9 +151,13 @@ def test_shim_restores_tqdm_when_body_raises(
 def test_shim_idempotent_guard_prevents_double_wrap(
     tty_stderr: io.StringIO,
 ) -> None:
-    """While the shim is active, a re-entrant transcribe() call (self-heal
-    short re-decode) gets a no-op bar, not a second wrapped bar."""
+    """While the shim is active, a short re-decode (self-heal, audio well
+    under one window) gets a no-op bar, not a wrapped bar that would double-
+    drive the display. A full window-length decode (audio near window_seconds)
+    gets a real progress bar that advances the display."""
     import importlib
+
+    import numpy as np
 
     real_tr = importlib.import_module("mlx_whisper.transcribe")
     display = ProgressDisplay()
@@ -164,15 +165,25 @@ def test_shim_idempotent_guard_prevents_double_wrap(
     try:
         with with_whisper_progress(
             display,
-            window_offset_seconds=0,
             window_seconds=30.0,
             file_total_minutes=1.0,
         ):
-            # The patched tqdm module is a _ShimmedBar; calling its .tqdm
-            # while the shim is active returns a _NoopBar (re-entrant guard)
-            bar = real_tr.tqdm.tqdm(total=3000, unit="frames", disable=False)
+            # The patched tqdm module is a _ShimmedBar; a short re-decode
+            # (self-heal, ~1 s of audio) returns a _NoopBar.
+            short_audio = np.zeros(16_000, dtype=np.float32)  # 1 s
+            bar = real_tr.tqdm.tqdm(short_audio, total=3000, unit="frames")
             assert isinstance(bar, _NoopBar), (
-                f"Expected _NoopBar for re-entrant call, got {type(bar).__name__}"
+                f"Expected _NoopBar for short re-decode, got {type(bar).__name__}"
+            )
+            # A full window-length decode (30 s of audio) returns a real
+            # progress bar that drives the display.
+            from vemoizer.progress_shim import _ShimmedProgress
+
+            full_audio = np.zeros(30 * 16_000, dtype=np.float32)  # 30 s
+            full_bar = real_tr.tqdm.tqdm(full_audio, total=3000, unit="frames")
+            assert isinstance(full_bar, _ShimmedProgress), (
+                f"Expected _ShimmedProgress for full window, got "
+                f"{type(full_bar).__name__}"
             )
     finally:
         display.close()
@@ -202,7 +213,6 @@ def test_shim_never_raises_when_real_tqdm_fails(
     try:
         with with_whisper_progress(
             display,
-            window_offset_seconds=0,
             window_seconds=30.0,
             file_total_minutes=1.0,
         ):
@@ -246,7 +256,6 @@ def test_shim_never_raises_when_display_progress_update_fails(
         patch.dict("sys.modules", fake_mods),
         with_whisper_progress(
             display,
-            window_offset_seconds=0,
             window_seconds=30.0,
             file_total_minutes=1.0,
         ),
@@ -285,7 +294,6 @@ def test_shim_disabled_display_is_passthrough(
     with patch.dict("sys.modules", fake_mods):
         with with_whisper_progress(
             display,
-            window_offset_seconds=0,
             window_seconds=30.0,
             file_total_minutes=1.0,
         ):
@@ -373,7 +381,6 @@ def test_shim_never_raises_when_add_stage_fails(
         patch.dict("sys.modules", fake_mods),
         with_whisper_progress(
             display,
-            window_offset_seconds=0,
             window_seconds=30.0,
             file_total_minutes=1.0,
         ),
@@ -415,3 +422,106 @@ def test_transcribe_with_display_patches_tqdm_during_call(
         display.close()
         # After the call, the tqdm attribute is restored
         assert fake_tr.tqdm is original_tqdm
+
+
+# ---------------------------------------------------------------------------
+# Shim: no real tqdm bar renders on stderr (issue #105, lens HIGH)
+# ---------------------------------------------------------------------------
+
+
+def test_shimmed_decode_writes_no_tqdm_to_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The happy path NEVER lets a real tqdm bar render: the shim constructs
+    no real tqdm bar (it computes progress from frame counts), so nothing
+    tqdm-related is written to stderr during a shimmed decode. Only the rich
+    display output (spinner + 'decode' task) appears."""
+    import importlib
+
+    # Use a StringIO as stderr so we can read the output directly (the
+    # tty_stderr fixture uses a CaptureIO that we can't easily read).
+    buf = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", buf)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
+
+    real_tr = importlib.import_module("mlx_whisper.transcribe")
+    display = ProgressDisplay()
+    display.start()
+    try:
+        with with_whisper_progress(
+            display,
+            window_seconds=30.0,
+            file_total_minutes=1.0,
+        ):
+            # The patched factory returns a _ShimmedProgress bar (not a
+            # real tqdm bar). Drive it like mlx_whisper would.
+            bar = real_tr.tqdm.tqdm(total=3000, unit="frames")
+            bar.__enter__()
+            for frac in (0.25, 0.5, 0.75, 1.0):
+                bar.update(int(3000 * frac))
+            bar.__exit__(None, None, None)
+    finally:
+        display.close()
+
+    # No tqdm progress-bar output on stderr: no 'frames/s', no tqdm bar
+    # percentage indicator. The rich display output (spinner, 'decode')
+    # is expected, but tqdm's own bar is not.
+    stderr_out = buf.getvalue()
+    assert "frames/s" not in stderr_out, f"tqdm bar rendered on stderr: {stderr_out!r}"
+    assert "frames [" not in stderr_out, f"tqdm bar rendered on stderr: {stderr_out!r}"
+
+
+def test_noop_bar_unknown_attrs_are_noop_callables() -> None:
+    """pbar.close()/refresh()/set_description() must not raise on a
+    _NoopBar (unknown attributes return a no-op callable; n/total stay
+    numeric)."""
+    bar = _NoopBar()
+    # Numeric attributes stay numeric
+    assert bar.n == 0.0
+    assert bar.total == 0.0
+    # Unknown attributes are no-op callables (must not raise)
+    bar.close()
+    bar.refresh()
+    bar.set_description("x")
+    bar.clear()
+    # They return None (no-op)
+    assert bar.close() is None
+    assert bar.refresh() is None
+
+
+def test_shimmed_progress_unknown_attrs_are_noop_callables(
+    tty_stderr: io.StringIO,
+) -> None:
+    """pbar.close()/refresh()/set_description() must not raise on a
+    _ShimmedProgress bar (unknown attributes return a no-op callable;
+    n/total stay numeric)."""
+    from rich.progress import TaskID
+
+    from vemoizer.progress_shim import _ShimmedProgress
+
+    display = ProgressDisplay()
+    display.start()
+    try:
+        bar = _ShimmedProgress(
+            display,
+            TaskID(1),
+            0.0,
+            30.0,
+            1.0,
+            {"total": 3000},
+        )
+        bar.__enter__()
+        # Numeric attributes
+        assert bar.n == 0.0
+        assert bar.total == 3000
+        # Unknown attributes are no-op callables (must not raise)
+        bar.close()
+        bar.refresh()
+        bar.set_description("x")
+        bar.clear()
+        assert bar.close() is None
+        assert bar.refresh() is None
+        bar.update(1500)
+        bar.__exit__(None, None, None)
+    finally:
+        display.close()

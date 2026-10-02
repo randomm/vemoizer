@@ -17,7 +17,7 @@ patch convention (``monkeypatch.setattr(pipeline, "transcribe_file", ...)``).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 import typer
 
@@ -25,7 +25,11 @@ from vemoizer.batch_output import check_failure_reason
 from vemoizer.caffeinate import caffeinate_context
 from vemoizer.diarization import SpeakerCount
 from vemoizer.llm import ConfigError
+from vemoizer.output.naming import nfc_stem_and_suffix
 from vemoizer.progress_wiring import set_batch_prefix
+
+if TYPE_CHECKING:
+    from vemoizer.progress import ProgressDisplay
 
 __all__ = ["transcribe_batch"]
 
@@ -43,7 +47,7 @@ def transcribe_batch(
     out: Path | None = None,
     quiet: bool = False,
     copy: bool = False,
-    display: Any | None = None,
+    display: ProgressDisplay | None = None,
 ) -> int:
     """Transcribe *files* and write output files (the loop from old cli.py).
 
@@ -67,7 +71,8 @@ def transcribe_batch(
             # M4b (issue #105): prefix the active stage with ``[i/N] stem``
             # for multi-file runs; the prefix is part of the description,
             # not a separate echo line.  No-op when display is None or N=1.
-            set_batch_prefix(display, index, len(files), file.stem)
+            stem, _ = nfc_stem_and_suffix(file)
+            set_batch_prefix(display, index, len(files), stem)
             try:
                 # Fail loud on a malformed project config (issue #78).
                 _resolve_llm_config(config_path)

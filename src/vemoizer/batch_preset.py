@@ -1,14 +1,10 @@
 """Preset (``meeting`` / ``memo``) run orchestration.
 
-Extracted from :mod:`vemoizer.batch_output` (the 500-line hard limit,
-issue #87). ``run_preset`` composes the layered glossary, resolves the
-preset :class:`~vemoizer.presets.RunOptions`, runs the plain per-file
-loop (single file / memo / ``--no-group``: decode guard, fail-loud check,
-one dated ``.md`` + ``.json`` pair per file) or, for meeting with 2+
-files, the M3 grouping flow (:func:`vemoizer.batch.run_batch`) with the
-meeting write seam (one dated pair per group in the CWD). The dated
-output name uses the first source file's ``st_mtime`` (group: first part)
-rather than today, falling back to today when the file cannot be stat'ed.
+Extracted from :mod:`vemoizer.batch_output` (500-line cap, issue #87).
+``run_preset`` composes the layered glossary, resolves the preset
+:class:`~vemoizer.presets.RunOptions`, and runs the plain per-file loop
+(single / memo / ``--no-group``) or the M3 grouping flow (meeting 2+).
+The dated output name uses the first file's ``st_mtime`` (fallback: today).
 """
 
 from __future__ import annotations
@@ -35,6 +31,7 @@ from vemoizer.llm import ConfigError
 from vemoizer.naming_hook import ask_naming_hook
 from vemoizer.output.naming import nfc_stem_and_suffix
 from vemoizer.presets import RunOptions, resolve_options
+from vemoizer.progress import ProgressDisplay
 
 __all__ = ["run_preset"]
 
@@ -60,7 +57,7 @@ def _transcribe_preset_file(
     options: RunOptions,
     glossary_path: str | None,
     notify_failed: bool = False,
-    display: Any | None = None,
+    display: ProgressDisplay | None = None,
 ) -> dict[str, Any] | None:
     """One guarded preset transcribe (the per-file loop's fail-loud core).
 
@@ -116,7 +113,7 @@ def _run_preset_groups(
     tty_isatty: Callable[[], bool] | None,
     effective_glossary: str | None,
     command: str,
-    display: Any | None = None,
+    display: ProgressDisplay | None = None,
 ) -> int:
     """The meeting 2+ files path: the M3 flow via ``run_batch``.
 
@@ -243,7 +240,7 @@ def run_preset(
     input_fn: Callable[[str], str] | None = None,
     print_fn: Callable[[str], None] | None = None,
     tty_isatty: Callable[[], bool] | None = None,
-    display: Any | None = None,
+    display: ProgressDisplay | None = None,
 ) -> int:
     """Run the *meeting* or *memo* preset over *files*.
 
@@ -379,7 +376,9 @@ def run_preset(
             for index, file in enumerate(files, start=1):
                 # M4b (issue #105): prefix the active stage with ``[i/N]
                 # stem`` for multi-file runs.
-                set_batch_prefix(display, index, len(files), file.stem)
+                set_batch_prefix(
+                    display, index, len(files), nfc_stem_and_suffix(file)[0]
+                )
                 result = _transcribe_preset_file(
                     file,
                     options,

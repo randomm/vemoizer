@@ -10,18 +10,21 @@ Re-exported from ``vemoizer.batch`` for test-seam compatibility.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import typer
 
 from vemoizer.presets import RunOptions
+
+if TYPE_CHECKING:
+    from vemoizer.progress import ProgressDisplay
 
 
 def _transcribe_guarded(
     target: Path,
     options: RunOptions,
     description: str,
-    display: Any | None = None,
+    display: ProgressDisplay | None = None,
 ) -> dict[str, Any] | None:
     """One guarded transcribe (issue #77 merge gate).
 
@@ -50,7 +53,7 @@ def _transcribe_guarded(
 def _transcribe_one(
     file: Path,
     options: RunOptions,
-    display: Any | None = None,
+    display: ProgressDisplay | None = None,
 ) -> dict[str, Any]:
     """One ``transcribe_file`` call with the fail-loud config check.
 

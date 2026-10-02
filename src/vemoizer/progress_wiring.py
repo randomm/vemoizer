@@ -10,6 +10,7 @@ in a ``finally`` block by the CLI caller.
 
 from __future__ import annotations
 
+from vemoizer.output.naming import nfc
 from vemoizer.progress import ProgressDisplay
 
 
@@ -37,13 +38,13 @@ def set_batch_prefix(
 
     The prefix is **part of** the progress line's description (not a
     separate echo line) and is shown only when *total* > 1; a single-file
-    run keeps the plain stage text.  *index* is 1-based.  *stem* is the
-    current file's stem (for a grouped meeting: the group's first part's
-    NFC stem) — the privacy contract is that progress text contains only
-    stage names, minute counts and the file stem (never transcript text).
-    A no-op when *display* is ``None`` or disabled.
+    run keeps the plain stage text.  *index* is 1-based.  *stem* is
+    NFC-normalised (decision 3: the ``[i/N]`` prefix uses the NFC
+    normalised stem) — the privacy contract is that progress text contains
+    only stage names, minute counts and the file stem (never transcript
+    text). A no-op when *display* is ``None`` or disabled.
     """
     if display is None or total <= 1:
         return
-    prefix = f"[{index}/{total}] {stem} · "
+    prefix = f"[{index}/{total}] {nfc(stem)} · "
     display.prefix_active_stage(prefix)

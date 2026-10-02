@@ -42,7 +42,7 @@ from .llm_tail import apply_llm_tail
 from .notes import generate_notes  # noqa: F401
 from .parakeet_transcriber import ParakeetTranscriber
 from .presets import _normalize_language
-from .progress import StageProgress, format_duration
+from .progress import ProgressDisplay, StageProgress, format_duration
 from .readability import paragraphs, splice_verdicts, tidy_paragraphs
 from .redecode import WhisperReDecodeTranscriber
 from .repair import repair_paragraphs  # noqa: F401
@@ -304,7 +304,7 @@ def transcribe_file(
     repair: bool = False,
     glossary_path: str | None = None,
     speakers: SpeakerCount | None = None,
-    display: Any | None = None,
+    display: ProgressDisplay | None = None,
 ) -> dict:
     """Run the full consensus pipeline over one audio file.
 
@@ -386,7 +386,7 @@ def transcribe_file(
     glossary = load_glossary(glossary_path)
     corrections = load_corrections(glossary_path)
     if profile == "meeting":
-        kwargs = {"initial_prompt": glossary_prompt(glossary)}
+        kwargs: dict[str, Any] = {"initial_prompt": glossary_prompt(glossary)}
         if display is not None:
             kwargs["display"] = display
         result_a = decode_meeting(audio, slices, **kwargs)

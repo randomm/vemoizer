@@ -87,7 +87,8 @@ def test_mlx_whisper_contract_with_pbar_and_update() -> None:
         "The shim in src/vemoizer/progress.py relies on the tqdm bar being "
         "used as a context manager; if the with-block is removed or the bar "
         "is used differently (e.g. as a plain object without __enter__), the "
-        "shim's _ShimmedProgress wrapper will not intercept the bar's "
+        "shim's _ShimmedProgress (in progress_shim.py) will not intercept "
+        "the bar's "
         "lifecycle."
     )
     assert re.search(r"as pbar\s*:", source), (

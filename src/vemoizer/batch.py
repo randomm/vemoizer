@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from vemoizer.llm import LLMConfig
+    from vemoizer.progress import ProgressDisplay
 
 import numpy as np
 import typer
@@ -144,7 +145,7 @@ def _run_plain(
     out: Path | None,
     quiet: bool,
     write_group_fn: Callable[[Path | str, dict[str, Any]], None] | None = None,
-    display: Any | None = None,
+    display: ProgressDisplay | None = None,
 ) -> int:
     """The plain per-file loop (single file / --no-group).
 
@@ -160,7 +161,8 @@ def _run_plain(
             # M4b (issue #105): prefix the active stage with ``[i/N] stem``
             # for multi-file runs; the prefix is part of the description,
             # not a separate echo line.  No-op when display is None or N=1.
-            set_batch_prefix(display, index, len(ordered), file.stem)
+            stem, _ = nfc_stem_and_suffix(file)
+            set_batch_prefix(display, index, len(ordered), stem)
             if (
                 result := _transcribe_guarded(file, options, file.name, display=display)
             ) is None:
@@ -232,7 +234,7 @@ def run_batch(
     print_fn: Callable[[str], None] | None = None,
     tty_isatty: Callable[[], bool] | None = None,
     write_group_fn: Callable[[Path | str, dict[str, Any]], None] | None = None,
-    display: Any | None = None,
+    display: ProgressDisplay | None = None,
 ) -> int:
     """Transcribe *files* with M3 split-recording grouping (issue #77).
 
@@ -357,7 +359,8 @@ def run_batch(
             # M4b (issue #105): prefix the active stage with ``[i/N]`` where
             # N is the number of transcribe invocations (groups), not source
             # files; the stem is the group's first part (deterministic).
-            set_batch_prefix(display, index, len(groups), group[0].stem)
+            first_stem, _ = nfc_stem_and_suffix(group[0])
+            set_batch_prefix(display, index, len(groups), first_stem)
             if len(group) == 1:
                 # A per-file decode/write failure is a clean one-line error.
                 result = _transcribe_guarded(
