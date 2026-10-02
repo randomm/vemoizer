@@ -225,6 +225,36 @@ def _render_quality_report(
     result["quality_report"] = report
 
 
+def check_failure_reason(
+    file: Path | str,
+    result: dict[str, Any],
+    *,
+    diarize: bool,
+    diarize_label: str = "--diarize",
+) -> str | None:
+    """The one-line failure reason for a failed result check (issue #100).
+
+    The single source of the failure reason shared by ``_check_result``
+    (which prints ``error: <reason>``) and the M4a failure notifications
+    (which must carry the same reason, with the ``error: `` prefix
+    stripped by the notify helper). Returns ``None`` when the result is
+    fine, or the exact message for each of the three failure conditions:
+    an ``error`` key, an empty transcript (no text and no segments), or
+    *diarize* requested but no speaker labels.
+    """
+    if "error" in result:
+        return str(result["error"])
+    if not result.get("text") and not result.get("segments"):
+        return f"no transcript produced for {file} (empty transcript)"
+    if (
+        diarize
+        and result.get("segments")
+        and not any("speaker" in seg for seg in result["segments"])
+    ):
+        return f"{diarize_label} requested but no speaker labels returned for {file}"
+    return None
+
+
 def _check_result(
     file: Path | str,
     result: dict[str, Any],
@@ -265,25 +295,11 @@ def _check_result(
         )
     for warning in warnings:
         typer.echo(warning, err=True)
-    if "error" in result:
-        typer.echo(f"error: {result['error']}", err=True)
-        return 1
-    if not result.get("text") and not result.get("segments"):
-        typer.echo(
-            f"error: no transcript produced for {file} (empty transcript)",
-            err=True,
-        )
-        return 1
-    if (
-        diarize
-        and result.get("segments")
-        and not any("speaker" in seg for seg in result["segments"])
-    ):
-        typer.echo(
-            f"error: {diarize_label} requested but "
-            f"no speaker labels returned for {file}",
-            err=True,
-        )
+    reason = check_failure_reason(
+        file, result, diarize=diarize, diarize_label=diarize_label
+    )
+    if reason is not None:
+        typer.echo(f"error: {reason}", err=True)
         return 1
     return 0
 

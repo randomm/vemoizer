@@ -40,7 +40,6 @@ import numpy as np
 import typer
 
 from vemoizer.caffeinate import caffeinate_context
-from vemoizer.diarization import SpeakerCount
 from vemoizer.grouping_common import with_part_markers
 from vemoizer.ingest import IngestError
 from vemoizer.llm import ConfigError
@@ -72,6 +71,7 @@ from vemoizer.batch_output import (  # noqa: F401,E402
     _process_result,
     _write_output,
     _write_preset_output,
+    check_failure_reason,
 )
 
 # Re-export run_preset from its new home (batch_preset.py, issue #87) so
@@ -121,71 +121,13 @@ def _resolve_llm_config(config_path: str | None) -> LLMConfig | None:
     return _default_search()
 
 
-def transcribe_batch(
-    files: list[Path],
-    *,
-    formats: list[str],
-    config_path: str | None,
-    profile: str,
-    repair: bool,
-    glossary_path: str | None,
-    speakers: SpeakerCount | None,
-    diarize: bool,
-    out: Path | None = None,
-    quiet: bool = False,
-    copy: bool = False,
-) -> int:
-    """Transcribe *files* and write output files (the loop from old cli.py).
-
-    Returns 0 on success, 1 if any file failed.
-    """
-    from vemoizer.pipeline import transcribe_file
-
-    exit_code = 0
-    with caffeinate_context():
-        for file in files:
-            try:
-                # Fail loud on a malformed project config (issue #78).
-                _resolve_llm_config(config_path)
-            except ConfigError as e:
-                # Consistent with run_preset: stop the batch, no siblings.
-                typer.echo(f"error: {e}", err=True)
-                return 1
-            try:
-                result = transcribe_file(
-                    file,
-                    diarize=diarize,
-                    config_path=config_path,
-                    profile=profile,
-                    repair=repair,
-                    glossary_path=glossary_path,
-                    speakers=speakers,
-                )
-            except (KeyboardInterrupt, SystemExit):
-                # ConfigError is handled by the try above; only the two
-                # non-Exception control-flow signals need re-raising here.
-                raise
-            except Exception as e:
-                # A per-file decode/write failure is a clean one-line error.
-                typer.echo(f"error: {file.name}: {e}", err=True)
-                exit_code = 1
-                continue
-            if not _process_result(
-                file,
-                result,
-                formats=list(formats),
-                out=out,
-                quiet=quiet,
-                # The expert transcribe loop: --copy is honored here (the
-                # group path never copies); the diarize flag comes from the
-                # function parameter, so both are passed explicitly.
-                options=None,
-                diarize=diarize,
-                copy=copy,
-            ):
-                exit_code = 1
-                continue
-    return exit_code
+# The expert transcribe loop now lives in transcribe_loop.py (the 500-line
+# hard cap on this file, issue #100 M4a); re-exported here so
+# ``batch.transcribe_batch`` (and every test's import of it) keeps working.
+# The loop resolves its seams through this module's namespace
+# (``_resolve_llm_config`` / ``_process_result``), so the
+# ``batch._resolve_llm_config`` test patches still patch the name it calls.
+from vemoizer.transcribe_loop import transcribe_batch  # noqa: F401,E402
 
 
 def _transcribe_guarded(
@@ -204,11 +146,14 @@ def _transcribe_guarded(
     try:
         return _transcribe_one(target, options)
     except (KeyboardInterrupt, SystemExit):
-        # Control-flow signals only — everything else degrades per target
-        # (same contract as transcribe_batch / the group path).
         raise
     except Exception as e:  # noqa: BLE001 - per-file fail-loud boundary
         typer.echo(f"error: {description}: {e}", err=True)
+        # M4a (issue #100), seam (c): one failure notification per
+        # file/group whose transcribe raised; reason = the stderr line above.
+        from vemoizer.notify import notify_result
+
+        notify_result(description, "failed", f"error: {description}: {e}")
         return None
 
 
@@ -262,7 +207,11 @@ def _run_plain(
                 continue
             if write_group_fn is not None:
                 # The preset write seam (issue #87): shared _check_and_write
-                # helper so both run_batch loops keep one implementation.
+                # helper. M4a (issue #100), seam (c): failure notifications
+                # for this seam live HERE (check failed — the ``error:``
+                # line is on stderr); the SUCCESS notification lives at the
+                # seam's own write point (write_group), so a partial-pair
+                # write failure is a failure, never a success.
                 if not _check_and_write(
                     write_group_fn,
                     file,
@@ -270,6 +219,12 @@ def _run_plain(
                     diarize=options.diarize,
                     diarize_label="diarize",
                 ):
+                    from vemoizer.notify import notify_result
+
+                    reason = check_failure_reason(
+                        file, result, diarize=options.diarize, diarize_label="diarize"
+                    )
+                    notify_result(file, "failed", reason or "")
                     exit_code = 1
                 continue
             if not _process_result(
@@ -281,8 +236,24 @@ def _run_plain(
                 options=options,
                 diarize=options.diarize,
             ):
+                # M4a (issue #100), seam (a): one failure notification per
+                # file that failed the checks or the output write (expert
+                # plain loop / --no-group; the preset seam path above never
+                # reaches this branch).
+                from vemoizer.notify import notify_result
+
+                reason = check_failure_reason(
+                    file, result, diarize=options.diarize, diarize_label="--diarize"
+                )
+                notify_result(file, "failed", reason or "")
                 exit_code = 1
                 continue
+            # M4a (issue #100), seam (a): one success notification per file
+            # that was transcribed AND its output written (expert plain /
+            # --no-group; the preset seam's write point covers preset runs).
+            from vemoizer.notify import notify_result
+
+            notify_result(file, "done")
     return exit_code
 
 
@@ -473,9 +444,13 @@ def run_batch(
 
             if write_group_fn is not None:
                 # Preset write seam (issue #87): shared _check_and_write
-                # helper — fail-loud _check_result first, then the seam
-                # (an unexpected seam exception degrades per-group via
-                # _call_write_seam: clean one-line error, keep going).
+                # helper — fail-loud _check_result first, then the seam (an
+                # unexpected seam exception degrades per-group via
+                # _call_write_seam). M4a (issue #100), seam (c): failure
+                # notifications for the grouped preset seam live HERE
+                # (check failed — the ``error:`` line is on stderr); the
+                # SUCCESS notification lives at the seam's own write point
+                # (write_group).
                 if not _check_and_write(
                     write_group_fn,
                     label,
@@ -483,6 +458,12 @@ def run_batch(
                     diarize=options.diarize,
                     diarize_label="diarize",
                 ):
+                    from vemoizer.notify import notify_result
+
+                    reason = check_failure_reason(
+                        label, result, diarize=options.diarize, diarize_label="diarize"
+                    )
+                    notify_result(label, "failed", reason or "")
                     exit_code = 1
                 continue
             if not _process_result(
@@ -494,6 +475,22 @@ def run_batch(
                 options=options,
                 diarize=options.diarize,
             ):
+                # M4a (issue #100), seam (a): one failure notification per
+                # group that failed the checks or the output write (expert
+                # group path, no preset seam; a multi-part group's label
+                # names its first part).
+                from vemoizer.notify import notify_result
+
+                reason = check_failure_reason(
+                    label, result, diarize=options.diarize, diarize_label="--diarize"
+                )
+                notify_result(label, "failed", reason or "")
                 exit_code = 1
                 continue
+            # M4a (issue #100), seam (a): one success notification per group
+            # that was transcribed AND its output written (expert group
+            # loop, no preset seam).
+            from vemoizer.notify import notify_result
+
+            notify_result(label, "done")
     return exit_code
