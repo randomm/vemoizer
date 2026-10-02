@@ -10,29 +10,23 @@ truncates the same file.
 Terminal noise control (non-verbose runs): the file handler is attached
 to the ROOT logger in both modes, so an INFO record from any propagating
 logger (vemoizer.*, httpx, pyannote, ...) lands in the log exactly once.
-WARNING+ still reaches stderr exactly as today: in non-verbose mode via
-logging's last-resort handler (the file handler writes WARNING+ to the
-file but not the terminal, and does not attach a filter to itself), in
-verbose mode via basicConfig's root stderr handler. ``huggingface_hub``
-is the special case: when its own ``propagate`` flag is False (HF-style
-configuration) its records never reach root, so the same file handler is
-attached to that logger directly — never twice (that would double-write
-every record), design 1. When a span opens it writes its own first record
-— one INFO ``log started for <stem>`` line — so the log is never
-indistinguishable from an empty file; a nested same-stem span (a no-op)
-adds no second line.
+WARNING+ still reaches stderr exactly as today. ``huggingface_hub`` is
+the special case: when its ``propagate`` flag is False its records never
+reach root, so the same file handler is attached directly — never twice
+(design 1). When a span opens it writes one INFO ``log started for
+<stem>`` line so the log is never indistinguishable from an empty file;
+a nested same-stem span (a no-op) adds no second line.
 
 Privacy: a :class:`_RedactingFormatter` on the file handler rewrites the
 formatted message AND exception text, so HuggingFace access tokens
-(``hf_…``), ``Bearer …`` header values, and the value of the LLM config's
-``api_key_env`` environment variable can never land in a log (design 4).
+(``hf_…``), ``Bearer …`` header values, and the LLM config's ``api_key_env``
+environment variable value can never land in a log (design 4).
 
 Fail-open, mirroring :mod:`vemoizer.notify`: if the log directory or file
-cannot be created/opened (read-only CWD, permissions, ENOSPC, hostile
-stem) the run behaves identically to no file logging — at most ONE short
-stderr notice per CLI invocation (suppressed when ``--quiet``), no
-exception ever leaks, and a mid-run write failure kills the file handler
-silently (design 7).
+cannot be created/opened the run behaves identically to no file logging —
+at most ONE short stderr notice per CLI invocation (suppressed when
+``--quiet``), no exception ever leaks, and a mid-run write failure kills
+the file handler silently (design 7).
 """
 
 from __future__ import annotations
@@ -351,7 +345,11 @@ def _attach(handler: logging.Handler, verbose: bool) -> _Undo:
     if root.level > logging.INFO:
         undo.record_level(root, root.level)
         root.setLevel(logging.INFO)
-    if attached_to_hf and hf_logger.level not in (10, 20):
+    if attached_to_hf and hf_logger.level not in (
+        logging.NOTSET,
+        logging.DEBUG,
+        logging.INFO,
+    ):
         # NOTSET (0) or explicitly above INFO (WARNING 30+): raise to INFO.
         undo.record_level(hf_logger, hf_logger.level)
         hf_logger.setLevel(logging.INFO)
@@ -411,24 +409,31 @@ def file_log(
     *base_dir* defaults to the CWD. *verbose* / *quiet* default to the
     run context set by :func:`configure` (design 5).
 
-    The file handler is attached to the ROOT logger at INFO level in both
-    modes, and — only when ``huggingface_hub.propagate`` is False — to the
-    ``huggingface_hub`` logger directly (never twice, design 1). When the
-    span opens it writes its own first record — one INFO ``log started
-    for <original stem>`` line — so the log is never indistinguishable
-    from an empty file; a nested span writing to the same file (a no-op)
-    adds no second line.
-
     Fail-open: any error creating the directory/file degrades to no file
-    logging with at most one short stderr notice per invocation (design 5);
-    a mid-run write error is swallowed silently (design 7). The handler is
-    removed from every logger it was attached to and ``close()``d on every
-    exit path (success, exception, ``KeyboardInterrupt``).
+    logging with at most one short stderr notice per invocation (design 5).
+    The re-entrant guard key is added before setup and discarded in a
+    ``finally`` covering the whole span, so even a ``KeyboardInterrupt``
+    or ``SystemExit`` during setup cannot leak the key. The failure path
+    is explicit (no ``assert``), so it behaves identically under
+    ``python -O``.
     """
     base = base_dir if base_dir is not None else Path.cwd()
-    path = _log_path(base, stem)
     eff_verbose = verbose if verbose is not None else _context.verbose
     eff_quiet = quiet if quiet is not None else _context.quiet
+    # Read-only path computation (no ``_stem_owner`` mutation): a nested
+    # no-op span for the same raw stem never calls the allocating
+    # ``_log_path``. The read-only logic mirrors ``_log_path`` exactly.
+    sanitised = _sanitise_stem(stem)
+    base_logs = base / LOG_DIR_NAME / LOG_SUBDIR
+    if _stem_owner.get(sanitised) == stem:
+        path = base_logs / f"{sanitised}.log"  # re-run: same raw stem
+    elif sanitised not in _stem_owner:
+        path = base_logs / f"{sanitised}.log"  # first claimant
+    else:
+        n = 2
+        while f"{sanitised}.{n}" in _stem_owner:
+            n += 1
+        path = base_logs / f"{sanitised}.{n}.log"  # collision slot
     key = str(path)
     if key in _open_paths:
         # Re-entrant: an outer span for this exact log file is already open
@@ -436,7 +441,43 @@ def file_log(
         yield
         return
     _open_paths.add(key)
-    handler: _QuietFileHandler | None = None
+    try:
+        # Allocate under the guard: this mutates ``_stem_owner`` if needed.
+        # For the same raw stem, the owner is already us so no mutation
+        # occurs; for a new raw stem, the slot is claimed here.
+        _log_path(base, stem)
+        handler = _open_log_file(base, stem, key, eff_quiet)
+        if handler is None:
+            # Fail-open: the directory/file could not be created; degrade
+            # to no file logging (explicit branch, never an AssertionError).
+            yield
+            return
+        undo = _attach(handler, bool(eff_verbose))
+        try:
+            # The span's own first record: one "log started" line per open
+            # span, naming the ORIGINAL stem (the sanitised path is only
+            # for the file).
+            logging.getLogger("vemoizer.run_log").info("log started for %s", stem)
+            yield
+        finally:
+            _detach(undo)
+            handler.close()
+    finally:
+        # Discard the guard key on EVERY exit path — success, exception,
+        # KeyboardInterrupt, SystemExit — so a setup failure can never
+        # leak the key and no-op the next span for the same stem.
+        _open_paths.discard(key)
+
+
+def _open_log_file(
+    base: Path, stem: str, key: str, quiet: bool | None
+) -> _QuietFileHandler | None:
+    """Create the log directory/file and return the handler (fail-open).
+
+    Returns ``None`` (with a once-per-run notice) when the directory or
+    file cannot be created; never raises.
+    """
+    path = Path(key)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(OSError):
@@ -446,19 +487,7 @@ def file_log(
         handler.setFormatter(_RedactingFormatter())
         with contextlib.suppress(OSError):
             path.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600 (best-effort)
+        return handler
     except Exception as e:  # noqa: BLE001 - fail-open: never change the run
-        _open_paths.discard(key)
-        _notice(f"vemoizer: could not open run log {path}: {e}", quiet=eff_quiet)
-        yield
-        return
-    assert handler is not None
-    undo = _attach(handler, bool(eff_verbose))
-    try:
-        # The span's own first record: one "log started" line per open span,
-        # naming the ORIGINAL stem (the sanitised path is only for the file).
-        logging.getLogger("vemoizer.run_log").info("log started for %s", stem)
-        yield
-    finally:
-        _detach(undo)
-        handler.close()
-        _open_paths.discard(key)
+        _notice(f"vemoizer: could not open run log {path}: {e}", quiet=quiet)
+        return None

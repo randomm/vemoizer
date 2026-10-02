@@ -50,6 +50,15 @@ def _logs_dir(tmp_path: Path) -> Path:
     return tmp_path / ".vemoizer" / "logs"
 
 
+def _make_mkdir_raise(monkeypatch, exc_type: type[BaseException]) -> None:
+    """Monkeypatch ``Path.mkdir`` to raise *exc_type* during span setup."""
+
+    def boom(self, *args: object, **kwargs: object) -> None:
+        raise exc_type()
+
+    monkeypatch.setattr(Path, "mkdir", boom)
+
+
 def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
@@ -483,6 +492,59 @@ class TestFailOpen:
             handler.stream = orig_stream
         # The block exits cleanly.
         assert (_logs_dir(tmp_path) / "memo.log").exists()
+
+
+class TestGuardExceptionSafety:
+    """The re-entrancy guard key must not leak when setup raises a
+    ``KeyboardInterrupt`` or ``SystemExit`` (which ``except Exception``
+    does NOT catch): a leaked key would make the next span for the same
+    stem a silent no-op (the guard would no-op it), so we assert the key
+    is discarded on EVERY exit path."""
+
+    def test_keyboard_interrupt_during_setup_discards_guard_key(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A ``KeyboardInterrupt`` raised by ``Path.mkdir`` during setup
+        must leave ``_open_paths`` empty, and a following span for the
+        same stem must open and write its log normally (not no-op)."""
+        _make_mkdir_raise(monkeypatch, KeyboardInterrupt)
+        with (
+            pytest.raises(KeyboardInterrupt),
+            file_log("a", base_dir=tmp_path, verbose=False, quiet=False),
+        ):
+            pass
+        # The guard key must have been discarded despite the non-Exception.
+        assert run_log_module._open_paths == set()
+        # No notice: a non-Exception (KeyboardInterrupt) propagates and is
+        # not a fail-open case — the notice is only for caught errors.
+        assert "could not open run log" not in capsys.readouterr().err
+        # Now a following span for the same stem must work normally.
+        monkeypatch.undo()
+        with file_log("a", base_dir=tmp_path, verbose=False, quiet=True):
+            logging.getLogger("vemoizer.t").info("follow-up record")
+        log = _logs_dir(tmp_path) / "a.log"
+        assert log.exists()
+        assert "follow-up record" in log.read_text(encoding="utf-8")
+
+    def test_system_exit_during_setup_discards_guard_key(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A ``SystemExit`` raised during setup must also discard the key
+        (``except Exception`` does not catch ``SystemExit``)."""
+        _make_mkdir_raise(monkeypatch, SystemExit)
+        with (
+            pytest.raises(SystemExit),
+            file_log("a", base_dir=tmp_path, verbose=False, quiet=True),
+        ):
+            pass
+        assert run_log_module._open_paths == set()
+        # Follow-up span opens normally.
+        monkeypatch.undo()
+        with file_log("a", base_dir=tmp_path, verbose=False, quiet=True):
+            logging.getLogger("vemoizer.t").info("after sys exit")
+        assert ("after sys exit") in (_logs_dir(tmp_path) / "a.log").read_text(
+            encoding="utf-8"
+        )
 
 
 class TestConfigure:

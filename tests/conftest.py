@@ -16,9 +16,11 @@ import logging
 import os
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
+
+from vemoizer import run_log as _run_log_module
 
 # Hermetic CLI help output: typer.rich_utils reads GITHUB_ACTIONS / FORCE_COLOR /
 # PY_COLORS at IMPORT time (rich_utils.py, lines 77-84) to force a coloured
@@ -225,9 +227,9 @@ def _logger_snapshot(name: str) -> tuple[list[logging.Handler], int, bool]:
     return list(lg.handlers), lg.level, lg.propagate
 
 
-def _handler_filter_snapshot(handler: logging.Handler) -> list[logging._FilterType]:
+def _handler_filter_snapshot(handler: logging.Handler) -> list[logging.Filter]:
     """Snapshot a handler's filter list."""
-    return list(handler.filters)
+    return [cast(logging.Filter, f) for f in handler.filters]
 
 
 def _snapshot_all_loggers() -> dict[str, tuple[list[logging.Handler], int, bool]]:
@@ -241,7 +243,7 @@ def _snapshot_all_loggers() -> dict[str, tuple[list[logging.Handler], int, bool]
 
 def _restore_all_loggers(
     snap: dict[str, tuple[list[logging.Handler], int, bool]],
-    handler_filters: dict[int, list[logging._FilterType]] | None = None,
+    handler_filters: dict[int, list[logging.Filter]] | None = None,
 ) -> None:
     """Restore the three loggers to their snapshot."""
     for name, (handlers, level, propagate) in snap.items():
@@ -274,13 +276,17 @@ def _guard_logging_state():
     tests. Pytest-owned handlers are excluded from the comparison.
     """
     before = _snapshot_all_loggers()
-    handler_filters: dict[int, list[logging._FilterType]] = {}
+    handler_filters: dict[int, list[logging.Filter]] = {}
     for _name, (handlers, _level, _prop) in before.items():
         for h in handlers:
             handler_filters[id(h)] = _handler_filter_snapshot(h)
-    yield
-    _assert_logging_state(before)
-    _restore_all_loggers(before, handler_filters)
+    _run_log_module.reset_run_log()
+    try:
+        yield
+    finally:
+        _assert_logging_state(before)
+        _restore_all_loggers(before, handler_filters)
+        _run_log_module.reset_run_log()
 
 
 def _assert_logging_state(

@@ -26,6 +26,7 @@ from typer.testing import CliRunner
 import vemoizer.pipeline as pipeline_module
 import vemoizer.run_log as run_log
 from vemoizer.cli import app
+from vemoizer.run_log import file_log
 
 runner = CliRunner()
 
@@ -286,3 +287,42 @@ def test_file_log_reentrant_same_stem_is_noop(tmp_path, monkeypatch):
     with run_log.file_log("b", base_dir=tmp_path):
         logger.info("other stem")
     assert other.exists()
+
+
+def test_fail_open_does_not_rename_later_span_file(tmp_path):
+    """A span that FAILS OPEN (log cannot be created, base_dir is a regular
+    file) must not permanently claim the sanitised name in the collision
+    map: the NEXT span for the same raw stem, with a good base dir, must
+    write the PLAIN ``a.log`` (not ``a.2.log``)."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x", encoding="utf-8")
+    good = tmp_path / "good"
+    good.mkdir()
+    # First span: fail-open (base_dir is a regular file).
+    with file_log("a", base_dir=blocker, verbose=False, quiet=True):
+        pass
+    # Second span: same raw stem, good base dir — must get ``a.log``.
+    with file_log("a", base_dir=good, verbose=False, quiet=True):
+        logging.getLogger("vemoizer.t").info("second span")
+    log = good / ".vemoizer" / "logs" / "a.log"
+    assert log.exists(), "second span must write the plain a.log"
+    assert (good / ".vemoizer" / "logs" / "a.2.log").exists() is False
+
+
+def test_fail_open_does_not_rename_later_nested_span_file(tmp_path):
+    """Same as above but with the good span NESTED inside the failed span
+    (the failure is in the outer span's setup, so the outer never opens its
+    file; the inner span for the same raw stem must still get ``a.log``)."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x", encoding="utf-8")
+    good = tmp_path / "good"
+    good.mkdir()
+    # Deliberately nested: the outer span fails open (base_dir is a file) and
+    # the inner span uses a different base_dir — they are different spans and
+    # cannot be combined into one `with` statement.
+    with file_log("a", base_dir=blocker, verbose=False, quiet=True):  # noqa: SIM117 - intentionally nested (different base_dir)
+        with file_log("a", base_dir=good, verbose=False, quiet=True):  # noqa: SIM117 - intentionally nested (different base_dir)
+            logging.getLogger("vemoizer.t").info("nested span")
+    log = good / ".vemoizer" / "logs" / "a.log"
+    assert log.exists()
+    assert "nested span" in log.read_text(encoding="utf-8")
