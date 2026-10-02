@@ -25,6 +25,26 @@ __all__ = ["caffeinate_context"]
 _active: bool = False
 
 
+def _spawn(argv: list[str]) -> subprocess.Popen[bytes] | None:
+    """Spawn *argv* (``caffeinate -ims``) with its fail-open handling.
+
+    The single seam that performs the real system call; it returns the
+    spawned process, or ``None`` when spawn fails (fail-open). Tests stub
+    it via the ``system_effects`` autouse fixture without globally patching
+    ``subprocess`` or ``sys``.
+    """
+    try:
+        return subprocess.Popen(
+            argv,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        # Fail-open: no assertion held, but the work still runs.
+        return None
+
+
 @contextmanager
 def caffeinate_context() -> Generator[None, None, None]:
     """Context manager that holds a macOS wake assertion during a block.
@@ -49,19 +69,9 @@ def caffeinate_context() -> Generator[None, None, None]:
         return
 
     _active = True
-    proc: subprocess.Popen[bytes] | None = None
 
     try:
-        try:
-            proc = subprocess.Popen(
-                ["caffeinate", "-ims"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-            )
-        except (FileNotFoundError, OSError, subprocess.SubprocessError):
-            # Fail-open: no assertion held, but the work still runs
-            proc = None
+        proc = _spawn(["caffeinate", "-ims"])
 
         try:
             yield

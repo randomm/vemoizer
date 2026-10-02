@@ -28,6 +28,8 @@ from vemoizer.notify import (
     notify_write,
 )
 
+pytestmark = pytest.mark.real_system_calls
+
 
 class TestDarwin:
     @pytest.fixture(autouse=True)

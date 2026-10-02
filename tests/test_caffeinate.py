@@ -17,6 +17,8 @@ import pytest
 
 from vemoizer.caffeinate import caffeinate_context
 
+pytestmark = pytest.mark.real_system_calls
+
 
 class TestDarwin:
     @pytest.fixture(autouse=True)

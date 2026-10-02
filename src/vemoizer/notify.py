@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from contextlib import suppress
 from pathlib import Path
 
 __all__ = [
@@ -51,6 +52,26 @@ def escape_apple_script(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', "\\b").replace("\n", "\\n")
 
 
+def _post(argv: list[str]) -> None:
+    """Run *argv* (the ``osascript`` invocation) and fail open.
+
+    The single seam that performs the real system call. Swallowing the
+    fail-open errors lives here so tests can stub it (via the
+    ``system_effects`` autouse fixture) without globally patching
+    ``subprocess`` or ``sys``.
+    """
+    with suppress(FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        # Fail-open: a notification is best-effort; never raise, never print
+        # a traceback, never change the run's exit code.
+        subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_TIMEOUT,
+        )
+
+
 def notify(title: str, message: str) -> None:
     """Post *message* as a macOS notification titled *title*.
 
@@ -73,19 +94,7 @@ def notify(title: str, message: str) -> None:
         title=escape_apple_script(title),
         message=escape_apple_script(message),
     )
-    argv = ["osascript", "-e", script]
-    try:
-        subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=_TIMEOUT,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        # Fail-open: a notification is best-effort; never raise, never print
-        # a traceback, never change the run's exit code.
-        return
+    _post(["osascript", "-e", script])
 
 
 #: The fixed notification title for every vemoizer notification.

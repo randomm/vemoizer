@@ -348,6 +348,22 @@ def extract_clips(
     return results
 
 
+def _run_player(argv: list[str]) -> int:
+    """Run the audio player for *argv*; fail-open.
+
+    The single seam that performs the real ``afplay`` call. Returns the
+    player's exit code, or ``-1`` when it cannot be spawned (missing
+    afplay, OS error, timeout) — the fail-open handling lives here so tests
+    can stub it via the ``system_effects`` autouse fixture without globally
+    patching ``subprocess`` or ``sys``.
+    """
+    try:
+        proc = subprocess.run(argv, timeout=PLAY_TIMEOUT_S, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return -1
+    return proc.returncode
+
+
 def play(path: Path | str) -> bool:
     """Play *path* with ``afplay``; fail-open.
 
@@ -359,11 +375,7 @@ def play(path: Path | str) -> bool:
     p = Path(path)
     if not p.is_file():
         return False
-    try:
-        proc = subprocess.run(["afplay", str(p)], timeout=PLAY_TIMEOUT_S, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return proc.returncode == 0
+    return _run_player(["afplay", str(p)]) == 0
 
 
 @contextmanager
