@@ -39,7 +39,18 @@ token — you still get a complete transcript.
 A 64-minute memo processes in ~8 minutes on an M-series Mac, including the
 consensus stages.
 
-## Setup
+## Install as a tool
+
+Install the `vemoizer` command on your PATH and pre-download the
+revision-pinned models (~6 GB):
+
+```bash
+uv tool install --editable ~/projects/vemoizer
+vemoizer models pull
+vemoizer doctor           # optional: verify the local setup
+```
+
+## Setup (developers)
 
 ```bash
 uv sync --group dev
