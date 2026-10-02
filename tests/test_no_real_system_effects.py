@@ -23,6 +23,7 @@ inside the individual seam tests. The production seams never reach real
 
 from __future__ import annotations
 
+from typing import NoReturn
 from unittest.mock import patch
 
 from _cli_helpers import fake_transcribe, isolate_home, touch_files
@@ -36,14 +37,14 @@ from vemoizer.speaker_clips import play
 runner = CliRunner()
 
 
-def _sentinel_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+def _sentinel_run(*args: object, **kwargs: object) -> NoReturn:
     raise AssertionError(
         f"real subprocess.run called: {args!r} {kwargs!r} — the autouse "
         f"system-effects stub did not intercept this call."
     )
 
 
-def _sentinel_popen(*args, **kwargs):  # type: ignore[no-untyped-def]
+def _sentinel_popen(*args: object, **kwargs: object) -> NoReturn:
     raise AssertionError(
         f"real subprocess.Popen called: {args!r} {kwargs!r} — the autouse "
         f"system-effects stub did not intercept this call."

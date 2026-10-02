@@ -12,7 +12,7 @@ import importlib
 import io
 import sys
 import types
-from typing import IO, Any
+from typing import IO, Any, cast
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -569,13 +569,16 @@ def test_shim_tail_window_is_not_noop(
             assert isinstance(shim, WhisperProgress)
             for i, secs in enumerate((30, 30, 30, 10)):
                 shim.mark_window(i * 30)
-                bar = fake.tqdm.tqdm(total=int(secs * 100), unit="frames")  # type: ignore[attr-defined]
+                bar = cast(
+                    _ShimmedProgress,
+                    fake.tqdm.tqdm(total=int(secs * 100), unit="frames"),
+                )
                 assert isinstance(bar, _ShimmedProgress), (
                     f"window {i} ({secs}s) misclassified as {type(bar).__name__}"
                 )
                 bar.__enter__()
                 for frac in (0.5, 1.0):
-                    bar.update(int(float(bar.total or 0) * frac))  # type: ignore[operator]
+                    bar.update(int(float(bar.total or 0) * frac))
                 bar.__exit__(None, None, None)
         display.close()
     finally:

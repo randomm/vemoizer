@@ -1,32 +1,25 @@
 """Per-file run log + third-party log-noise suppression (issue #111, M4c).
 
-Every transcribed file (or group) gets a full log at
-``<base_dir>/.vemoizer/logs/<NFC stem>.log`` regardless of ``-v``. A
-``with file_log(stem)`` block at each seam wraps the transcribe call plus
-the per-file result handling, so a file that fails immediately still
-leaves a (possibly near-empty) log, and a re-run over the same input
-truncates the same file.
+Every transcribed file gets a log at
+``<base_dir>/.vemoizer/logs/<NFC stem>.log`` regardless of ``-v``; a
+re-run over the same input truncates the same file.
 
-Terminal noise control (non-verbose runs): the file handler is attached
-to the ROOT logger in both modes, so an INFO record from any propagating
-logger (vemoizer.*, httpx, pyannote, ...) lands in the log exactly once.
-WARNING+ still reaches stderr exactly as today. ``huggingface_hub`` is
-the special case: when its ``propagate`` flag is False its records never
-reach root, so the same file handler is attached directly — never twice
-(design 1). When a span opens it writes one INFO ``log started for
-<stem>`` line so the log is never indistinguishable from an empty file;
-a nested same-stem span (a no-op) adds no second line.
+Terminal noise control: the file handler is attached to the ROOT logger in
+both modes so an INFO record from any propagating logger lands in the log
+exactly once. ``huggingface_hub`` is the special case: when ``propagate``
+is False its records never reach root, so the handler is attached directly
+there too — never twice (design 1). A span writes one INFO ``log started
+for <stem>`` line on open; a nested same-stem span adds no second line.
 
-Privacy: a :class:`_RedactingFormatter` on the file handler rewrites the
-formatted message AND exception text, so HuggingFace access tokens
-(``hf_…``), ``Bearer …`` header values, and the LLM config's ``api_key_env``
-environment variable value can never land in a log (design 4).
+Privacy: a :class:`_RedactingFormatter` rewrites the message and
+exception text, so HuggingFace tokens (``hf_…``), ``Bearer …`` header
+values, and the ``api_key_env`` value can never land in a log (design 4).
 
 Fail-open, mirroring :mod:`vemoizer.notify`: if the log directory or file
 cannot be created/opened the run behaves identically to no file logging —
-at most ONE short stderr notice per CLI invocation (suppressed when
-``--quiet``), no exception ever leaks, and a mid-run write failure kills
-the file handler silently (design 7).
+at most ONE short stderr notice per invocation (suppressed when
+``--quiet``), no exception leaks, and a mid-run write failure kills the
+handler silently (design 7).
 """
 
 from __future__ import annotations
@@ -216,7 +209,8 @@ class _NoThirdPartyInfoFilter(logging.Filter):
 
 
 class _QuietFileHandler(logging.FileHandler):
-    """A ``FileHandler`` that never lets a write error reach the caller.
+    """A ``FileHandler`` (file path or pre-opened *stream*) that never lets a
+    write error reach the caller.
 
     ``handle`` is overridden so a write failure (ENOSPC, EROFS, ...) is
     routed to ``handleError`` — which swallows it and disables further
@@ -486,11 +480,20 @@ def _open_log_file(
         path.parent.mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(OSError):
             path.parent.chmod(stat.S_IRWXU)  # 0700 (best-effort)
+        # Create with 0600 at open time (umask-independent); ``fchmod``
+        # also fixes a pre-existing wider file (O_CREAT ignores mode on an
+        # existing path). ``FileHandler.__init__`` does not accept a
+        # pre-opened stream, so construct the handler, then re-init it as a
+        # ``StreamHandler`` with our fd-backed stream (which owns the fd).
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with contextlib.suppress(OSError):
+            os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)  # 0600 (best-effort)
+        stream = os.fdopen(fd, "w", encoding="utf-8")
         handler = _QuietFileHandler(str(path), mode="w", encoding="utf-8")
+        handler.close()
+        logging.StreamHandler.__init__(handler, stream)
         handler.setLevel(logging.INFO)
         handler.setFormatter(_RedactingFormatter())
-        with contextlib.suppress(OSError):
-            path.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600 (best-effort)
         return handler
     except Exception as e:  # noqa: BLE001 - fail-open: never change the run
         _notice(f"vemoizer: could not open run log {path}: {e}", quiet=quiet)
