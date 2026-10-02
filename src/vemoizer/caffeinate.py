@@ -1,8 +1,9 @@
 """Hold a macOS wake assertion during transcription via caffeinate (issue #14).
 
-The context manager spawns ``caffeinate -dims`` (display, idle, disk,
-network) as a daemon process that holds the assertion until terminated.
-The caller runs the transcription work inside the ``with`` block; on exit
+The context manager spawns ``caffeinate -ims`` (idle, disk, network; the
+display may sleep) as a daemon process that holds the assertion until
+terminated. The caller runs the transcription work inside the ``with``
+block; on exit
 the process is terminated and reaped.
 
 Fail-open: on non-darwin platforms or any spawn error, the context is a
@@ -28,8 +29,9 @@ _active: bool = False
 def caffeinate_context() -> Generator[None, None, None]:
     """Context manager that holds a macOS wake assertion during a block.
 
-    Spawns ``caffeinate -dims`` (no command → holds assertion until
-    terminated). On exit the process is terminated and waited on.
+    Spawns ``caffeinate -ims`` (idle, disk, network; the display may
+    sleep) with no command, so it holds the assertion until terminated.
+    On exit the process is terminated and waited on.
 
     On non-darwin platforms or spawn errors the context is a no-op.
     Nested contexts are also no-ops (the outer context owns the process).
@@ -52,7 +54,7 @@ def caffeinate_context() -> Generator[None, None, None]:
     try:
         try:
             proc = subprocess.Popen(
-                ["caffeinate", "-dims"],
+                ["caffeinate", "-ims"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,

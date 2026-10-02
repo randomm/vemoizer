@@ -1,6 +1,6 @@
 """Tests for the caffeinate wake-assertion context manager (issue #14).
 
-Pattern: context manager that spawns ``caffeinate -dims`` as a daemon,
+Pattern: context manager that spawns ``caffeinate -ims`` as a daemon,
 terminates it on exit. Fail-open: if Popen raises, the context is a no-op
 (no exception, no assertion held — the run continues without the wake lock).
 
@@ -24,7 +24,7 @@ class TestDarwin:
         with patch("vemoizer.caffeinate.sys.platform", "darwin"):
             yield
 
-    def test_popen_called_with_caffeinate_dims(self):
+    def test_popen_called_with_caffeinate_ims(self):
         with patch("subprocess.Popen") as mock_popen:
             mock_popen.return_value = MagicMock()
             with caffeinate_context():
@@ -32,8 +32,8 @@ class TestDarwin:
             mock_popen.assert_called_once()
             call_args = mock_popen.call_args
             assert call_args[0][0][0] == "caffeinate"
-            # -dims: display, idle, disk, network
-            assert "-dims" in call_args[0][0]
+            # -ims: idle, disk, network (the display may sleep)
+            assert "-ims" in call_args[0][0]
 
     def test_process_terminated_on_exit(self):
         with patch("subprocess.Popen") as mock_popen:
