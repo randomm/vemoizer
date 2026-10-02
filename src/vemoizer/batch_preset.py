@@ -27,11 +27,12 @@ from vemoizer.batch_output import (
 )
 from vemoizer.diarization import SpeakerCount
 from vemoizer.ingest import IngestError
-from vemoizer.llm import ConfigError
 from vemoizer.naming_hook import ask_naming_hook
 from vemoizer.output.naming import nfc_stem_and_suffix
+from vemoizer.preset_file_transcribe import _transcribe_preset_file
 from vemoizer.presets import RunOptions, resolve_options
 from vemoizer.progress import ProgressDisplay
+from vemoizer.run_log import file_log
 
 __all__ = ["run_preset"]
 
@@ -50,54 +51,6 @@ def _mtime_date_str(path: Path) -> str:
     except OSError:
         return date.today().isoformat()
     return datetime.fromtimestamp(mtime).date().isoformat()
-
-
-def _transcribe_preset_file(
-    file: Path,
-    options: RunOptions,
-    glossary_path: str | None,
-    notify_failed: bool = False,
-    display: ProgressDisplay | None = None,
-) -> dict[str, Any] | None:
-    """One guarded preset transcribe (the per-file loop's fail-loud core).
-
-    An unexpected ``transcribe_file`` exception degrades to a clean
-    one-line ``error:`` naming the file; ``KeyboardInterrupt``/``SystemExit``
-    propagate; ``None`` on failure. A malformed project config
-    (``ConfigError``) fails loud with a clean error line (issue #78).
-    *display* (issue #105 M4b) is threaded into ``transcribe_file``.
-    """
-    from vemoizer.batch import _resolve_llm_config
-    from vemoizer.pipeline import transcribe_file
-
-    try:
-        # Fail loud on a malformed project config (issue #78).
-        _resolve_llm_config(options.config_path)
-    except ConfigError as e:
-        typer.echo(f"error: {e}", err=True)
-        return None
-    try:
-        return transcribe_file(
-            file,
-            diarize=options.diarize,
-            config_path=options.config_path,
-            profile=options.profile,
-            repair=options.repair,
-            glossary_path=glossary_path,
-            speakers=options.speakers,
-            display=display,
-        )
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except Exception as e:  # noqa: BLE001 - per-file fail-loud boundary
-        typer.echo(f"error: {file.name}: {e}", err=True)
-        if notify_failed:
-            # M4a (issue #100), seam (b): one failure notification per
-            # file whose transcribe raised; reason = the stderr line above.
-            from vemoizer.notify import notify_result
-
-            notify_result(file, "failed", f"error: {file.name}: {e}")
-        return None
 
 
 def _run_preset_groups(
@@ -376,103 +329,115 @@ def run_preset(
             for index, file in enumerate(files, start=1):
                 # M4b (issue #105): prefix the active stage with ``[i/N]
                 # stem`` for multi-file runs.
-                set_batch_prefix(
-                    display, index, len(files), nfc_stem_and_suffix(file)[0]
-                )
-                result = _transcribe_preset_file(
-                    file,
-                    options,
-                    effective_glossary,
-                    notify_failed=True,
-                    display=display,
-                )
-                if result is None:
-                    exit_code = 1
-                    continue
-                # M5a: stash this file's PCM duration (fail-open) and
-                # build the sidecar keys before the seam writes the
-                # .md + .json pair.
-                from vemoizer.ingest import pcm_duration_seconds
-                from vemoizer.sidecar import build_sidecar
-
-                with suppress(OSError, IngestError):  # fail-open: skip on ffmpeg error
-                    result["_source_durations"] = [pcm_duration_seconds(file)]
-                build_sidecar(
-                    result,
-                    command=command,
-                    glossary_files=gfiles,
-                    source_paths=[file],
-                )
-                # M6 (issue #75): stash the report-only glossary provenance
-                # before the seam writes. Source = the real layer file path(s)
-                # the run read (never the composed temp file — deleted in the
-                # finally) or the explicit --glossary; term count = the
-                # whisper-prompt terms only (@-prefixed LLM-only terms never
-                # reached the whisper prompt). Absent when the run read no
-                # glossary at all — then the md header and the report omit
-                # the line, never a blank one.
-                if gfiles:
-                    result["glossary_source"] = (", ".join(gfiles)) + (
-                        f" ({len(options.whisper_prompt)} terms)"
-                    )
-                    result["glossary_terms"] = list(options.whisper_prompt)
-                # M6 (issue #75): compute the per-file quality report
-                # BEFORE _check_result pops result["warnings"] (a report
-                # computed after the pop would see an empty warnings list),
-                # then let the check print the warnings to stderr and fail
-                # loud on error/no-transcript/no-labels.
-                _render_quality_report(result, diarize_requested=bool(options.diarize))
-                result.pop("glossary_terms", None)
-                if _check_result(
-                    file,
-                    result,
-                    diarize=options.diarize,
-                    diarize_label="diarize",
-                ):
-                    # M4a (issue #100), seam (b): one failure notification
-                    # per file that failed the checks; reason = the stderr
-                    # ``error:`` line (same source as _check_result).
-                    from vemoizer.notify import notify_result
-
-                    notify_result(
+                stem, _ = nfc_stem_and_suffix(file)
+                set_batch_prefix(display, index, len(files), stem)
+                # M4c (issue #111), seam (b): per-file log wrapping the entire
+                # per-file iteration (transcribe through notify_write); a
+                # failing transcribe still leaves a log file (decision 6).
+                with file_log(stem):
+                    result = _transcribe_preset_file(
                         file,
-                        "failed",
-                        check_failure_reason(
-                            file,
-                            result,
-                            diarize=options.diarize,
-                            diarize_label="diarize",
-                        )
-                        or "",
+                        options,
+                        effective_glossary,
+                        notify_failed=True,
+                        display=display,
                     )
-                    exit_code = 1
-                    continue
-                pair = _write_preset_output(
-                    result,
-                    first_stem,
-                    Path.cwd(),
-                    date_str=_mtime_date_str(file),
-                )
-                written.extend(pair)
-                if len(pair) < len(PRESET_FORMATS):
-                    # A partial pair (e.g. the .json write failed) means
-                    # this file's run failed; the error line was already
-                    # printed by _write_output. A partial pair is a FAILURE
-                    # notification (one file landed, the pair did not).
-                    # M4a (issue #100), seam (b).
-                    exit_code = 1
+                    if result is None:
+                        exit_code = 1
+                        continue
+                    # M5a: stash this file's PCM duration (fail-open) and
+                    # build the sidecar keys before the seam writes the
+                    # .md + .json pair.
+                    from vemoizer.ingest import pcm_duration_seconds
+                    from vemoizer.sidecar import build_sidecar
+
+                    with suppress(
+                        OSError, IngestError
+                    ):  # fail-open: skip on ffmpeg error
+                        result["_source_durations"] = [pcm_duration_seconds(file)]
+                    build_sidecar(
+                        result,
+                        command=command,
+                        glossary_files=gfiles,
+                        source_paths=[file],
+                    )
+                    # M6 (issue #75): stash the report-only glossary
+                    # provenance before the seam writes. Source = the real
+                    # layer file path(s) the run read (never the composed
+                    # temp file — deleted in the finally) or the explicit
+                    # --glossary; term count = the whisper-prompt terms only
+                    # (@-prefixed LLM-only terms never reached the whisper
+                    # prompt). Absent when the run read no glossary at all —
+                    # then the md header and the report omit the line, never
+                    # a blank one.
+                    if gfiles:
+                        result["glossary_source"] = (", ".join(gfiles)) + (
+                            f" ({len(options.whisper_prompt)} terms)"
+                        )
+                        result["glossary_terms"] = list(options.whisper_prompt)
+                    # M6 (issue #75): compute the per-file quality report
+                    # BEFORE _check_result pops result["warnings"] (a report
+                    # computed after the pop would see an empty warnings
+                    # list), then let the check print the warnings to stderr
+                    # and fail loud on error/no-transcript/no-labels.
+                    _render_quality_report(
+                        result, diarize_requested=bool(options.diarize)
+                    )
+                    result.pop("glossary_terms", None)
+                    if _check_result(
+                        file,
+                        result,
+                        diarize=options.diarize,
+                        diarize_label="diarize",
+                    ):
+                        # M4a (issue #100), seam (b): one failure notification
+                        # per file that failed the checks; reason = the stderr
+                        # ``error:`` line (same source as _check_result).
+                        from vemoizer.notify import notify_result
+
+                        notify_result(
+                            file,
+                            "failed",
+                            check_failure_reason(
+                                file,
+                                result,
+                                diarize=options.diarize,
+                                diarize_label="diarize",
+                            )
+                            or "",
+                        )
+                        exit_code = 1
+                        continue
+                    pair = _write_preset_output(
+                        result,
+                        first_stem,
+                        Path.cwd(),
+                        date_str=_mtime_date_str(file),
+                    )
+                    written.extend(pair)
+                    if len(pair) < len(PRESET_FORMATS):
+                        # A partial pair (e.g. the .json write failed) means
+                        # this file's run failed; the error line was already
+                        # printed by _write_output. A partial pair is a
+                        # FAILURE notification (one file landed, the pair did
+                        # not). M4a (issue #100), seam (b).
+                        exit_code = 1
+                        from vemoizer.notify import notify_write
+
+                        notify_write(
+                            file,
+                            len(pair),
+                            len(PRESET_FORMATS),
+                            "could not write output",
+                        )
+                        continue
+                    # M4a (issue #100), seam (b): one success notification
+                    # per file that was transcribed AND the full pair was
+                    # written (meeting single / --no-group / memo; independent
+                    # of --quiet).
                     from vemoizer.notify import notify_write
 
-                    notify_write(
-                        file, len(pair), len(PRESET_FORMATS), "could not write output"
-                    )
-                    continue
-                # M4a (issue #100), seam (b): one success notification per
-                # file that was transcribed AND the full pair was written
-                # (meeting single / --no-group / memo; independent of --quiet).
-                from vemoizer.notify import notify_write
-
-                notify_write(file, len(pair), len(PRESET_FORMATS))
+                    notify_write(file, len(pair), len(PRESET_FORMATS))
         for name in written:
             if not quiet:
                 typer.echo(f"wrote {name}")

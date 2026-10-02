@@ -65,6 +65,25 @@ def doctor() -> None:
         raise typer.Exit(code=1)
 
 
+def _run_log_configure(*, verbose: bool, quiet: bool, config_path: str | None) -> None:
+    """Set the per-invocation run-log context (issue #111, M4c).
+    Resolves the LLM config fail-open to recover ``api_key_env`` (scrubbed by
+    the ``run_log`` redaction formatter); a config error is the seam's job.
+    """
+    from vemoizer.run_log import configure
+
+    api_key_env: str | None = None
+    try:
+        from vemoizer.batch import _resolve_llm_config
+
+        cfg = _resolve_llm_config(config_path)
+        if cfg is not None:
+            api_key_env = cfg.api_key_env
+    except Exception:  # noqa: BLE001 - fail-open: config errors are the seam's job
+        pass
+    configure(verbose=verbose, quiet=quiet, llm_api_key_env=api_key_env)
+
+
 def _warn_on_battery() -> None:
     """Emit a battery warning to stderr if running on battery power."""
     if on_battery():
@@ -203,6 +222,11 @@ def transcribe(
 
     if verbose:
         logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+    _run_log_configure(
+        verbose=verbose,
+        quiet=quiet,
+        config_path=str(config) if config is not None else None,
+    )
 
     from vemoizer.batch import transcribe_batch
     from vemoizer.output.formatters import FORMAT_EXTENSIONS, OUTPUT_FORMATS
@@ -363,6 +387,11 @@ def meeting(
 
     if verbose:
         logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+    _run_log_configure(
+        verbose=verbose,
+        quiet=quiet,
+        config_path=str(config) if config is not None else None,
+    )
 
     from vemoizer.batch import run_preset
     from vemoizer.progress_wiring import make_batch_display
@@ -433,6 +462,11 @@ def memo(
 
     if verbose:
         logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+    _run_log_configure(
+        verbose=verbose,
+        quiet=quiet,
+        config_path=str(config) if config is not None else None,
+    )
 
     from vemoizer.batch import run_preset
     from vemoizer.progress_wiring import make_batch_display

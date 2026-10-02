@@ -37,7 +37,9 @@ Every stage **fails open**: no LLM key, no re-decode model, no diarization
 token — you still get a complete transcript.
 
 A 64-minute memo processes in ~8 minutes on an M-series Mac, including the
-consensus stages.
+consensus stages. Each transcribed file also writes a full per-file log to
+`./.vemoizer/logs/<name>.log` (regardless of `-v`), with HuggingFace tokens
+and LLM API keys redacted.
 
 ## Install as a tool
 

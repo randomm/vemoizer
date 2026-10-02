@@ -7,6 +7,7 @@ stays a pure test-suite configuration file.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,11 @@ def fake_transcribe(
 
     def fake_transcribe(path, **kwargs):
         record.append(Path(path).name)
+        # A vemoizer.* INFO record per transcribed file: the real transcribe
+        # logs its own pipeline activity, and a log with no records at all
+        # would be indistinguishable from a failed seam (the coverage matrix
+        # asserts non-empty log content).
+        logging.getLogger("vemoizer.pipeline").info("transcribe: %s", Path(path).name)
         return {
             "text": "moikka maailma",
             "segments": [],
