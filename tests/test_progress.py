@@ -175,3 +175,42 @@ def test_ctx_manager_closes_progress(
     # after close, the underlying progress is stopped; calling close again
     # must be idempotent (no exception)
     display.close()
+
+
+# ---------------------------------------------------------------------------
+# prefix_active_stage: no accumulation, no re-prefix of finished tasks
+# (issue #105 lens LOW)
+# ---------------------------------------------------------------------------
+
+
+def test_prefix_active_stage_no_accumulation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-prefixing a still-active task with a new prefix REPLACES the old
+    one instead of accumulating ('[2/3] b · [1/3] a · decode')."""
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
+    display = ProgressDisplay()
+    display.start()
+    task_id = display.add_stage("decode")
+    display.prefix_active_stage("[1/3] a · ")
+    display.prefix_active_stage("[2/3] b · ")
+    desc = display._progress.tasks[task_id].description
+    assert desc == "[2/3] b · decode", f"Expected replacement, got: {desc!r}"
+    display.close()
+
+
+def test_prefix_active_stage_skips_finished_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finished task is never re-prefixed."""
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
+    display = ProgressDisplay()
+    display.start()
+    task_id = display.add_stage("decode")
+    display.finish(task_id, 1.0)
+    display.prefix_active_stage("[1/2] a · ")
+    desc = display._progress.tasks[task_id].description
+    assert desc == "[green]✓ complete", (
+        f"Expected unchanged description after finish, got: {desc!r}"
+    )
+    display.close()

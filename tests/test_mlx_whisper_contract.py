@@ -40,8 +40,8 @@ def test_mlx_whisper_contract_tqdm_module_attribute() -> None:
     source = _get_mlx_whisper_transcribe_source()
     assert re.search(r"^import tqdm\s*$", source, re.MULTILINE), (
         "mlx-whisper contract violation: module-level 'import tqdm' not found. "
-        "The shim in src/vemoizer/progress.py (with_whisper_progress) must be "
-        "revisited: it patches the module-level tqdm attribute of "
+        "The shim in src/vemoizer/progress_shim.py (with_whisper_progress) "
+        "must be revisited: it patches the module-level tqdm attribute of "
         "mlx_whisper.transcribe; if the import has moved, been renamed, or "
         "become a local import, the shim has nothing to patch and the decode "
         "will run without progress."
@@ -53,10 +53,10 @@ def test_mlx_whisper_contract_tqdm_call_total_and_unit() -> None:
     source = _get_mlx_whisper_transcribe_source()
     assert re.search(r"tqdm\.tqdm\(\s*total=", source), (
         "mlx-whisper contract violation: 'tqdm.tqdm(total=...)' call not found. "
-        "The shim in src/vemoizer/progress.py wraps this call to convert the "
-        "frame counter to minutes for the ProgressDisplay; if the call "
-        "signature changes (e.g. total is renamed or the call is refactored), "
-        "the shim must be updated."
+        "The shim in src/vemoizer/progress_shim.py (with_whisper_progress) "
+        "wraps this call to convert the frame counter to minutes for the "
+        "ProgressDisplay; if the call signature changes (e.g. total is renamed "
+        "or the call is refactored), the shim must be updated."
     )
     assert re.search(r'unit\s*=\s*"frames"', source), (
         "mlx-whisper contract violation: 'unit=\"frames\"' not found in the "
@@ -84,12 +84,11 @@ def test_mlx_whisper_contract_with_pbar_and_update() -> None:
     source = _get_mlx_whisper_transcribe_source()
     assert re.search(r"with tqdm\.tqdm\(", source), (
         "mlx-whisper contract violation: 'with tqdm.tqdm(...)' not found. "
-        "The shim in src/vemoizer/progress.py relies on the tqdm bar being "
-        "used as a context manager; if the with-block is removed or the bar "
-        "is used differently (e.g. as a plain object without __enter__), the "
-        "shim's _ShimmedProgress (in progress_shim.py) will not intercept "
-        "the bar's "
-        "lifecycle."
+        "The shim in src/vemoizer/progress_shim.py (with_whisper_progress) "
+        "relies on the tqdm bar being used as a context manager; if the "
+        "with-block is removed or the bar is used differently (e.g. as a "
+        "plain object without __enter__), the shim's _ShimmedProgress will "
+        "not intercept the bar's lifecycle."
     )
     assert re.search(r"as pbar\s*:", source), (
         "mlx-whisper contract violation: 'as pbar:' not found in the "

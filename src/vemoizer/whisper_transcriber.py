@@ -162,13 +162,16 @@ class WhisperTranscriber:
         # In mlx-whisper 0.4.3 verbose=False ENABLES the real tqdm bar and
         # SUPPRESSES the per-segment print (inverted vs upstream whisper);
         # the contract test in tests/test_mlx_whisper_contract.py pins
-        # both. Only pass it on a call wrapped by an ACTIVE progress shim
-        # (the patch intercepts the bar before it can render). On every
-        # other path the library default (verbose=None: no bar, no print)
-        # is left intact, and a caller's own verbose is never overwritten.
-        if display is not None and not display.disable:
-            options.setdefault("verbose", False)
+        # both. When the display is active the effective verbose is forced
+        # to False — even if the caller passed verbose=True or None (an
+        # accidental or deliberate override must never print transcript
+        # text to stdout under an active display, and the bar is owned by
+        # the shim anyway). On every other path the library default
+        # (verbose=None: no bar, no print) is left intact, and a caller's
+        # own verbose is never overwritten.
         options.update(kwargs)
+        if display is not None and not display.disable:
+            options["verbose"] = False
 
         window_frames = int(WINDOW_SECONDS * SAMPLE_RATE)
         raws: list[dict[str, Any]] = []
@@ -181,16 +184,26 @@ class WhisperTranscriber:
         from .progress_shim import with_whisper_progress
 
         file_total_min = (len(audio) / SAMPLE_RATE) / 60.0
-        if display is not None and not display.disable:
-            shim_cm = with_whisper_progress(
+        use_shim = display is not None and not display.disable
+        if use_shim:
+            shim_cm: Any = with_whisper_progress(
                 display,
                 window_seconds=WINDOW_SECONDS,
                 file_total_minutes=file_total_min,
             )
+            mark_window = shim_cm.mark_window
         else:
             shim_cm = contextlib.nullcontext()
+
+            def mark_window(_offset: float) -> None:
+                pass
+
+        # Per-window protocol: declare each main-loop window so the shim's
+        # factory hands its bar to the display (any other bar created before
+        # the next mark is a re-entrant call and gets a no-op bar instead).
         with shim_cm:
             for index, offset in enumerate(range(0, len(audio), window_frames)):
+                mark_window(offset / SAMPLE_RATE)
                 raw = self._mlx_whisper.transcribe(
                     audio[offset : offset + window_frames],
                     path_or_hf_repo=self._model_path,

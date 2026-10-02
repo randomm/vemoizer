@@ -8,9 +8,11 @@ and the decode result being identical with or without a display.
 
 from __future__ import annotations
 
+import importlib
 import io
 import sys
-from typing import IO
+import types
+from typing import IO, Any
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -18,6 +20,7 @@ import pytest
 
 from vemoizer.progress import ProgressDisplay, frames_to_minutes
 from vemoizer.progress_shim import (
+    WhisperProgress,
     _NoopBar,
     _ShimmedBar,
     with_whisper_progress,
@@ -90,7 +93,6 @@ def test_shim_patches_and_restores_tqdm(
 ) -> None:
     """The shim patches tr_mod.tqdm during the with-block and restores it
     after, even when the body raises."""
-    import importlib
 
     real_tr = importlib.import_module("mlx_whisper.transcribe")
     original_tqdm = real_tr.tqdm
@@ -144,20 +146,20 @@ def test_shim_restores_tqdm_when_body_raises(
 
 
 # ---------------------------------------------------------------------------
-# Shim: idempotent guard for re-entrant calls
+# Shim: per-window protocol (mark_window)
 # ---------------------------------------------------------------------------
 
 
-def test_shim_idempotent_guard_prevents_double_wrap(
+def test_shim_per_window_protocol(
     tty_stderr: io.StringIO,
 ) -> None:
-    """While the shim is active, a short re-decode (self-heal, audio well
-    under one window) gets a no-op bar, not a wrapped bar that would double-
-    drive the display. A full window-length decode (audio near window_seconds)
-    gets a real progress bar that advances the display."""
-    import importlib
+    """Per-window protocol: the FIRST bar after mark_window drives the
+    display; any further bar before the next mark is a no-op (nested /
+    re-entrant call). The window loop (WhisperTranscriber) calls
+    mark_window before each main-loop transcribe call; self-heal re-decodes
+    run after the shim exits and never see it."""
 
-    import numpy as np
+    from vemoizer.progress_shim import _ShimmedProgress
 
     real_tr = importlib.import_module("mlx_whisper.transcribe")
     display = ProgressDisplay()
@@ -167,23 +169,21 @@ def test_shim_idempotent_guard_prevents_double_wrap(
             display,
             window_seconds=30.0,
             file_total_minutes=1.0,
-        ):
-            # The patched tqdm module is a _ShimmedBar; a short re-decode
-            # (self-heal, ~1 s of audio) returns a _NoopBar.
-            short_audio = np.zeros(16_000, dtype=np.float32)  # 1 s
-            bar = real_tr.tqdm.tqdm(short_audio, total=3000, unit="frames")
-            assert isinstance(bar, _NoopBar), (
-                f"Expected _NoopBar for short re-decode, got {type(bar).__name__}"
+        ) as shim:
+            assert isinstance(shim, WhisperProgress)
+            shim.mark_window(0.0)
+            bar = real_tr.tqdm.tqdm(total=3000, unit="frames")
+            assert isinstance(bar, _ShimmedProgress), (
+                f"Expected _ShimmedProgress for window 0, got {type(bar).__name__}"
             )
-            # A full window-length decode (30 s of audio) returns a real
-            # progress bar that drives the display.
-            from vemoizer.progress_shim import _ShimmedProgress
-
-            full_audio = np.zeros(30 * 16_000, dtype=np.float32)  # 30 s
-            full_bar = real_tr.tqdm.tqdm(full_audio, total=3000, unit="frames")
-            assert isinstance(full_bar, _ShimmedProgress), (
-                f"Expected _ShimmedProgress for full window, got "
-                f"{type(full_bar).__name__}"
+            nested = real_tr.tqdm.tqdm(total=1000, unit="frames")
+            assert isinstance(nested, _NoopBar), (
+                f"Expected _NoopBar for nested call, got {type(nested).__name__}"
+            )
+            shim.mark_window(30.0)
+            bar2 = real_tr.tqdm.tqdm(total=3000, unit="frames")
+            assert isinstance(bar2, _ShimmedProgress), (
+                f"Expected _ShimmedProgress for window 1, got {type(bar2).__name__}"
             )
     finally:
         display.close()
@@ -199,7 +199,6 @@ def test_shim_never_raises_when_real_tqdm_fails(
 ) -> None:
     """If the real tqdm constructor raises, the shim swallows the error and
     the decode proceeds (the bar degrades to a no-op)."""
-    import importlib
 
     real_tr = importlib.import_module("mlx_whisper.transcribe")
     # Replace the real tqdm module with one whose factory raises
@@ -215,9 +214,8 @@ def test_shim_never_raises_when_real_tqdm_fails(
             display,
             window_seconds=30.0,
             file_total_minutes=1.0,
-        ):
-            # The shim wraps the failing factory in _ShimmedProgress;
-            # calling it must not raise.
+        ) as shim:
+            shim.mark_window(0.0)
             bar = real_tr.tqdm.tqdm(total=3000, unit="frames", disable=False)
             bar.__enter__()
             bar.update(1500)
@@ -258,8 +256,9 @@ def test_shim_never_raises_when_display_progress_update_fails(
             display,
             window_seconds=30.0,
             file_total_minutes=1.0,
-        ),
+        ) as shim,
     ):
+        shim.mark_window(0.0)
         patched = fake_tr.tqdm
         bar = patched.tqdm(total=3000, unit="frames", disable=False)
         bar.__enter__()
@@ -436,7 +435,6 @@ def test_shimmed_decode_writes_no_tqdm_to_stderr(
     no real tqdm bar (it computes progress from frame counts), so nothing
     tqdm-related is written to stderr during a shimmed decode. Only the rich
     display output (spinner + 'decode' task) appears."""
-    import importlib
 
     # Use a StringIO as stderr so we can read the output directly (the
     # tty_stderr fixture uses a CaptureIO that we can't easily read).
@@ -452,9 +450,8 @@ def test_shimmed_decode_writes_no_tqdm_to_stderr(
             display,
             window_seconds=30.0,
             file_total_minutes=1.0,
-        ):
-            # The patched factory returns a _ShimmedProgress bar (not a
-            # real tqdm bar). Drive it like mlx_whisper would.
+        ) as shim:
+            shim.mark_window(0.0)
             bar = real_tr.tqdm.tqdm(total=3000, unit="frames")
             bar.__enter__()
             for frac in (0.25, 0.5, 0.75, 1.0):
@@ -478,7 +475,7 @@ def test_noop_bar_unknown_attrs_are_noop_callables() -> None:
     bar = _NoopBar()
     # Numeric attributes stay numeric
     assert bar.n == 0.0
-    assert bar.total == 0.0
+    assert bar.total is None
     # Unknown attributes are no-op callables (must not raise)
     bar.close()
     bar.refresh()
@@ -487,6 +484,11 @@ def test_noop_bar_unknown_attrs_are_noop_callables() -> None:
     # They return None (no-op)
     assert bar.close() is None
     assert bar.refresh() is None
+    # total is remembered when provided
+    bar_with_total = _NoopBar(total=5000.0)
+    assert bar_with_total.total == 5000.0
+    bar_with_total.update(2500)
+    assert bar_with_total.n == 2500.0
 
 
 def test_shimmed_progress_unknown_attrs_are_noop_callables(
@@ -525,3 +527,195 @@ def test_shimmed_progress_unknown_attrs_are_noop_callables(
         bar.__exit__(None, None, None)
     finally:
         display.close()
+
+
+# ---------------------------------------------------------------------------
+# Per-window protocol: tail window and nested calls (issue #105 lens MEDIUM)
+# ---------------------------------------------------------------------------
+
+
+def test_shim_tail_window_is_not_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tail window shorter than 30 s (e.g. 10 s) is still a window: the
+    mark_window call arms it, so its bar drives the display (the old
+    audio-length heuristic misclassified it as a re-decode). 100 s file:
+    windows 30/30/30/10 s; all four drive the display and the completed
+    value reaches the file total (100/60 min)."""
+    import types
+
+    from vemoizer.progress_shim import _ShimmedProgress
+
+    real_tr: Any = importlib.import_module("mlx_whisper.transcribe")
+    fake: Any = types.ModuleType("fake_tr")
+    fake.tqdm = real_tr.tqdm
+    orig_import = importlib.import_module
+    importlib_mod: Any = importlib
+    importlib_mod.import_module = lambda name: (
+        fake if name == "mlx_whisper.transcribe" else orig_import(name)
+    )
+    try:
+        monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
+        display = ProgressDisplay()
+        display.start()
+        completed: list[float] = []
+        progress_obj: Any = display._progress
+        progress_obj.update = lambda task_id, **kw: completed.append(kw["completed"])
+        with with_whisper_progress(
+            display,
+            window_seconds=30.0,
+            file_total_minutes=100.0 / 60.0,
+        ) as shim:
+            assert isinstance(shim, WhisperProgress)
+            for i, secs in enumerate((30, 30, 30, 10)):
+                shim.mark_window(i * 30)
+                bar = fake.tqdm.tqdm(total=int(secs * 100), unit="frames")  # type: ignore[attr-defined]
+                assert isinstance(bar, _ShimmedProgress), (
+                    f"window {i} ({secs}s) misclassified as {type(bar).__name__}"
+                )
+                bar.__enter__()
+                for frac in (0.5, 1.0):
+                    bar.update(int(float(bar.total or 0) * frac))  # type: ignore[operator]
+                bar.__exit__(None, None, None)
+        display.close()
+    finally:
+        importlib_mod.import_module = orig_import
+
+    assert len(completed) >= 4
+    # file-level completed is monotonic across windows
+    for i in range(1, len(completed)):
+        assert completed[i] >= completed[i - 1] - 1e-9, f"non-monotonic: {completed}"
+    # the display reaches the file total (100 s / 60)
+    assert completed[-1] == pytest.approx(100.0 / 60.0)
+
+
+def test_shim_nested_call_gets_noop_and_does_not_advance_display(
+    tty_stderr: io.StringIO,
+) -> None:
+    """A nested call inside a window gets a _NoopBar and does NOT advance
+    the display (the window's bar keeps driving)."""
+
+    real_tr = importlib.import_module("mlx_whisper.transcribe")
+    display = ProgressDisplay()
+    display.start()
+    completed: list[float] = []
+    orig_update = display._progress.update
+
+    def tracking_update(task_id, **kw):
+        if "completed" in kw:
+            completed.append(kw["completed"])
+        return orig_update(task_id, **kw)
+
+    progress_obj: Any = display._progress
+    progress_obj.update = tracking_update
+    try:
+        with with_whisper_progress(
+            display,
+            window_seconds=30.0,
+            file_total_minutes=1.0,
+        ) as shim:
+            shim.mark_window(0.0)
+            bar = real_tr.tqdm.tqdm(total=3000, unit="frames")
+            bar.__enter__()
+            bar.update(1500)
+            display_after_window = list(completed)
+            # nested call → _NoopBar
+            nested = real_tr.tqdm.tqdm(total=1000, unit="frames")
+            nested.__enter__()
+            nested.update(1000)
+            # the nested call must NOT have advanced the display
+            assert completed == display_after_window, (
+                f"nested call advanced the display: "
+                f"{display_after_window} -> {completed}"
+            )
+            bar.__exit__(None, None, None)
+    finally:
+        display.close()
+
+
+def test_shim_no_tqdm_module_no_stage_created(
+    tty_stderr: io.StringIO,
+) -> None:
+    """When the patched module has no tqdm attribute, the shim does NOT
+    create a display stage (the check happens before add_stage), so no
+    task is stranded."""
+    fake_tr = types.SimpleNamespace()
+
+    display = ProgressDisplay()
+    display.start()
+    add_stage_calls: list[str] = []
+    orig_add = display.add_stage
+
+    def tracking_add(description, total=None):
+        add_stage_calls.append(description)
+        return orig_add(description, total=total)
+
+    display_obj: Any = display
+    display_obj.add_stage = tracking_add
+
+    fake_mods = {"mlx_whisper.transcribe": fake_tr}
+    with (
+        patch.dict("sys.modules", fake_mods),
+        with_whisper_progress(
+            display,
+            window_seconds=30.0,
+            file_total_minutes=1.0,
+        ) as shim,
+    ):
+        assert isinstance(shim, WhisperProgress)
+    # No stage was created (add_stage never called)
+    assert add_stage_calls == [], f"add_stage was called: {add_stage_calls}"
+    display.close()
+
+
+# ---------------------------------------------------------------------------
+# verbose override with an active display (issue #105 lens MEDIUM)
+# ---------------------------------------------------------------------------
+
+
+def test_transcribe_forces_verbose_false_with_active_display(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a display is active, the effective verbose is always False,
+    even if the caller passed verbose=True or verbose=None (the display
+    owns progress and transcript text must never go to stdout)."""
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
+    raw = {
+        "text": "moro",
+        "language": "fi",
+        "segments": [{"text": "moro", "start": 0.0, "end": 1.0, "words": []}],
+    }
+
+    def _run_with_kwargs(extra_kwargs: dict):
+        mock = MagicMock()
+        mock.transcribe = MagicMock(return_value=raw)
+        with (
+            patch.dict("sys.modules", {"mlx_whisper": mock}),
+            patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
+        ):
+            display = ProgressDisplay(verbose=True)
+            display.start()
+            try:
+                t = WhisperTranscriber()
+                t._model_path = "/tmp/turbo"
+                t._mlx_whisper = mock
+                t.transcribe(
+                    np.zeros(16_000, dtype=np.float32),
+                    display=display,
+                    **extra_kwargs,
+                )
+            finally:
+                display.close()
+        return mock.transcribe.call_args.kwargs
+
+    # caller passes verbose=True → forced to False
+    kwargs_true = _run_with_kwargs({"verbose": True})
+    assert kwargs_true.get("verbose") is False, (
+        f"Expected verbose=False (forced), got {kwargs_true.get('verbose')}"
+    )
+
+    # caller passes verbose=None → forced to False
+    kwargs_none = _run_with_kwargs({"verbose": None})
+    assert kwargs_none.get("verbose") is False, (
+        f"Expected verbose=False (forced), got {kwargs_none.get('verbose')}"
+    )

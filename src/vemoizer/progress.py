@@ -236,17 +236,36 @@ class ProgressDisplay:
 
         Used by the batch layer (issue #105 M4b) to show ``[i/N] <stem> ·
         decode 38/56 min`` for multi-file runs.  The prefix is part of the
-        description, not a separate echo line.  A no-op when no stage is
-        active or when the display is disabled.
+        description, not a separate echo line.  A re-prefix with a new
+        value *replaces* any previous ``[i/N] stem · `` batch prefix (no
+        accumulation), and a completed task is never re-prefixed.  A no-op
+        when no stage is active or when the display is disabled.
         """
         if self.disable:
             return
         task = self._progress.tasks[-1] if self._progress.tasks else None
         if task is None:
             return
-        if task.description.startswith(prefix):
+        # A completed task has its description replaced by the completion
+        # marker; skip it so a re-prefix never resurrects a finished stage.
+        if task.description.startswith("[green]"):
             return
-        self._progress.update(task.id, description=f"{prefix}{task.description}")
+        description = task.description
+        if description.startswith(prefix):
+            return
+        # A previous batch prefix is a run of `[i/N] stem · ` (the marker
+        # sits at the END of the prefix string). Find its closing `]` and
+        # check the marker right after it, so a re-prefix replaces the old
+        # prefix instead of accumulating ('[2/3] b · [1/3] a · ...').
+        # A previous batch prefix is `[i/N] stem · ` (the `·` marker sits
+        # inside the prefix string).  Find that marker and strip the old
+        # prefix so a re-prefix replaces it instead of accumulating.
+        if description.startswith("["):
+            marker = " · "
+            idx = description.find(marker)
+            if idx != -1:
+                description = description[idx + len(marker) :]
+        self._progress.update(task.id, description=f"{prefix}{description}")
 
 
 def _stderr_file() -> IO[str]:
