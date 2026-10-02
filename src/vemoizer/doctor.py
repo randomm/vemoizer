@@ -27,6 +27,8 @@ from typing import cast
 
 from .llm import LLMConfig
 from .models import MODELS
+from .preflight import ffmpeg_ok, hf_token_present
+from .preflight import models_cached as models_missing
 
 #: Status constants for :class:`DoctorCheck.status`.
 GREEN = "ok"
@@ -64,31 +66,6 @@ class DoctorReport:
         return all(c.status != RED for c in self.checks)
 
 
-def ffmpeg_ok() -> bool:
-    """True when an ``ffmpeg`` executable is on PATH (shutil.which only)."""
-    import shutil
-
-    return shutil.which("ffmpeg") is not None
-
-
-def hf_token_present() -> bool:
-    """True when ``huggingface_hub.get_token()`` yields a non-empty token.
-
-    Covers the ``HF_TOKEN`` env var AND the cached token file.  May
-    return ``None`` or raise (version-dependent) — both are red, never
-    a crash.
-    """
-    try:
-        from huggingface_hub import get_token
-    except ImportError:  # pragma: no cover - huggingface_hub is a hard dep
-        return False
-    try:
-        token = get_token()
-    except Exception:  # noqa: BLE001 - version-dependent raise → red
-        return False
-    return bool(token)
-
-
 def _config_load() -> tuple[LLMConfig | None, str | None]:
     """(config, parse_error) via the strict layered search.
 
@@ -103,14 +80,6 @@ def _config_load() -> tuple[LLMConfig | None, str | None]:
     except ConfigError as e:
         return None, str(e)
     return config, None
-
-
-def models_missing() -> list[str]:
-    """Names of pinned models absent from the local HF cache (read-only)."""
-    from .models import cache_size
-
-    sizes = cache_size(MODELS)
-    return [name for name, size in sizes.items() if size == 0]
 
 
 def llm_ping_ok(config: LLMConfig) -> bool:
