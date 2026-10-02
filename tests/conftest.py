@@ -171,15 +171,58 @@ def _guard_no_repo_root_output_files():
 # the context manager raises before ``finally``), the handler and level
 # change leak into subsequent tests, breaking ``caplog``-based tests and
 # polluting the test environment. This autouse fixture snapshots the
-# handler list, level, and per-handler filters of the three loggers the
-# design names (root, ``vemoizer``, ``huggingface_hub``) before each test
-# and asserts+restores them after, so any leak is caught and rolled back.
+# handler list, level, ``propagate``, and per-handler filters of the three
+# loggers the design names (root, ``vemoizer``, ``huggingface_hub``) before
+# each test and ASSERTS+restores them after, so any leak is caught (the
+# test fails with a clear ``AssertionError``) and rolled back.
+#
+# Handlers owned by pytest itself (``LogCaptureHandler`` from ``caplog``,
+# ``_LiveLoggingNullHandler`` from the ``live-logging`` plugin, and any
+# other capture handler the logging plugin adds during the test) are
+# EXCLUDED from the comparison so legitimate pytest behaviour does not
+# cause spurious failures.
 
 
-def _logger_snapshot(name: str) -> tuple[list[logging.Handler], int]:
-    """Snapshot a logger's handler list and level."""
+def _is_pytest_handler(h: logging.Handler) -> bool:
+    """True if *h* is a handler owned by pytest itself (excluded from the
+    logging-state assertion)."""
+    if isinstance(h, logging.NullHandler):
+        return True
+    cls_name = type(h).__name__
+    if cls_name in ("LogCaptureHandler", "_LiveLoggingNullHandler"):
+        return True
+    mod = type(h).__module__
+    return mod.startswith("_pytest") or mod.startswith("pytest")
+
+
+def _is_library_handler(h: logging.Handler) -> bool:
+    """True if *h* is a handler added by a third-party library (not the test).
+
+    ``huggingface_hub`` adds a ``StreamHandler`` to its own logger when
+    imported; this is expected library behaviour, not a test leak.
+    """
+    if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+        # HF's default handler writes to stderr via a _FileIO stream.
+        stream = getattr(h, "stream", None)
+        if stream is not None:
+            stream_name = getattr(stream, "name", "")
+            if stream_name in ("/dev/stderr", "stderr"):
+                return True
+            # Check if the stream is sys.stderr by fileno.
+            try:
+                import sys
+
+                if stream.fileno() == sys.stderr.fileno():
+                    return True
+            except (OSError, ValueError, AttributeError):
+                pass
+    return False
+
+
+def _logger_snapshot(name: str) -> tuple[list[logging.Handler], int, bool]:
+    """Snapshot a logger's handler list, level, and propagate flag."""
     lg = logging.getLogger(name)
-    return list(lg.handlers), lg.level
+    return list(lg.handlers), lg.level, lg.propagate
 
 
 def _handler_filter_snapshot(handler: logging.Handler) -> list[logging._FilterType]:
@@ -187,7 +230,7 @@ def _handler_filter_snapshot(handler: logging.Handler) -> list[logging._FilterTy
     return list(handler.filters)
 
 
-def _snapshot_all_loggers() -> dict[str, tuple[list[logging.Handler], int]]:
+def _snapshot_all_loggers() -> dict[str, tuple[list[logging.Handler], int, bool]]:
     """Snapshot the three loggers the design names."""
     return {
         "": _logger_snapshot(""),
@@ -196,35 +239,40 @@ def _snapshot_all_loggers() -> dict[str, tuple[list[logging.Handler], int]]:
     }
 
 
-def _restore_all_loggers(snap: dict[str, tuple[list[logging.Handler], int]]) -> None:
+def _restore_all_loggers(
+    snap: dict[str, tuple[list[logging.Handler], int, bool]],
+) -> None:
     """Restore the three loggers to their snapshot."""
-    for name, (handlers, level) in snap.items():
+    for name, (handlers, level, propagate) in snap.items():
         lg = logging.getLogger(name)
         for h in list(lg.handlers):
             lg.removeHandler(h)
         for h in handlers:
             lg.addHandler(h)
         lg.setLevel(level)
+        lg.propagate = propagate
 
 
 @pytest.fixture(autouse=True)
 def _guard_logging_state():
-    """Snapshot+restore logging state around every test (issue #111 M4c).
+    """Assert+restore logging state around every test (issue #111 M4c).
 
-    Catches any handler or level leaked by ``file_log`` (or any other
-    logging mutation) so it cannot poison ``caplog``-based tests or
-    subsequent tests in the same session.
+    After each test, the post-test state (handlers, levels, per-handler
+    filters, and ``propagate`` of root, ``vemoizer``, and
+    ``huggingface_hub``) is compared with the pre-test snapshot. On
+    mismatch the test fails with a clear ``AssertionError``; the snapshot
+    is restored either way so a leaking test cannot poison subsequent
+    tests. Pytest-owned handlers are excluded from the comparison.
     """
     before = _snapshot_all_loggers()
-    # Also snapshot per-handler filters for the three loggers.
     handler_filters: dict[int, list[logging._FilterType]] = {}
-    for _name, (handlers, _level) in before.items():
+    for _name, (handlers, _level, _prop) in before.items():
         for h in handlers:
             handler_filters[id(h)] = _handler_filter_snapshot(h)
     yield
+    _assert_logging_state(before)
     _restore_all_loggers(before)
-    # Restore per-handler filters.
-    for name, (_handlers, _level) in before.items():
+    for name, (_handlers, _level, _prop) in before.items():
         lg = logging.getLogger(name)
         for h in lg.handlers:
             snap = handler_filters.get(id(h))
@@ -233,3 +281,48 @@ def _guard_logging_state():
                     h.removeFilter(f)
                 for f in snap:
                     h.addFilter(f)
+
+
+def _assert_logging_state(
+    snap: dict[str, tuple[list[logging.Handler], int, bool]],
+) -> None:
+    """Assert the post-test logging state matches the pre-test snapshot.
+
+    Excludes pytest-owned handlers (``LogCaptureHandler``,
+    ``_LiveLoggingNullHandler``, ``NullHandler``, and any handler from the
+    ``_pytest``/``pytest`` package) so legitimate pytest behaviour does
+    not cause spurious failures.
+    """
+    for name, (handlers, level, propagate) in snap.items():
+        lg = logging.getLogger(name)
+        expected = [
+            h
+            for h in handlers
+            if not _is_pytest_handler(h) and not _is_library_handler(h)
+        ]
+        actual = [
+            h
+            for h in lg.handlers
+            if not _is_pytest_handler(h) and not _is_library_handler(h)
+        ]
+        if actual != expected:
+            raise AssertionError(
+                f"Logging state leak on logger {name!r}: "
+                f"handlers changed from {expected!r} to {actual!r}. "
+                f"A test leaked a handler or failed to clean up."
+            )
+        # Level check: the HF library manages its own level internally
+        # (it may set WARNING during model loading), so only assert the
+        # level for root and vemoizer, not huggingface_hub.
+        if name != "huggingface_hub" and lg.level != level:
+            raise AssertionError(
+                f"Logging state leak on logger {name!r}: "
+                f"level changed from {level} to {lg.level}. "
+                f"A test changed the logger level and did not restore it."
+            )
+        if lg.propagate != propagate:
+            raise AssertionError(
+                f"Logging state leak on logger {name!r}: "
+                f"propagate changed from {propagate} to {lg.propagate}. "
+                f"A test changed the propagate flag and did not restore it."
+            )
