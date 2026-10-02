@@ -1,0 +1,88 @@
+# CI for vemoizer (issue #102).
+#
+# Single job on a pinned macos-15 runner (macos-15 is Apple Silicon / arm64;
+# the MLX stack has no Intel path, so macos-15-intel must not be used).
+#
+# The four quality gates from AGENTS.md run as four separate named steps so a
+# failure names the gate:
+#   1. uv run pytest tests/
+#   2. uv run ruff check src/ tests/
+#   3. uv run ty check src/ tests/
+#   4. uv run ruff format --check src/ tests/
+#
+# Not run in CI: the WER regression gate (`vemoizer eval`) and any
+# `pytest -m models` test — both need real model weights and stay local-only
+# (see AGENTS.md). HF_HUB_OFFLINE=1 makes any accidental model access fail
+# fast instead of downloading multi-GB weights.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-gates:
+    name: Quality gates (macos-15, arm64)
+    runs-on: macos-15 # pinned; macos-15 is Apple Silicon. Do NOT switch to macos-15-intel.
+    timeout-minutes: 30
+    env:
+      HF_HUB_OFFLINE: "1"
+      # Pin the interpreter: without a pin, setup-uv leaves UV_PYTHON unset and
+      # uv resolves the highest CPython satisfying requires-python (">=3.11")
+      # — the runner had picked 3.14.7, while local development uses 3.12.
+      # Keeping the two in step avoids "works locally, fails in CI" surprises
+      # in the reverse direction too.
+      UV_PYTHON: "3.12"
+      # Never re-resolve the lockfile on CI: `uv run` must install from
+      # uv.lock as committed. (The install step already passes --frozen; this
+      # is belt-and-braces for the four `uv run` gate steps.)
+      UV_FROZEN: "1"
+    steps:
+      # actions/checkout v5.1.0 (node24; v4.x pins the deprecated node20
+      # runtime and produces run annotations). Pin the tag's commit sha, not
+      # the tag ref, so upstream cannot move the tag out from under us.
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      # astral-sh/setup-uv v7.6.0 already runs on node24, so it stays at this
+      # pin. python-version is a valid input on this commit (verified in its
+      # action.yml), but UV_PYTHON in the job env below is what actually
+      # takes effect for every `uv` command in the job.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install dependencies
+        run: uv sync --group dev --frozen
+
+      # The fixture-based ingest tests (tests/test_ingest.py) shell out to real
+      # ffmpeg; it is the only non-Python system dependency. GitHub-hosted
+      # macos-15 runners may already include ffmpeg, so install only if absent.
+      - name: Install ffmpeg
+        run: brew list ffmpeg > /dev/null 2>&1 || brew install ffmpeg
+
+      - name: pytest
+        run: uv run pytest tests/
+
+      - name: ruff check
+        run: uv run ruff check src/ tests/
+
+      - name: ty check
+        run: uv run ty check src/ tests/
+
+      - name: ruff format check
+        run: uv run ruff format --check src/ tests/
