@@ -352,10 +352,12 @@ def _run_player(argv: list[str]) -> int:
     """Run the audio player for *argv*; fail-open.
 
     The single seam that performs the real ``afplay`` call. Returns the
-    player's exit code, or ``-1`` when it cannot be spawned (missing
-    afplay, OS error, timeout) — the fail-open handling lives here so tests
-    can stub it via the ``system_effects`` autouse fixture without globally
-    patching ``subprocess`` or ``sys``.
+    player's exit code, or ``-1`` for any failure to run the player — a
+    missing binary (OSError) or a timeout (``subprocess.TimeoutExpired``,
+    a ``SubprocessError`` subclass caught by the same clause). Callers treat
+    any non-zero result as "not played". The fail-open handling lives here
+    so tests can stub it via the ``system_effects`` autouse fixture without
+    globally patching ``subprocess`` or ``sys``.
     """
     try:
         proc = subprocess.run(argv, timeout=PLAY_TIMEOUT_S, check=False)

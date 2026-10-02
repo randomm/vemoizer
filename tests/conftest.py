@@ -44,7 +44,7 @@ def _repo_root() -> Path:
 @pytest.fixture(autouse=True)
 def _no_real_system_effects(
     monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
-) -> Iterator[None]:
+) -> Iterator[dict[str, list[list[str]]] | None]:
     """Stub the three real-system-call seams so the suite never posts a
     macOS notification, spawns ``caffeinate``, or plays audio.
 
@@ -64,11 +64,14 @@ def _no_real_system_effects(
     if request.node.get_closest_marker("real_system_calls") is not None:
         # This test (or its module/class) opts out: the real seam runs and
         # the test patches subprocess itself. Do not install the stubs.
-        yield
+        yield None
         return
 
     from vemoizer import caffeinate, notify, speaker_clips
 
+    # The per-test recorder, published to dependents (the ``system_effects``
+    # fixture) through the fixture's own yielded value — no closure
+    # introspection required.
     recorded: dict[str, list[list[str]]] = {
         "notify": [],
         "caffeinate": [],
@@ -108,34 +111,28 @@ def _no_real_system_effects(
     monkeypatch.setattr(notify, "_post", _post)
     monkeypatch.setattr(caffeinate, "_spawn", _spawn)
     monkeypatch.setattr(speaker_clips, "_run_player", _run_player)
-    yield
+    yield recorded
 
 
 @pytest.fixture
-def system_effects() -> dict[str, list[list[str]]]:
+def system_effects(
+    _no_real_system_effects: dict[str, list[list[str]]] | None,
+) -> dict[str, list[list[str]]]:
     """The recorded system effects for the current test.
 
-    The autouse ``_no_real_system_effects`` fixture installs recorders on the
-    three seams; this fixture hands a test the same per-test ``recorded``
-    dict (reached through the installed ``notify._post`` recorder closure)
-    so it can assert on the recorded argv lists.
+    Depends on the autouse ``_no_real_system_effects`` fixture, which yields
+    the per-test ``recorded`` dict (or ``None`` when the test opted out via
+    the ``real_system_calls`` marker) so this fixture can hand it to the test
+    for asserting on the recorded argv lists.
     """
-    from vemoizer import notify
-
-    recorder = notify._post
-    cells = recorder.__closure__
-    if cells is None:
+    if _no_real_system_effects is None:
         raise RuntimeError(
-            "system_effects: the autouse stub is not the recording closure; "
-            "the autouse fixture must run before this fixture."
+            "system_effects: this test is marked ``real_system_calls`` and "
+            "opted out of the autouse system-effects stub, so no effects "
+            "are being recorded. Remove the marker (or drop the "
+            "``system_effects`` fixture) to use this fixture."
         )
-    # Each entry is a `cell`; `cell.cell_contents` is the value it holds.
-    # The recorder's free variable `recorded` is a dict — find it.
-    for c in cells:
-        contents = c.cell_contents
-        if isinstance(contents, dict):
-            return contents
-    raise RuntimeError("system_effects: could not find the recorder dict.")
+    return _no_real_system_effects
 
 
 def _snapshot_root() -> set[str]:
