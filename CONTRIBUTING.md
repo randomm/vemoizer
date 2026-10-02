@@ -32,63 +32,39 @@ Requires macOS on Apple Silicon, Python ≥ 3.11, and `ffmpeg` on PATH.
 
 ## Local quality gates
 
-Run all four locally before pushing — checks must pass locally, not be
-left to discovery after the push.
-
-```bash
-uv run pytest tests/
-uv run ruff check src/ tests/
-uv run ty check src/ tests/
-uv run ruff format --check src/ tests/
-```
-
-If your change touches an ASR backend, the audio contract, alignment,
-spans, re-decode, or the LLM stage, also run the WER regression gate and
-paste its output into the PR body:
-
-```bash
-uv run vemoizer eval --backend all --check
-```
-
-Improvements are recorded with `--update-baseline` in a dedicated commit,
-never mixed into a feature commit.
+All quality gates must pass locally before pushing; CI is for
+verification, not discovery. The exact commands live in the "Pre-Push
+Quality Gates" section of `AGENTS.md` — run those, not a local copy. If
+your change touches an ASR backend, the audio contract, alignment,
+spans, re-decode, or the LLM stage, the WER regression gate's output goes
+in the PR body, and baseline updates land in a dedicated commit, never
+mixed into a feature commit.
 
 ## Testing
 
 - Unit tests must not download models or touch the network.
-- Model-backed tests are opt-in: `uv run pytest -m models`.
-- Audio fixtures stay small (a few seconds of speech per fixture, 16 kHz
-  mono WAV). Never commit a real personal memo or a transcript derived
-  from one.
-- Accuracy claims in a PR come from `vemoizer eval` output, not from a
-  model card.
+- Model-backed tests are opt-in (`pytest -m models`); audio fixtures stay
+  small, and accuracy claims come from `vemoizer eval` output, not from a
+  model card. The full testing standards live in `AGENTS.md`.
 
 ## Git workflow
 
-- Short-lived branches off `main`.
-- Branch naming: `feature/issue-N-short-slug`, `fix/issue-N-short-slug`,
-  or `chore/issue-N-short-slug`.
-- Conventional commit types: `feat:`, `fix:`, `docs:`, `chore:`, `test:`,
-  `refactor:`, `perf:`.
-- The PR body must contain `Fixes #N` or `Closes #N` to auto-close the
-  linked issue; a `(#N)` in a commit scope is not a close keyword.
-- Squash-merge by default. Never commit directly to `main`; never
-  force-push to `main`.
+The branch naming, conventional commit, and merge rules live in the
+"Git Workflow" section of `AGENTS.md` — follow it there, including the
+`Fixes #N` / `Closes #N` PR-body requirement and the no-direct-commits
+to `main` rule.
 
 ## Documentation
 
 - The 200-PR test: if a fact will not still be true after 200 PRs, do
   not document it — put a code comment instead.
-- Do not restate the canonical sources. Model IDs, revisions, and the
-  stage contract belong in `docs/pipeline-spec.md`; ruff/ty config
-  belongs in `pyproject.toml`.
-- Do not create ALL_CAPS scratch files in the repo. If work must be
-  deferred, file a GitHub issue — the issue is the TODO.
+- Do not restate the canonical sources, and do not create ALL_CAPS
+  scratch files — deferred work becomes a GitHub issue. Full rules: the
+  "Documentation Policy" section of `AGENTS.md`.
 
 ## Things we never commit
 
-- Real personal voice memos, or transcripts derived from them.
-- Model weights, GGUF/MLX conversions, or anything that belongs in the
-  HuggingFace cache.
-- API keys or tokens. The LLM key is read from the environment.
-- Agent scratch files.
+Real personal memos and their transcripts, model weights and cache
+contents, API keys and tokens (the LLM key is read from the environment),
+and agent scratch files. The authoritative list is the "Never Commit"
+section of `AGENTS.md`.

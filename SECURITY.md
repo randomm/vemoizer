@@ -16,8 +16,11 @@ fails open when the config, the key, or the endpoint is unavailable.
 
 ## Secrets
 
-- The LLM API key is read from an environment variable named in the
-  user config file; it is never written to disk by vemoizer.
+- The config file names the environment variable that holds the LLM API
+  key (via `api_key_env`); a literal `api_key` entry in the config is
+  rejected by the strict config loader as an unknown key. The key itself
+  is never stored in the config file, the repository, or written to disk
+  by vemoizer.
 - Never commit API keys or tokens.
 - Never commit real personal voice memos, or transcripts derived from
   them.
