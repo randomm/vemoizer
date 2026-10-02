@@ -751,7 +751,7 @@ glossary for the `meeting` and `memo` presets:
 
 Every transcribed file (or group) writes a full log to
 `./.vemoizer/logs/<NFC-stem>.log` regardless of `-v`. The span per seam
-(see the three seams below) opens the file with `'w'` at block start, so a
+(see the four seams below) opens the file with `'w'` at block start, so a
 re-run truncates the same file and a file that fails immediately still
 leaves a (possibly near-empty) log. The directory is `0700`, the file
 `0600`.
@@ -782,7 +782,7 @@ file logging — at most one short stderr notice per CLI invocation
 (`--quiet` suppresses it), no exception leaks. A mid-run write failure is
 swallowed silently.
 
-The three seams (`with file_log(stem)` per output):
+The four seams (`with file_log(stem)` per output):
 
 - **seam (a)** `transcribe_batch` (expert single file): the span starts
   *after* the `_resolve_llm_config` check so a `ConfigError` abort creates
@@ -793,6 +793,11 @@ The three seams (`with file_log(stem)` per output):
 - **seam (c)** the `run_batch` group loop (grouped meeting): the span
   wraps the per-group transcribe + result handling; the log is named after
   the group's **first part** NFC stem.
+- **seam (d)** the `run_batch` plain loop (`batch_plain._run_plain`):
+  the span wraps each file's transcribe + result handling in the
+  single-file / `--no-group` short-circuit path (expert multi-file
+  `--no-group`, and the expert single-file path when routed through
+  `run_batch`); the log is named after the file's NFC stem.
 
 ## Invariants (authoritative: AGENTS.md "Project Invariants")
 
