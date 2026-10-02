@@ -1,0 +1,67 @@
+# CI for vemoizer (issue #102).
+#
+# Single job on a pinned macos-15 runner (macos-15 is Apple Silicon / arm64;
+# the MLX stack has no Intel path, so macos-15-intel must not be used).
+#
+# The four quality gates from AGENTS.md run as four separate named steps so a
+# failure names the gate:
+#   1. uv run pytest tests/
+#   2. uv run ruff check src/ tests/
+#   3. uv run ty check src/ tests/
+#   4. uv run ruff format --check src/ tests/
+#
+# Not run in CI: the WER regression gate (`vemoizer eval`) and any
+# `pytest -m models` test — both need real model weights and stay local-only
+# (see AGENTS.md). HF_HUB_OFFLINE=1 makes any accidental model access fail
+# fast instead of downloading multi-GB weights.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-gates:
+    name: Quality gates (macos-15, arm64)
+    runs-on: macos-15 # pinned; macos-15 is Apple Silicon. Do NOT switch to macos-15-intel.
+    timeout-minutes: 30
+    env:
+      HF_HUB_OFFLINE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d632683dd7b4114ad314bca15554477dd762a938 # v4.2.0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c7f87aa956e4c323abf06d5dec078e358f6b4d04 # v6.0.0
+        with:
+          cache-key: vemoizer # lock: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --group dev --frozen
+
+      # The fixture-based ingest tests (tests/test_ingest.py) shell out to real
+      # ffmpeg; it is the only non-Python system dependency and is not
+      # preinstalled on GitHub-hosted runners.
+      - name: Install ffmpeg
+        run: brew install ffmpeg
+
+      - name: pytest
+        run: uv run pytest tests/
+
+      - name: ruff check
+        run: uv run ruff check src/ tests/
+
+      - name: ty check
+        run: uv run ty check src/ tests/
+
+      - name: ruff format check
+        run: uv run ruff format --check src/ tests/
