@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from _cli_helpers import isolate_home
 from test_pipeline import (  # noqa: F401 - shared orchestrator fixtures
     _patch_ingest,
@@ -28,9 +29,27 @@ runner = CliRunner()
 # -- flag forwarding and the shared error contract ------------------------
 
 
-def test_meeting_language_default_auto_passes_none(tmp_path, monkeypatch) -> None:
-    """Issue #108 option A: the default run has no language pin —
-    transcribe_file receives language=None so per-window detection runs."""
+@pytest.mark.parametrize(
+    ("flag_args", "expected"),
+    [
+        ([], None),
+        (["--language", "fi"], "fi"),
+        (["--language", "EN"], "en"),
+        (["--language", "auto"], None),
+    ],
+    ids=[
+        "default-auto-passes-none",
+        "flag-pins-fi",
+        "flag-case-insensitive-en",
+        "auto-flag-passes-none",
+    ],
+)
+def test_meeting_language_flag_forwarding(
+    tmp_path, monkeypatch, flag_args: list[str], expected: str | None
+) -> None:
+    """Issue #108 options A/B: the language flag is forwarded verbatim to
+    transcribe_file (normalized, with ``auto``/no-flag coercing to None so
+    per-window detection runs), or None for the default run."""
     import vemoizer.pipeline as pipeline_module
 
     seen: dict = {}
@@ -45,72 +64,10 @@ def test_meeting_language_default_auto_passes_none(tmp_path, monkeypatch) -> Non
 
     monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
     isolate_home(monkeypatch, tmp_path, tmp_path)
-    result = runner.invoke(app, ["meeting", "a.m4a"])
+    result = runner.invoke(app, ["meeting", "a.m4a", *flag_args])
     assert result.exit_code == 0
     assert "language" in seen
-    assert seen["language"] is None
-
-
-def test_meeting_language_flag_pins_fi(tmp_path, monkeypatch) -> None:
-    """Issue #108 option B: --language fi pins recognition to Finnish."""
-    import vemoizer.pipeline as pipeline_module
-
-    seen: dict = {}
-
-    def fake_transcribe(path, **kwargs):
-        seen.update(kwargs)
-        return {
-            "text": "moikka",
-            "segments": [],
-            "notes": {"title": "Test"},
-        }
-
-    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
-    isolate_home(monkeypatch, tmp_path, tmp_path)
-    result = runner.invoke(app, ["meeting", "a.m4a", "--language", "fi"])
-    assert result.exit_code == 0
-    assert seen["language"] == "fi"
-
-
-def test_meeting_language_flag_case_insensitive_en(tmp_path, monkeypatch) -> None:
-    import vemoizer.pipeline as pipeline_module
-
-    seen: dict = {}
-
-    def fake_transcribe(path, **kwargs):
-        seen.update(kwargs)
-        return {
-            "text": "moikka",
-            "segments": [],
-            "notes": {"title": "Test"},
-        }
-
-    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
-    isolate_home(monkeypatch, tmp_path, tmp_path)
-    result = runner.invoke(app, ["meeting", "a.m4a", "--language", "EN"])
-    assert result.exit_code == 0
-    assert seen["language"] == "en"
-
-
-def test_meeting_language_auto_flag_passes_none(tmp_path, monkeypatch) -> None:
-    """--language auto is the explicit form of the default (option A)."""
-    import vemoizer.pipeline as pipeline_module
-
-    seen: dict = {}
-
-    def fake_transcribe(path, **kwargs):
-        seen.update(kwargs)
-        return {
-            "text": "moikka",
-            "segments": [],
-            "notes": {"title": "Test"},
-        }
-
-    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
-    isolate_home(monkeypatch, tmp_path, tmp_path)
-    result = runner.invoke(app, ["meeting", "a.m4a", "--language", "auto"])
-    assert result.exit_code == 0
-    assert seen["language"] is None
+    assert seen["language"] == expected
 
 
 def test_meeting_language_invalid_value_fails_closed_before_transcription(
