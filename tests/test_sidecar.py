@@ -569,6 +569,23 @@ def test_build_sidecar_omits_duration_s_when_absent(tmp_path: Path) -> None:
     assert "duration_s" not in result
 
 
+def test_build_sidecar_drops_explicit_null_duration_s(tmp_path: Path) -> None:
+    """An explicit None duration_s (duration measurement failed) is dropped.
+
+    build_sidecar drops the key so format_json's present-only mirror does
+    not serialize ``null`` — a null would render a "Kesto: [00:00:00]"
+    header line the original run's md did not have (issue #107, finding 2).
+    """
+    result: dict[str, Any] = {
+        "text": "hei",
+        "segments": [],
+        "source_path": str(tmp_path / "a.m4a"),
+        "duration_s": None,
+    }
+    build_sidecar(result, command="meeting", glossary_files=None)
+    assert "duration_s" not in result
+
+
 def test_build_sidecar_persists_glossary_source(tmp_path: Path) -> None:
     """A result with glossary_source (stashed by the preset seam) keeps it."""
     gfile = tmp_path / "glossary.txt"

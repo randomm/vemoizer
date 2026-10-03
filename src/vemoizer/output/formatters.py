@@ -206,7 +206,7 @@ def format_json(transcript: dict[str, Any]) -> str:
     # sidecars (no golden-fixture regeneration).
     if transcript.get("duration_s") is not None:
         out["duration_s"] = transcript["duration_s"]
-    if transcript.get("glossary_source"):
+    if transcript.get("glossary_source") is not None:
         out["glossary_source"] = transcript["glossary_source"]
     return json.dumps(out, ensure_ascii=False, indent=2) + "\n"
 
