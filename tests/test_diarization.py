@@ -157,6 +157,74 @@ def test_attribution_string_is_cc_by():
     assert DIARIZATION_REPO_ID == "pyannote/speaker-diarization-community-1"
 
 
+def test_load_pipeline_disables_telemetry(monkeypatch):
+    """After _load_pipeline with pyannote mocked, PYANNOTE_METRICS_ENABLED is false."""
+    import sys
+    import types
+
+    monkeypatch.delenv("PYANNOTE_METRICS_ENABLED", raising=False)
+    monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
+
+    fake_pipeline_obj = mock.Mock()
+    fake_pipeline_cls = mock.Mock()
+    fake_pipeline_cls.from_pretrained.return_value = fake_pipeline_obj
+
+    module = types.ModuleType("pyannote.audio")
+    module.Pipeline = fake_pipeline_cls  # ty: ignore[unresolved-attribute]
+    parent = types.ModuleType("pyannote")
+    parent.audio = module  # ty: ignore[unresolved-attribute]
+    monkeypatch.setitem(sys.modules, "pyannote", parent)
+    monkeypatch.setitem(sys.modules, "pyannote.audio", module)
+    monkeypatch.setitem(sys.modules, "torch", mock.Mock())
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+
+    hf_mod = types.ModuleType("huggingface_hub")
+    hf_mod.snapshot_download = mock.Mock(return_value="/fake/hf-cache/snapshot")  # ty: ignore[unresolved-attribute]
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hf_mod)
+
+    _load_pipeline("cpu")
+
+    import os
+
+    assert os.environ["PYANNOTE_METRICS_ENABLED"] == "false"
+    assert os.environ["OTEL_SDK_DISABLED"] == "true"
+
+
+def test_load_pipeline_preserves_user_opt_in(monkeypatch):
+    """A pre-existing PYANNOTE_METRICS_ENABLED=true is not overwritten."""
+    import sys
+    import types
+
+    monkeypatch.setenv("PYANNOTE_METRICS_ENABLED", "true")
+    monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
+
+    fake_pipeline_obj = mock.Mock()
+    fake_pipeline_cls = mock.Mock()
+    fake_pipeline_cls.from_pretrained.return_value = fake_pipeline_obj
+
+    module = types.ModuleType("pyannote.audio")
+    module.Pipeline = fake_pipeline_cls  # ty: ignore[unresolved-attribute]
+    parent = types.ModuleType("pyannote")
+    parent.audio = module  # ty: ignore[unresolved-attribute]
+    monkeypatch.setitem(sys.modules, "pyannote", parent)
+    monkeypatch.setitem(sys.modules, "pyannote.audio", module)
+    monkeypatch.setitem(sys.modules, "torch", mock.Mock())
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+
+    hf_mod = types.ModuleType("huggingface_hub")
+    hf_mod.snapshot_download = mock.Mock(return_value="/fake/hf-cache/snapshot")  # ty: ignore[unresolved-attribute]
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hf_mod)
+
+    _load_pipeline("cpu")
+
+    import os
+
+    # User's deliberate opt-in is preserved (setdefault, not set).
+    assert os.environ["PYANNOTE_METRICS_ENABLED"] == "true"
+    # OTEL_SDK_DISABLED is set via setdefault (belt-and-braces).
+    assert os.environ["OTEL_SDK_DISABLED"] == "true"
+
+
 def test_pipeline_receives_waveform_tensor_not_ndarray(monkeypatch):
     """pyannote 4.x expects {"waveform": Tensor(channel, time), "sample_rate"}.
 

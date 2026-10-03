@@ -196,6 +196,13 @@ the final text.
   version shipped must be ≥ that fix or the CPU fallback must be exercised.
 - A CPU fallback exists for machines where the fixed MPS path is unavailable.
 - Dependency of this package: `pyannote.audio==4.0.7` (CC-BY-4.0 gated weights, see above).
+- **Telemetry is disabled (invariant #1, issue #103):** `pyannote.audio` 4.x
+  ships OpenTelemetry usage metrics enabled by default, sending spans to
+  `otel.pyannote.ai` carrying version, session id, and audio duration /
+  speaker-count hints — which would break invariant #1. Before `pyannote`
+  is lazily imported, the loader sets `PYANNOTE_METRICS_ENABLED=false` and
+  `OTEL_SDK_DISABLED=true` (both via `setdefault`, as belt-and-braces), so
+  a user can opt in by exporting `PYANNOTE_METRICS_ENABLED=true`.
 
 ### 10. Assembly
 
@@ -745,7 +752,9 @@ glossary for the `meeting` and `memo` presets:
   from an environment variable named in the config.
 - Transcription is local, full stop: audio and transcripts never leave the
   machine for ASR; the only network access in the ASR path is the one-time
-  (revision-pinned) model download (invariant #1).
+  (revision-pinned) model download (invariant #1). Third-party telemetry is
+  disabled: pyannote's OpenTelemetry metrics are turned off before import
+  (issue #103).
 
 ## Per-file run log (issue #111, M4c)
 

@@ -9,6 +9,12 @@ the machine for ASR. The only network access in the ASR path is the
 one-time model download. There is no cloud-ASR fallback, and adding one
 is a product decision, not an implementation detail.
 
+Third-party telemetry is disabled (issue #103). `pyannote.audio` 4.x ships
+OpenTelemetry usage metrics enabled by default, sending spans to
+`otel.pyannote.ai` with duration and speaker-count metadata — see
+`docs/pipeline-spec.md` §9 for the policy. `OTEL_SDK_DISABLED=true` is set
+as belt-and-braces; both are `setdefault`, so a user can opt in.
+
 The optional LLM stage (adjudication, Markdown notes, speaker naming)
 sends transcript text — not audio — to the OpenAI-compatible endpoint
 configured by the user. No LLM is configured by default; every LLM call
