@@ -154,11 +154,15 @@ def configure(
     _context.llm_api_key_env = llm_api_key_env
 
 
-# The LLM API key value to scrub is resolved from the run context at
-# format time. ``run_log_io.RedactingFormatter`` takes the value as a
-# constructor argument (it is stateless with respect to the run context);
-# the resolution stays in ``_open_log_file`` so the caller can read the
-# run context without importing it from the IO module.
+def _api_key_value() -> str | None:
+    """The LLM API key value to scrub, or ``None`` when not redactable."""
+    name = _context.llm_api_key_env
+    if not name:
+        return None
+    value = os.environ.get(name)
+    if value is None or len(value) < 8:
+        return None
+    return value
 
 
 # --- terminal noise filter (non-verbose, design 2/3) ----------------------
@@ -418,14 +422,6 @@ def _open_log_file(
     file cannot be created; never raises.
     """
     path = Path(key)
-    # Resolve the API key value from the run context (the run context is
-    # the authoritative source; the redaction formatter is stateless).
-    api_key_val: str | None = None
-    name = _context.llm_api_key_env
-    if name:
-        env_val = os.environ.get(name)
-        if env_val is not None and len(env_val) >= 8:
-            api_key_val = env_val
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(OSError):
@@ -443,7 +439,7 @@ def _open_log_file(
         handler.close()
         logging.StreamHandler.__init__(handler, stream)
         handler.setLevel(logging.INFO)
-        handler.setFormatter(RedactingFormatter(api_key_val))
+        handler.setFormatter(RedactingFormatter(_api_key_value))
         return handler
     except Exception as e:  # noqa: BLE001 - fail-open: never change the run
         _notice(f"vemoizer: could not open run log {path}: {e}", quiet=quiet)

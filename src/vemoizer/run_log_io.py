@@ -10,9 +10,11 @@ these two collaborators back (design 4 + design 7).
 
 Privacy: a :class:`RedactingFormatter` rewrites the message and exception
 text, so HuggingFace tokens (``hf_…``), ``Bearer …`` header values, and the
-``api_key_env`` value can never land in a log (design 4). The API key value
-is passed in by the caller (the run context owns ``llm_api_key_env``) so this
-module stays stateless with respect to the run context.
+``api_key_env`` value can never land in a log (design 4). The API key is
+looked up per record via a caller-supplied getter (the run context owns
+``llm_api_key_env``), so a mid-run ``configure`` change or an environment
+change within a span is honoured; this module stays stateless with respect
+to the run context.
 
 Fail-open: :class:`QuietFileHandler` swallows a mid-run write failure
 (ENOSPC, EROFS, ...) and disables further writes, so the run behaves
@@ -24,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
+from collections.abc import Callable
 from typing import Any
 
 #: ``hf_`` + 8-or-more alphanumerics — the HuggingFace access-token shape
@@ -45,21 +48,26 @@ class RedactingFormatter(logging.Formatter):
     ``Formatter`` subclass: ``super().format()`` produces the complete
     line (message + traceback), which is then rewritten (design 4).
 
-    *api_key_value* is the value of the env var named by the run context's
-    ``llm_api_key_env`` (when set and >= 8 chars); the caller resolves it
-    at format time so a mid-run ``configure`` change is honoured.
+    *api_key_getter* is a zero-argument callable returning the env-var value
+    named by the run context's ``llm_api_key_env`` (or ``None``); it is
+    called once per record inside ``format``, so a mid-run ``configure``
+    change or an environment change within the span is honoured. The >= 8
+    length rule and the fail-safe (``None``/empty is never redacted) live on
+    the caller side — exactly where the original ``run_log._api_key_value``
+    had them — keeping the run context and the environment in the caller.
     """
 
-    def __init__(self, api_key_value: str | None = None) -> None:
+    def __init__(self, api_key_getter: Callable[[], str | None] = lambda: None) -> None:
         super().__init__()
-        self._api_key_value = api_key_value
+        self._api_key_getter = api_key_getter
 
     def format(self, record: logging.LogRecord) -> str:
         text = super().format(record)
         text = _HF_TOKEN_RE.sub("hf_<redacted>", text)
         text = _BEARER_RE.sub("Bearer <redacted>", text)
-        if self._api_key_value:
-            text = text.replace(self._api_key_value, "<redacted>")
+        key = self._api_key_getter()
+        if key:
+            text = text.replace(key, "<redacted>")
         return text
 
 
