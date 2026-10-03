@@ -520,7 +520,7 @@ changes the run's exit code, and a per-sidecar naming failure only warns
 | `--no-diarize` | off (diarize on) | skip speaker diarization |
 | `--yes` | off | group mode for 2+ files: run the boundary decodes and accept every continuation proposal without a prompt (mutually exclusive with `--no-group`) |
 | `--no-group` | off | skip split-recording grouping entirely — each file is transcribed standalone (no boundary decode, no concat, no part markers); mutually exclusive with `--yes` |
-| `--language` | `auto` | recognition language for the whisper decode: `auto` (detect per window), `fi`, or `en` (case-insensitive); a `[meeting] language` key in the config file sets the same choice without the flag (issue #108) |
+| `--language` | `auto` | recognition language for the whisper decode: `auto` (detect per window), `fi`, or `en` (case-insensitive); a `[meeting] language` key in the config file pins the same choice for meeting (and memo) runs (issue #108) |
 
 ### `vemoizer memo FILES... [options]` (issue #82)
 

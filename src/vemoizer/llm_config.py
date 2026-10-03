@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import typer
+
 LLM_CONFIG_SECTION: str = "llm"
 
 
@@ -202,20 +204,27 @@ def _validate_sections(raw: dict[str, Any], path: Path) -> None:
     ``[llm]`` is strict (a malformed section must not silently disable the
     LLM); ``[meeting]`` is warned-only — its single ``language`` key is
     cosmetic (a typo just falls back to auto-detect), so a strict reject
-    would trade a harmless typo for a failing run.
+    would trade a harmless typo for a failing run. Only these two sections
+    are tables: every other dict value keeps the pre-existing strict
+    "must not be a table" check in ``_strict_load``.
     """
     for key in raw:
         value = raw[key]
         if not isinstance(value, dict):
             continue
-        known = _KNOWN_LLM_KEYS if key == LLM_CONFIG_SECTION else _KNOWN_MEETING_KEYS
+        if key == LLM_CONFIG_SECTION:
+            known = _KNOWN_LLM_KEYS
+        elif key == "meeting":
+            known = _KNOWN_MEETING_KEYS
+        else:
+            continue
         for sub in value:
             if sub not in known:
                 if key == LLM_CONFIG_SECTION:
                     raise ConfigError(f"unknown key {key}.{sub} in {path}")
-                print(
+                typer.echo(
                     f"vemoizer: unknown key {key}.{sub} in {path} (ignored)",
-                    file=sys.stderr,
+                    err=True,
                 )
 
 
@@ -337,36 +346,44 @@ def load_language(path: str | None = None) -> str:
     return _parse_section_language(raw)
 
 
-def load_meeting_language(path: str | None = None) -> str:
-    """The ``[meeting] language`` recognition override for one run.
+def load_default_config(
+    path: str | None = None,
+) -> tuple[LLMConfig | None, dict[str, Any] | None]:
+    """Load LLM config from *path* or the layered search, one read.
 
-    Issue #108, option B: a run-level, explicit user choice — ``"fi"`` or
-    ``"en"`` (case-insensitive; ``"auto"`` is the value for the key absent,
-    meaning per-window detection). Same fail-open seam as :func:`load_language`
-    (missing file, unparseable TOML, absent or non-string value all yield
-    ``"auto"``) — a malformed config must never abort a transcription, and
-    unlike the top-level ``language`` key this one controls RECOGNITION,
-    not the Markdown heading language.
-    """
-    candidate = _resolve_config_path(path)
-    raw = _read_toml(candidate) if candidate is not None else None
-    if not isinstance(raw, dict):
-        return "auto"
-    return _parse_meeting_language(raw.get("meeting"))
+    Returns ``(llm_config, raw)``: the parsed ``[llm]`` section (``None``
+    when absent or malformed) and the already-parsed config file dict the
+    caller can read other keys from (``[meeting]``, top-level
+    ``language``) without re-parsing the file (issue #108 review).
 
-
-def load_default_config(path: str | None = None) -> LLMConfig | None:
-    """Load LLM config from *path* or the layered search.
-
-    Explicit path short-circuit: ``"os.devnull"`` or a missing path →
-    ``None``; a real path loads under legacy fail-open rules. With no
-    path, the search runs: nearest ``./.vemoizer`` (walk up from CWD) →
-    ``~/.vemoizer`` → legacy (fail-open, deprecation notice on
-    ``~/.config`` only).
+    Contracts: an explicit path stays fail-open — ``"os.devnull"`` or a
+    missing/malformed file → ``(None, None)`` (issue #82). An omitted path
+    runs the layered search (project walk-up → home → legacy, issue #82):
+    the strict project/home layer fails loud on a malformed file (a
+    ``ConfigError`` the batch pre-check turns into a clean error), and the
+    legacy layer is fail-open with the deprecation notice on
+    ``~/.config`` only.
     """
     if path is not None:
         if path == DEVNULL_SENTINEL:
-            return None
-        return load_config(path)
+            return None, None
+        raw = _read_toml(Path(path))
+        if raw is None:
+            return None, None
+        section_raw = raw.get(LLM_CONFIG_SECTION)
+        return (
+            _parse_llm_section(section_raw) if isinstance(section_raw, dict) else None,
+            raw,
+        )
 
-    return _default_search()
+    try:
+        config = _default_search()
+    except ConfigError:
+        # The strict project/home layer is fail-LOUD by contract; the
+        # batch-layer pre-check (_resolve_llm_config) turns the ConfigError
+        # into a clean error before transcribe_file ever runs.
+        raise
+    if config is None:
+        return None, None
+    candidate = _resolve_config_path(None)
+    return config, _read_toml(candidate) if candidate is not None else None

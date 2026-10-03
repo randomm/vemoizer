@@ -220,6 +220,25 @@ def test_meeting_language_invalid_value_fails_closed_before_transcription(
     assert "unknown language" in result.stderr
 
 
+def test_memo_language_error_contract_matches_meeting(tmp_path, monkeypatch) -> None:
+    """A bad recognition-language value produces a clean exit 2 on memo
+    exactly as on meeting — never a raw traceback (issue #108: the two
+    preset commands share the error contract; memo has no --language
+    flag, so the ValueError arrives via run_preset, which the memo
+    command's handler must catch the same way)."""
+    import vemoizer.batch as batch_module
+
+    def fake_run_preset(*args, **kwargs):
+        raise ValueError("unknown language 'xx' (known: auto, fi, en)")
+
+    monkeypatch.setattr(batch_module, "run_preset", fake_run_preset)
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    result = runner.invoke(app, ["memo", "a.m4a"])
+    assert result.exit_code == 2
+    assert "unknown language" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_meeting_writes_md_and_json_to_cwd(tmp_path, monkeypatch) -> None:
     """meeting writes .md and .json to the CWD with a dated title."""
     import vemoizer.pipeline as pipeline_module
@@ -512,7 +531,7 @@ def _invoke_preset(
 
     def fake_load_default_config(path=None):
         seen["config_path"] = path
-        return None
+        return None, None
 
     def fake_transcribe(path, **kwargs):
         seen.update(kwargs)

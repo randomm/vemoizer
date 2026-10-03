@@ -31,7 +31,6 @@ from vemoizer.llm_config import (
     load_config,
     load_default_config,
     load_language,
-    load_meeting_language,
 )
 
 #: A minimal valid ``[llm]`` section.
@@ -172,17 +171,17 @@ class TestExplicitPath:
     def test_explicit_path_is_loaded(self, tmp_path: Path) -> None:
         f = tmp_path / "explicit.toml"
         f.write_text(_VALID_SECTION, encoding="utf-8")
-        cfg = load_default_config(str(f))
+        cfg, _ = load_default_config(str(f))
         assert cfg is not None
         assert cfg.model == "test-model"
 
     def test_os_devnull_short_circuits_the_search(self, tmp_path: Path) -> None:
         # A config exists in the tree — the sentinel must skip it entirely.
         _write_valid(tmp_path / "proj" / ".vemoizer" / "config.toml", "x", "proj-model")
-        assert load_default_config("os.devnull") is None
+        assert load_default_config("os.devnull") == (None, None)
 
     def test_missing_explicit_path_fails_open(self, tmp_path: Path) -> None:
-        assert load_default_config(str(tmp_path / "nope.toml")) is None
+        assert load_default_config(str(tmp_path / "nope.toml")) == (None, None)
 
 
 # ---------------------------------------------------------------------------
@@ -408,14 +407,18 @@ class TestExplicitPathContract:
     def test_explicit_unknown_key_fails_open_not_raises(self, tmp_path: Path) -> None:
         f = tmp_path / "explicit.toml"
         f.write_text(_VALID_SECTION + '\nextra = "oops"\n', encoding="utf-8")
-        cfg = load_default_config(str(f))
+        cfg, _ = load_default_config(str(f))
         assert cfg is not None
         assert cfg.model == "test-model"
 
     def test_explicit_bad_section_fails_open(self, tmp_path: Path) -> None:
         f = tmp_path / "explicit.toml"
         f.write_text("[llm]\nbase_url = ''\n", encoding="utf-8")
-        assert load_default_config(str(f)) is None
+        cfg, raw = load_default_config(str(f))
+        assert cfg is None
+        # The raw dict rides along: a valid file with an unparseable
+        # [llm] section still returns it for the other key reads.
+        assert isinstance(raw, dict)
 
     def test_load_config_direct_still_fail_open(self, tmp_path: Path) -> None:
         f = tmp_path / "bad.toml"
@@ -503,115 +506,3 @@ class TestLoadLanguage:
         )
         monkeypatch.chdir(nested)
         assert load_language(None) == "en"
-
-
-class TestLoadMeetingLanguage:
-    """Issue #108 option B: the [meeting] language recognition override."""
-
-    def test_explicit_path_fi(self, tmp_path: Path) -> None:
-        f = tmp_path / "cfg.toml"
-        f.write_text('[meeting]\nlanguage = "fi"\n', encoding="utf-8")
-        assert load_meeting_language(str(f)) == "fi"
-
-    def test_explicit_path_en_case_insensitive(self, tmp_path: Path) -> None:
-        f = tmp_path / "cfg.toml"
-        f.write_text('[meeting]\nlanguage = "EN"\n', encoding="utf-8")
-        assert load_meeting_language(str(f)) == "en"
-
-    def test_explicit_path_auto_is_returned_verbatim(self, tmp_path: Path) -> None:
-        f = tmp_path / "cfg.toml"
-        f.write_text('[meeting]\nlanguage = "auto"\n', encoding="utf-8")
-        assert load_meeting_language(str(f)) == "auto"
-
-    def test_missing_explicit_path_defaults_auto(self, tmp_path: Path) -> None:
-        assert load_meeting_language(str(tmp_path / "nope.toml")) == "auto"
-
-    def test_no_meeting_section_defaults_auto(self, tmp_path: Path) -> None:
-        f = tmp_path / "cfg.toml"
-        f.write_text(_VALID_SECTION, encoding="utf-8")
-        assert load_meeting_language(str(f)) == "auto"
-
-    def test_meeting_section_without_language_defaults_auto(
-        self, tmp_path: Path
-    ) -> None:
-        f = tmp_path / "cfg.toml"
-        f.write_text("[meeting]\n", encoding="utf-8")
-        assert load_meeting_language(str(f)) == "auto"
-
-    def test_non_string_language_defaults_auto(self, tmp_path: Path) -> None:
-        f = tmp_path / "cfg.toml"
-        f.write_text("[meeting]\nlanguage = 42\n", encoding="utf-8")
-        assert load_meeting_language(str(f)) == "auto"
-
-    def test_unknown_value_defaults_auto(self, tmp_path: Path) -> None:
-        f = tmp_path / "cfg.toml"
-        f.write_text('[meeting]\nlanguage = "xx"\n', encoding="utf-8")
-        assert load_meeting_language(str(f)) == "auto"
-
-    def test_bad_toml_defaults_auto(self, tmp_path: Path) -> None:
-        f = tmp_path / "cfg.toml"
-        f.write_text("[meeting]\nbroken = \n", encoding="utf-8")
-        assert load_meeting_language(str(f)) == "auto"
-
-    def test_devnull_sentinel_defaults_auto(self, tmp_path, monkeypatch) -> None:
-        (tmp_path / ".vemoizer").mkdir()
-        (tmp_path / ".vemoizer" / "config.toml").write_text(
-            '[meeting]\nlanguage = "fi"\n', encoding="utf-8"
-        )
-        monkeypatch.chdir(tmp_path)
-        assert load_meeting_language("os.devnull") == "auto"
-
-    def test_project_walk_up_picks_up_meeting_language(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        (tmp_path / ".vemoizer").mkdir()
-        (tmp_path / ".vemoizer" / "config.toml").write_text(
-            '[meeting]\nlanguage = "fi"\n', encoding="utf-8"
-        )
-        monkeypatch.chdir(tmp_path)
-        assert load_meeting_language(None) == "fi"
-
-    def test_top_level_language_key_does_not_pin_recognition(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        """The cosmetic top-level language key must NOT pin recognition —
-        only [meeting] language does (issue #108)."""
-        (tmp_path / ".vemoizer").mkdir()
-        (tmp_path / ".vemoizer" / "config.toml").write_text(
-            'language = "en"\n', encoding="utf-8"
-        )
-        monkeypatch.chdir(tmp_path)
-        assert load_meeting_language(None) == "auto"
-
-    def test_home_config_layer_picks_up_meeting_language(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        """The [meeting] language key works from the home layer too, not
-        just the project walk-up (issue #108 / #82 search order)."""
-        # Isolate home so the dev machine's real config cannot leak in.
-        (tmp_path / "home" / ".vemoizer").mkdir(parents=True)
-        (tmp_path / "home" / ".vemoizer" / "config.toml").write_text(
-            '[meeting]\nlanguage = "en"\n', encoding="utf-8"
-        )
-        monkeypatch.setenv("HOME", str(tmp_path / "home"))
-        # CWD is a directory with no .vemoizer config → walk-up finds nothing.
-        (tmp_path / "proj").mkdir()
-        monkeypatch.chdir(tmp_path / "proj")
-        assert load_meeting_language(None) == "en"
-
-    def test_project_layer_beats_home_layer_for_meeting_language(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        """Whole-file precedence: a project config without a [meeting] section
-        wins over a home config that has one (issue #82 nearest-wins)."""
-        (tmp_path / "home" / ".vemoizer").mkdir(parents=True)
-        (tmp_path / "home" / ".vemoizer" / "config.toml").write_text(
-            '[meeting]\nlanguage = "en"\n', encoding="utf-8"
-        )
-        monkeypatch.setenv("HOME", str(tmp_path / "home"))
-        (tmp_path / "proj" / ".vemoizer").mkdir(parents=True)
-        (tmp_path / "proj" / ".vemoizer" / "config.toml").write_text(
-            'language = "fi"\n', encoding="utf-8"
-        )
-        monkeypatch.chdir(tmp_path / "proj")
-        assert load_meeting_language(None) == "auto"

@@ -123,8 +123,10 @@ class RunOptions:
 
 
 #: Recognition-language values ``--language`` / ``[meeting] language``
-#: accept: ``"auto"`` (per-window detection) or a whisper language code
-#: (``"fi"``, ``"en"``, ...). Case-insensitive at the CLI; ``resolve_options``
+#: accept: ``"auto"`` (per-window detection), ``"fi"``, or ``"en"`` — a
+#: deliberately closed subset of the whisper language codes for this
+#: project's fi/en scope; any other value is rejected by
+#: ``resolve_options``. Case-insensitive at the CLI; ``resolve_options``
 #: lowercases and maps ``"auto"`` through unchanged.
 LANGUAGE_VALUES: tuple[str, ...] = ("auto", "fi", "en")
 

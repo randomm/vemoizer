@@ -348,7 +348,7 @@ def meeting(
             "Recognition language for the whisper decode: auto (detect "
             "per window, the default), fi, or en (issue #108). "
             'A [meeting] language = "fi"|"en" key in the config file '
-            "sets the same choice without the flag."
+            "pins the same choice for meeting (and memo) runs."
         ),
     ),
 ) -> None:
@@ -461,6 +461,12 @@ def memo(
             quiet=quiet,
             display=display,
         )
+    except ValueError as e:
+        # Unknown [meeting] language value (resolve_options validates
+        # against LANGUAGE_VALUES, issue #108): clean exit 2, never a
+        # traceback — the same contract the meeting command enforces.
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(code=2) from None
     finally:
         if display is not None:
             display.close()

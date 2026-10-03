@@ -30,7 +30,6 @@ from .llm_config import (  # noqa: F401 - re-export of the moved config layer
     load_config,
     load_default_config,
     load_language,
-    load_meeting_language,
 )
 
 #: Default system prompt for adjudication. Intentionally short: the

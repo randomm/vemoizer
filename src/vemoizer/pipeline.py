@@ -37,15 +37,11 @@ from .glossary import (
     load_glossary,
 )
 from .ingest import IngestError, ingest_audio
-from .llm import LLMClient, load_config, load_default_config
+from .llm import LLMClient, LLMConfig
 from .llm_config import (
-    LLM_CONFIG_SECTION,
-    LLMConfig,
-    _parse_llm_section,
     _parse_meeting_language,
     _parse_section_language,
-    _read_toml,
-    _resolve_config_path,
+    load_default_config,
 )
 from .llm_tail import apply_llm_tail
 from .notes import generate_notes  # noqa: F401
@@ -252,10 +248,10 @@ def transcribe_file(
             so the mlx-whisper tqdm shim drives the display's decode task.
             ``None`` (the default) keeps every existing call site unchanged.
         language: Optional run-level recognition-language override for the
-            meeting decode (issue #108): a whisper language code (``"fi"``,
-            ``"en"``) pins every decode window; ``None`` (the default) or
-            ``"auto"`` leaves per-window detection on. Ignored by the
-            dictation profile.
+            meeting decode (issue #108): one of ``"fi"`` / ``"en"`` pins
+            every decode window; ``None`` (the default) or ``"auto"``
+            leaves per-window detection on. Ignored by the dictation
+            profile.
 
     Returns:
         ``{"text": str, "segments": list[dict]}`` — the full transcript
@@ -300,34 +296,14 @@ def transcribe_file(
         format_duration(time.monotonic() - ingest_start),
     )
 
-    # One config read per run (issue #108 review): the layered search
-    # (issue #82) resolves the file once and its TOML is parsed once; the
-    # LLM section, the ``[meeting]`` recognition-language override, and
-    # the cosmetic section language all read from that same raw dict.
-    config_file = _resolve_config_path(config_path)
-    config_raw = _read_toml(config_file) if config_file is not None else None
-    if config_file is not None:
-        # Explicit path: the fail-open ``load_config`` contract (missing or
-        # malformed file → ``None``) applies to explicit paths (issue #82).
-        llm_config = load_config(config_file)
-    else:
-        # No explicit path: strict project/home layer, fail-open legacy
-        # (issue #82) — exactly the pre-refactor ``load_default_config``
-        # contract, so a malformed project config still fails loud via the
-        # batch layer's pre-check.
-        llm_config = load_default_config(None)
-    if isinstance(config_raw, dict):
-        section_raw = config_raw.get(LLM_CONFIG_SECTION)
-    else:
-        section_raw = None
-    if isinstance(section_raw, dict):
-        # The section read itself is fail-open on every path (matching the
-        # pre-refactor explicit-path contract); on the layered path the
-        # strict ``load_default_config`` above already ran and wins on
-        # success.
-        parsed = _parse_llm_section(section_raw)
-        if parsed is not None:
-            llm_config = parsed
+    # One config read per run (issue #108 review): ``load_default_config``
+    # resolves the file under the correct contract for *config_path* (an
+    # explicit path stays fail-open per issue #82; an omitted path runs the
+    # strict project/home layer, fail-open legacy, so a malformed project
+    # config still fails loud via the batch layer's pre-check) and its
+    # parsed raw dict feeds the ``[meeting]`` recognition-language override
+    # and the cosmetic section language below.
+    llm_config, config_raw = load_default_config(config_path)
     # Issue #108, option B: an explicit run-level recognition-language
     # choice (CLI ``--language`` / presets ``RunOptions.language``),
     # else the ``[meeting] language`` key of the same config file, else
