@@ -14,6 +14,7 @@ any load/inference exception we fall back to CPU.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -54,6 +55,19 @@ class DiarizationResult:
     segments: list[tuple[float, float, str]]  # (start_s, end_s, speaker_label)
 
 
+def _disable_pyannote_telemetry() -> None:
+    """Disable pyannote's OpenTelemetry metrics (invariant #1, issue #103).
+
+    pyannote 4.x ships usage metrics enabled by default and phones home to
+    ``https://otel.pyannote.ai`` on every pipeline apply. The variable is
+    read at import time, so this must run *before* ``import pyannote``.
+    ``setdefault`` lets a user deliberately opt in by exporting ``true``.
+    ``OTEL_SDK_DISABLED`` is belt-and-braces.
+    """
+    os.environ.setdefault("PYANNOTE_METRICS_ENABLED", "false")
+    os.environ.setdefault("OTEL_SDK_DISABLED", "true")
+
+
 def _load_pipeline(device: str) -> object:
     """Lazily import pyannote and build the community pipeline on *device*.
 
@@ -61,7 +75,7 @@ def _load_pipeline(device: str) -> object:
     :data:`DIARIZATION_REVISION` (invariant #4) and loaded from the local
     path, following the same pattern as :mod:`vemoizer.models`.
     """
-    import os
+    _disable_pyannote_telemetry()
 
     import torch
     from huggingface_hub import snapshot_download
