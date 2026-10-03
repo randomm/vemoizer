@@ -109,14 +109,14 @@ from vemoizer.grouping_probe import (  # noqa: F401,E402
 def _resolve_llm_config(config_path: str | None) -> LLMConfig | None:
     """Resolve the LLM config for a batch run (issue #82 review).
 
-    Explicit ``--config`` short-circuits to ``load_config`` (fail-open).
-    Without one, the strict layered search runs; its ``ConfigError`` is
-    caught by the caller and becomes a clean error line — never a raw
-    traceback (the fail-open ``load_default_config`` is NOT used here,
-    because its ``except Exception`` swallows ``ConfigError`` silently).
-    ``None`` (no config found) is fine.
+    Explicit ``--config`` short-circuits to ``load_config`` (fail-open):
+    a malformed explicit path becomes ``None``, never an error. Without
+    one, the strict layered search runs; a malformed project or home
+    config is a real error, so its ``ConfigError`` propagates to the
+    caller (which renders it as a clean error line, never a raw
+    traceback). ``None`` (no config found) is fine.
     """
-    from vemoizer.llm import _default_search, load_config
+    from vemoizer.llm_config import _default_search, load_config
 
     if config_path is not None:
         return load_config(config_path)

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-import vemoizer.llm as llm_module
+import vemoizer.llm_config as llm_module
 import vemoizer.pipeline as pipeline_module
 
 
@@ -63,7 +63,7 @@ def isolate_home(
 
     ``Path.home`` honours ``$HOME`` on POSIX, so the env patch is
     sufficient for the ``~/.vemoizer`` layer. The legacy layer is NOT
-    covered by the env patch: ``llm._LEGACY_CONFIG_PATHS`` is a
+    covered by the env patch: ``llm_config._LEGACY_CONFIG_PATHS`` is a
     module-level tuple computed at import time from the real
     ``Path.home()`` (issue #93, R1), so it is monkeypatched to the fake
     home as well.

@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from vemoizer.llm import (
+from vemoizer.llm_config import (
     LEGACY_DEPRECATION_NOTICE,
     ConfigError,
     _default_search,

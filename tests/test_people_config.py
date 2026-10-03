@@ -3,7 +3,7 @@
 Covers the ``people`` list-of-strings key in the layered
 ``.vemoizer/config.toml``:
 
-- ``llm._strict_load`` accepts a top-level ``people`` list and ignores it
+- ``llm_config._strict_load`` accepts a top-level ``people`` list and ignores it
   (the value is never used by the LLM), but rejects a ``people`` table or
   scalar (it must be a top-level list) — locking in the
   ``_KNOWN_TOP_LEVEL_KEYS`` extension that otherwise breaks the next
@@ -37,7 +37,7 @@ from typing import Any
 import pytest
 from _cli_helpers import isolate_home
 
-from vemoizer.llm import ConfigError, _default_search, load_default_config
+from vemoizer.llm_config import ConfigError, _default_search, load_default_config
 from vemoizer.names_cli import _install_completer, run_names
 from vemoizer.people_config import (
     find_people_config_path,
@@ -105,7 +105,7 @@ def _project_config(tmp_path: Path) -> Path:
 
 
 def _search_people_config(tmp_path: Path):
-    """Run ``llm._default_search`` against an isolated fake HOME / CWD."""
+    """Run ``llm_config._default_search`` against an isolated fake HOME / CWD."""
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     proj = tmp_path / "proj"
@@ -121,7 +121,7 @@ def _search_people_config(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# llm._strict_load accepts [llm] + a top-level people list
+# llm_config._strict_load accepts [llm] + a top-level people list
 # ---------------------------------------------------------------------------
 
 

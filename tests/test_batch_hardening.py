@@ -31,7 +31,7 @@ import pytest
 from test_pipeline import _llm_config, _patch_ingest, _patch_preflight_pass, _patch_vad
 
 import vemoizer.batch as batch
-import vemoizer.llm as llm
+import vemoizer.llm_config as llm
 import vemoizer.output.naming as naming
 import vemoizer.pipeline as pipeline
 from vemoizer.output.naming import collision_free_paths

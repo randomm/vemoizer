@@ -272,7 +272,7 @@ pure function of the dict):
 - **Section language** — `format_md(transcript, language=...)` selects
   Finnish (default) or English headings; the value rides on the run
   dict as `transcript["language"]` (loaded by
-  `llm.load_language` from the config layer's top-level `language`
+  `llm_config.load_language` from the config layer's top-level `language`
   key, `"fi"` default).
 - **`<details>` quality-report block** — the string stored on
   `transcript["quality_report"]` (computed by the CLI/batch layer via
