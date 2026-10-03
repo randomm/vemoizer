@@ -114,7 +114,9 @@ def _resolve_llm_config(config_path: str | None) -> LLMConfig | None:
     one, the strict layered search runs; a malformed project or home
     config is a real error, so its ``ConfigError`` propagates to the
     caller (which renders it as a clean error line, never a raw
-    traceback). ``None`` (no config found) is fine.
+    traceback). ``None`` (no config found) is fine. The config file may
+    also carry a ``[meeting]`` table (read by transcribe_file for the
+    recognition language, #108).
     """
     from vemoizer.llm_config import _default_search, load_config
 

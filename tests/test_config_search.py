@@ -577,7 +577,6 @@ class TestSingleReadPerRun:
         assert cfg is not None and cfg.model == "proj"
         assert isinstance(raw, dict)
         assert len(calls) == 1
-        assert raw is None or isinstance(raw, dict)
         assert LEGACY_DEPRECATION_NOTICE not in capsys.readouterr().err
 
     def test_layered_no_path_home_config_reads_exactly_once(

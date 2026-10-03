@@ -296,13 +296,13 @@ def transcribe_file(
         format_duration(time.monotonic() - ingest_start),
     )
 
-    # One config read per run (issue #108 review): ``load_default_config``
-    # resolves the file under the correct contract for *config_path* (an
-    # explicit path stays fail-open per issue #82; an omitted path runs the
-    # strict project/home layer, fail-open legacy, so a malformed project
-    # config still fails loud via the batch layer's pre-check) and its
-    # parsed raw dict feeds the ``[meeting]`` recognition-language override
-    # and the cosmetic section language below.
+    # ``load_default_config`` (each call reads the winning file once,
+    # issue #108 review) resolves the file under the correct contract for
+    # *config_path* (an explicit path stays fail-open per issue #82; an
+    # omitted path runs the strict project/home layer, fail-open legacy, so
+    # a malformed project config still fails loud via the batch layer's
+    # pre-check) and its parsed raw dict feeds the ``[meeting]``
+    # recognition-language override and the cosmetic section language below.
     llm_config, config_raw = load_default_config(config_path)
     # Issue #108, option B: an explicit run-level recognition-language
     # choice (CLI ``--language`` / presets ``RunOptions.language``),

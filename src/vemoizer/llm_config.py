@@ -107,20 +107,6 @@ def _read_toml(path: Path) -> dict[str, Any] | None:
     return None
 
 
-def _load_legacy_file(path: Path) -> tuple[LLMConfig | None, Path | None]:
-    """Parse a legacy config file (fail-open); returns (config, used_path)."""
-    raw = _read_toml(path)
-    if raw is None:
-        return None, path
-    section = raw.get(LLM_CONFIG_SECTION)
-    if not isinstance(section, dict):
-        return None, path
-    config = _parse_llm_section(section)
-    if config is None:
-        return None, path
-    return config, path
-
-
 def _parse_llm_section(section: dict[str, Any]) -> LLMConfig | None:
     """Parse and validate the ``[llm]`` section; ``None`` when malformed.
 
@@ -272,25 +258,10 @@ def _parse_section_language(raw: dict[str, Any] | None) -> str:
     return "en" if value.strip().lower() == "en" else "fi"
 
 
-def _legacy_search(legacy_paths: tuple[Path, ...] | None = None) -> LLMConfig | None:
-    """Probe legacy paths (fail-open); notice only when ``~/.config`` is used."""
-    if legacy_paths is None:
-        legacy_paths = _LEGACY_CONFIG_PATHS
-    deprecated_first = legacy_paths[0]
-    for candidate in legacy_paths:
-        config, used = _load_legacy_file(candidate)
-        if config is None:
-            continue
-        if used == deprecated_first:
-            print(LEGACY_DEPRECATION_NOTICE, file=sys.stderr)
-        return config
-    return None
-
-
 def _legacy_search_with_raw(
     legacy_paths: tuple[Path, ...],
 ) -> tuple[LLMConfig | None, dict[str, Any] | None]:
-    """Like :func:`_legacy_search` but returns ``(config, raw)``.
+    """Probe legacy paths (fail-open) and return ``(config, raw)``.
 
     The legacy layer stays fail-open (a malformed or section-less file is
     skipped); the deprecation notice is printed at most once per run, and
@@ -320,8 +291,12 @@ def _resolve_config_path(path: str | None) -> Path | None:
     Explicit path: as given. ``"os.devnull"`` sentinel: ``None`` (no
     config). Omitted: the documented layered search (project walk-up →
     home → legacy, issue #82) — the first EXISTING file wins, no per-key
-    merging. Single source of "which config file wins" for the
-    ``load_*`` readers.
+    merging.
+
+    Used by :func:`load_language` (explicit-path and devnull handling
+    included). The layered search in :func:`_default_search` resolves
+    its own layers because it must interleave strict parsing with the
+    search, not after it.
     """
     if path is not None:
         if path == DEVNULL_SENTINEL:
@@ -424,6 +399,7 @@ def load_default_config(
 
     # The strict project/home layer is fail-LOUD by contract (issue #82);
     # the batch-layer pre-check (_resolve_llm_config) turns the ConfigError
-    # into a clean error before transcribe_file ever runs. One config file is
-    # read and parsed once per run (issue #108 review).
+    # into a clean error before transcribe_file ever runs. Each call reads
+    # the winning file once (issue #108 review); a run makes one call in
+    # the batch pre-check and one in transcribe_file (pre-existing on main).
     return _default_search()
