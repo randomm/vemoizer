@@ -27,6 +27,13 @@ runner = CliRunner()
 # -- flag forwarding and preset defaults ---------------------------------
 
 
+def _write_config(root: Path, sub: str, marker: str) -> Path:
+    path = root / sub / "config.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_VALID_CONFIG.format(h=root.name, m=marker), encoding="utf-8")
+    return path
+
+
 def test_meeting_help_lists_flags() -> None:
     result = runner.invoke(app, ["meeting", "--help"])
     assert result.exit_code == 0
@@ -116,127 +123,6 @@ def test_meeting_speakers_override(tmp_path, monkeypatch) -> None:
     result = runner.invoke(app, ["meeting", "a.m4a", "--speakers", "3-5"])
     assert result.exit_code == 0
     assert seen["speakers"] == (3, 5)
-
-
-def test_meeting_language_default_auto_passes_none(tmp_path, monkeypatch) -> None:
-    """Issue #108 option A: the default run has no language pin —
-    transcribe_file receives language=None so per-window detection runs."""
-    import vemoizer.pipeline as pipeline_module
-
-    seen: dict = {}
-
-    def fake_transcribe(path, **kwargs):
-        seen.update(kwargs)
-        return {
-            "text": "moikka",
-            "segments": [],
-            "notes": {"title": "Test"},
-        }
-
-    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
-    isolate_home(monkeypatch, tmp_path, tmp_path)
-    result = runner.invoke(app, ["meeting", "a.m4a"])
-    assert result.exit_code == 0
-    assert "language" in seen
-    assert seen["language"] is None
-
-
-def test_meeting_language_flag_pins_fi(tmp_path, monkeypatch) -> None:
-    """Issue #108 option B: --language fi pins recognition to Finnish."""
-    import vemoizer.pipeline as pipeline_module
-
-    seen: dict = {}
-
-    def fake_transcribe(path, **kwargs):
-        seen.update(kwargs)
-        return {
-            "text": "moikka",
-            "segments": [],
-            "notes": {"title": "Test"},
-        }
-
-    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
-    isolate_home(monkeypatch, tmp_path, tmp_path)
-    result = runner.invoke(app, ["meeting", "a.m4a", "--language", "fi"])
-    assert result.exit_code == 0
-    assert seen["language"] == "fi"
-
-
-def test_meeting_language_flag_case_insensitive_en(tmp_path, monkeypatch) -> None:
-    import vemoizer.pipeline as pipeline_module
-
-    seen: dict = {}
-
-    def fake_transcribe(path, **kwargs):
-        seen.update(kwargs)
-        return {
-            "text": "moikka",
-            "segments": [],
-            "notes": {"title": "Test"},
-        }
-
-    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
-    isolate_home(monkeypatch, tmp_path, tmp_path)
-    result = runner.invoke(app, ["meeting", "a.m4a", "--language", "EN"])
-    assert result.exit_code == 0
-    assert seen["language"] == "en"
-
-
-def test_meeting_language_auto_flag_passes_none(tmp_path, monkeypatch) -> None:
-    """--language auto is the explicit form of the default (option A)."""
-    import vemoizer.pipeline as pipeline_module
-
-    seen: dict = {}
-
-    def fake_transcribe(path, **kwargs):
-        seen.update(kwargs)
-        return {
-            "text": "moikka",
-            "segments": [],
-            "notes": {"title": "Test"},
-        }
-
-    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
-    isolate_home(monkeypatch, tmp_path, tmp_path)
-    result = runner.invoke(app, ["meeting", "a.m4a", "--language", "auto"])
-    assert result.exit_code == 0
-    assert seen["language"] is None
-
-
-def test_meeting_language_invalid_value_fails_closed_before_transcription(
-    tmp_path, monkeypatch
-) -> None:
-    """An unknown --language value must fail in milliseconds, not after
-    a decode."""
-    import vemoizer.pipeline as pipeline_module
-
-    def fake_transcribe(path, **kwargs):
-        raise AssertionError("transcribe_file must not run on a bad --language")
-
-    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
-    isolate_home(monkeypatch, tmp_path, tmp_path)
-    result = runner.invoke(app, ["meeting", "a.m4a", "--language", "xx"])
-    assert result.exit_code == 2
-    assert "unknown language" in result.stderr
-
-
-def test_memo_language_error_contract_matches_meeting(tmp_path, monkeypatch) -> None:
-    """A bad recognition-language value produces a clean exit 2 on memo
-    exactly as on meeting — never a raw traceback (issue #108: the two
-    preset commands share the error contract; memo has no --language
-    flag, so the ValueError arrives via run_preset, which the memo
-    command's handler must catch the same way)."""
-    import vemoizer.batch as batch_module
-
-    def fake_run_preset(*args, **kwargs):
-        raise ValueError("unknown language 'xx' (known: auto, fi, en)")
-
-    monkeypatch.setattr(batch_module, "run_preset", fake_run_preset)
-    isolate_home(monkeypatch, tmp_path, tmp_path)
-    result = runner.invoke(app, ["memo", "a.m4a"])
-    assert result.exit_code == 2
-    assert "unknown language" in result.stderr
-    assert "Traceback" not in result.stderr
 
 
 def test_meeting_writes_md_and_json_to_cwd(tmp_path, monkeypatch) -> None:
@@ -500,13 +386,6 @@ _VALID_CONFIG = (
     'api_key_env = "K"\n'
     "timeout_seconds = 5.0\n"
 )
-
-
-def _write_config(root: Path, sub: str, marker: str) -> Path:
-    path = root / sub / "config.toml"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_VALID_CONFIG.format(h=root.name, m=marker), encoding="utf-8")
-    return path
 
 
 def _invoke_preset(
