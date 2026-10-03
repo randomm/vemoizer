@@ -36,7 +36,7 @@ def find_people_config_path(
 ) -> Path | None:
     """Nearest layered config path for the ``people`` key.
 
-    Same order as ``llm._default_search``: nearest ``./.vemoizer`` →
+    Same order as ``llm_config._default_search``: nearest ``./.vemoizer`` →
     ``~/.vemoizer`` → legacy. ``None`` when nothing exists. ``legacy_paths``
     is injectable so tests can isolate from a real dev-machine legacy config.
     """

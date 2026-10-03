@@ -73,7 +73,7 @@ def _config_load() -> tuple[LLMConfig | None, str | None]:
     ``parse_error`` is the ``ConfigError`` message when the file is
     malformed (red); ``None`` otherwise.
     """
-    from .llm import ConfigError, _default_search
+    from .llm_config import ConfigError, _default_search
 
     try:
         config = _default_search()

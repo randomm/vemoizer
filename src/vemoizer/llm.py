@@ -10,9 +10,10 @@ An explicit path (or ``"os.devnull"``) short-circuits the search.
 
 The config layer itself (``[llm]`` section parsing, the layered search,
 strict validation, :func:`load_language`) lives in :mod:`vemoizer.llm_config`
-(headroom extraction, issue #117); it is re-exported here under its
-original import path so existing ``from vemoizer.llm import ...`` call
-sites (``people_config``, ``batch``, the test suite) keep working.
+(headroom extraction, issue #117); the public config names are re-exported
+here under their original import path so ``from vemoizer.llm import ...``
+call sites keep working. Private names (``_strict_load``,
+``_default_search``) live only in :mod:`vemoizer.llm_config`.
 """
 
 from __future__ import annotations
@@ -23,15 +24,9 @@ from typing import Any
 
 import httpx
 
-from .llm_config import (  # noqa: E402,F401 - re-export of the moved config layer
-    LEGACY_DEPRECATION_NOTICE,
+from .llm_config import (  # noqa: F401 - re-export of the moved config layer
     ConfigError,
     LLMConfig,
-    _default_search,
-    _find_nearest_vemoizer_config,
-    _legacy_search,
-    _parse_llm_section,
-    _strict_load,
     load_config,
     load_default_config,
     load_language,

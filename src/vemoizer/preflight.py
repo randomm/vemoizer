@@ -58,7 +58,7 @@ def config_parse_ok() -> bool:
     is red here.  ``None`` (no config anywhere) is the "no LLM" state and
     is green.
     """
-    from .llm import ConfigError, _default_search
+    from .llm_config import ConfigError, _default_search
 
     try:
         _default_search()

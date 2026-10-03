@@ -29,7 +29,7 @@ from typing import Any
 import pytest
 from _cli_helpers import isolate_home
 
-from vemoizer.llm import ConfigError, _strict_load
+from vemoizer.llm_config import ConfigError, _strict_load
 from vemoizer.people_config import write_people_list
 
 # --- Helpers ---

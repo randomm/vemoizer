@@ -403,7 +403,7 @@ def _invoke_preset(
     search runs; an explicit path = short-circuit). The *resolution*
     of a config is pinned separately via the real (isolated) search.
     """
-    import vemoizer.llm as llm_module
+    import vemoizer.llm_config as llm_module
     import vemoizer.pipeline as pipeline_module
 
     seen: dict = {}
@@ -429,7 +429,7 @@ def _isolated_search(home: Path, cwd: Path) -> LLMConfig | None:
     Isolates the resolution from the dev machine's live config (the
     same fixture the CLI invoke used: fake HOME, CWD = tmp_path).
     """
-    from vemoizer.llm import _default_search
+    from vemoizer.llm_config import _default_search
 
     return _default_search(
         home=lambda: home,
@@ -527,7 +527,7 @@ def test_preset_malformed_layer_config_fails_cleanly(
         # The real transcribe_file does the config search inside; the
         # fake mirrors that by running the same strict search (unmocked)
         # so the ConfigError propagates out of the transcribe_file seam.
-        from vemoizer.llm import load_default_config
+        from vemoizer.llm_config import load_default_config
 
         load_default_config(None)
         return {"text": "moikka", "segments": [], "notes": {"title": "T"}}
@@ -544,7 +544,7 @@ def test_preset_malformed_layer_config_fails_cleanly(
 
 
 def _legacy_notice_case(tmp_path: Path, newer_layer_wins: bool):
-    import vemoizer.llm as llm_module
+    import vemoizer.llm_config as llm_module
 
     home = tmp_path / "home"
     _write_config(home, ".config/vemoizer", "legacy-model")
@@ -567,7 +567,7 @@ def test_preset_legacy_config_used_prints_deprecation_notice(
 ) -> None:
     """(d) the legacy ~/.config/vemoizer/config.toml prints the
     deprecation notice when it is the one actually used by the search."""
-    import vemoizer.llm as llm_module
+    import vemoizer.llm_config as llm_module
 
     cfg = _legacy_notice_case(tmp_path, newer_layer_wins=False)
     assert cfg is not None and cfg.model == "legacy-model"
@@ -582,7 +582,7 @@ def test_preset_no_deprecation_notice_when_newer_layer_wins(
 ) -> None:
     """(d, negative) when a .vemoizer config wins the search, the legacy
     file is neither read nor announced."""
-    import vemoizer.llm as llm_module
+    import vemoizer.llm_config as llm_module
 
     cfg = _legacy_notice_case(tmp_path, newer_layer_wins=True)
     assert cfg is not None and cfg.model == "new-model"
