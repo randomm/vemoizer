@@ -479,14 +479,19 @@ nothing clip-related is ever written to a persistent location, and no
 
 ## Model manifest
 
-| Stage | Upstream model | Load repo (MLX) | Pinned revision | Notes |
-|---|---|---|---|---|
-| Decode A | `nvidia/parakeet-tdt-0.6b-v3` | `mlx-community/parakeet-tdt-0.6b-v3` | `ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15` | parakeet-mlx; ~1.25 GB; word timestamps built in |
-| Decode B | `nvidia/canary-1b-v2` | community MLX port, e.g. `Mediform/canary-1b-v2-mlx-q8` | `0b6b32ee...` (full SHA at implementation) | loads the MLX port, not the F32 checkpoint |
-| Re-decode | `Finnish-NLP/whisper-large-finnish-v3` | `FredrikKarlssonSpeech/whisper-large-finnish-v3-mlx` | `f51f0310c1b2a3e5acb16905c1a7245bb9476846` | community MLX conversion (mlx-whisper cannot read the raw HF checkpoint); `word_timestamps=True` |
-| Meeting decode | `openai/whisper-large-v3-turbo` | `mlx-community/whisper-large-v3-turbo` | `a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb` | MLX community conversion; decoded in 30 s windows so the glossary `initial_prompt` re-seeds every window (issue #76) |
-| Diarization | `pyannote/speaker-diarization-community-1` | n/a (pyannote.audio 4.0.7) | `3533c8cf8e369892e6b79ff1bf80f7b0286a54ee` | CC-BY-4.0, HF-gated (form + token) |
-| VAD | silero-vad | bundled in `silero-vad==6.2.1` pip package | package version | ONNX mode, no separate download |
+| Stage | Upstream model | Load repo (MLX) | Pinned revision | Expected size | Notes |
+|---|---|---|---|---|---|
+| Decode A | `nvidia/parakeet-tdt-0.6b-v3` | `mlx-community/parakeet-tdt-0.6b-v3` | `ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15` | ~2.3 GiB | parakeet-mlx; word timestamps built in |
+| Decode B | `nvidia/canary-1b-v2` | community MLX port, e.g. `Mediform/canary-1b-v2-mlx-q8` | `0b6b32ee...` (full SHA at implementation) | ~1.1 GiB | loads the MLX port, not the F32 checkpoint |
+| Re-decode | `Finnish-NLP/whisper-large-finnish-v3` | `FredrikKarlssonSpeech/whisper-large-finnish-v3-mlx` | `f51f0310c1b2a3e5acb16905c1a7245bb9476846` | ~2.9 GiB | community MLX conversion (mlx-whisper cannot read the raw HF checkpoint); `word_timestamps=True` |
+| Meeting decode | `openai/whisper-large-v3-turbo` | `mlx-community/whisper-large-v3-turbo` | `a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb` | ~1.5 GiB | MLX community conversion; decoded in 30 s windows so the glossary `initial_prompt` re-seeds every window (issue #76) |
+| Diarization | `pyannote/speaker-diarization-community-1` | n/a (pyannote.audio 4.0.7) | `3533c8cf8e369892e6b79ff1bf80f7b0286a54ee` | ~32 MiB | CC-BY-4.0, HF-gated (form + token) |
+| VAD | silero-vad | bundled in `silero-vad==6.2.1` pip package | package version | bundled | ONNX mode, no separate download |
+
+Expected sizes are measured against the local HuggingFace cache (issue #67) and
+shown per-model in the `models pull` report. The five pipeline models total
+roughly 7.8 GB on disk; loaded lazily and sequentially, all fit on a 16 GB
+Mac.
 
 The first five rows are the `MODELS` registry in `src/vemoizer/models.py`
 in pipeline order (parakeet, canary, whisper-finnish, whisper-turbo,
@@ -716,6 +721,60 @@ file (TOML, parsed with stdlib `tomllib`): it names an OpenAI-compatible
 base URL, model ID, and the **name of the environment variable** holding
 the API key. The key itself is never stored in the repo or the config file
 (invariant #5).
+
+### Fully-offline LLM (Ollama / llama.cpp)
+
+The `[llm]` config works with **any** OpenAI-compatible endpoint, including
+local servers. Pointing `base_url` at a local LLM runtime makes vemoizer
+fully offline — audio, transcripts, adjudication, and the Markdown notes
+never leave the machine.
+
+**Key behavior.** Whether the LLM stages run at all depends on the named
+env var, not on the server: when the variable named by `api_key_env` is
+**unset or empty, the LLM stages are skipped entirely** (no HTTP request is
+made; adjudication and the Markdown notes are silently skipped). To get a
+fully offline run you must point `api_key_env` at a variable that is
+**set** — a placeholder value is enough, because local servers such as
+Ollama do not enforce authentication and ignore the `Authorization` header.
+
+**Ollama** (tested, `http://localhost:11434/v1`):
+
+```toml
+[llm]
+base_url = "http://localhost:11434/v1"
+model = "qwen2.5:14b"       # any model installed via `ollama pull`
+api_key_env = "OLLAMA_API_KEY"  # name of the env var — it must be SET
+timeout_seconds = 120
+```
+
+```bash
+ollama pull qwen2.5:14b
+# Point api_key_env at a var that is set; Ollama ignores the value.
+export OLLAMA_API_KEY="ollama"   # placeholder; no real key is needed
+```
+
+**llama.cpp server** (tested pattern, `http://localhost:8080`):
+
+```toml
+[llm]
+base_url = "http://localhost:8080"
+model = "qwen2.5-14b"        # model name as exposed by the llama.cpp server
+api_key_env = "LLAMA_CPP_API_KEY"  # must be set for the LLM stages to run
+timeout_seconds = 120
+```
+
+```bash
+llama-server -m qwen2.5-14b-q8_0.gguf --port 8080
+export LLAMA_CPP_API_KEY="local"   # placeholder when auth is not enforced
+```
+
+The client POSTs to `{base_url}/chat/completions` with the standard OpenAI
+chat-completions body. When the key env var is **set**, an
+`Authorization: Bearer <value>` header is sent; local servers that do not
+enforce auth simply ignore it. When the key env var is **unset or empty**,
+no request is sent at all and the LLM stages fail open (the un-adjudicated
+transcript is returned and the run continues). Any other failure (timeout,
+connection refused, HTTP error) also fails open per invariant #5.
 
 | Key | Meaning |
 |---|---|

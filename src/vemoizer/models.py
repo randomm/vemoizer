@@ -34,6 +34,7 @@ __all__ = [
     "PulledModel",
     "MODELS",
     "MODEL_REGISTRY",
+    "STAGES",
     "get_model",
     "pull_models",
     "pull_model",
@@ -379,18 +380,60 @@ def format_pull_error(exc: Exception) -> str:
     )
 
 
+#: Pipeline stage each model serves (issue #67): shown in the
+#: ``models pull`` report so users know what each download is for.
+STAGES: dict[str, str] = {
+    "parakeet": "decode A",
+    "canary": "decode B",
+    "whisper-finnish": "re-decode",
+    "whisper-turbo": "meeting decode",
+    "pyannote": "diarization",
+}
+
+#: Expected on-disk size of each model's pinned snapshot (issue #67):
+#: measured against the local HF cache, rounded. Shown in the
+#: ``models pull`` report so users on 16 GB machines know what to
+#: expect before downloading.
+_EXPECTED_SIZE_GIB: dict[str, float] = {
+    "parakeet": 2.3,
+    "canary": 1.1,
+    "whisper-finnish": 2.9,
+    "whisper-turbo": 1.5,
+    "pyannote": 0.032,
+}
+
+
+def _expected_size_str(name: str) -> str:
+    """Human-readable expected size for a model (e.g. ``~2.3 GiB``)."""
+    gib = _EXPECTED_SIZE_GIB.get(name)
+    if gib is None:
+        return "?"
+    if gib < 0.1:
+        return f"~{int(gib * 1024)} MiB"
+    return f"~{gib:.1f} GiB"
+
+
 def render_pull_report(results: list[PulledModel], sizes: dict[str, int] | None) -> str:
-    """Render the ``models pull`` summary (stdout-safe, no color)."""
+    """Render the ``models pull`` summary (stdout-safe, no color).
+
+    Each model line carries its pipeline stage and expected on-disk size
+    (issue #67) so users know what each download is for and what to expect
+    before pulling ~6 GB.
+    """
     lines: list[str] = []
     for result in results:
         spec = result.spec
+        stage = STAGES.get(spec.name, "?")
         if result.error is None:
+            expected = _expected_size_str(spec.name)
             lines.append(
-                f"{spec.name}: pulled {spec.repo_id}@{spec.revision[:12]} "
-                f"({spec.revision} pinned, {result.seconds:.1f}s)"
+                f"{spec.name} [{stage}]: pulled {spec.repo_id}@{spec.revision[:12]} "
+                f"({spec.revision} pinned, {result.seconds:.1f}s, {expected})"
             )
         else:
-            lines.append(f"{spec.name}: FAILED {spec.repo_id} — {result.error}")
+            lines.append(
+                f"{spec.name} [{stage}]: FAILED {spec.repo_id} — {result.error}"
+            )
     if sizes is not None:
         total = sum(sizes.values())
         lines.append(

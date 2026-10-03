@@ -149,11 +149,46 @@ def test_pull_success_reports_all_models_and_cache_sizes() -> None:
     for spec in models_mod.MODELS:
         assert spec.name in result.stdout
         assert spec.repo_id in result.stdout
+        # Each model line carries its pipeline stage (issue #67)
+        stage = models_mod.STAGES[spec.name]
+        assert f"[{stage}]" in result.stdout
     assert "pulled" in result.stdout
     assert "cache:" in result.stdout
     assert "total" in result.stdout
     assert "100.0 MiB" in result.stdout
     assert "500.0 MiB" in result.stdout
+
+
+def test_pull_report_includes_expected_size() -> None:
+    """Each model line shows the expected on-disk size (issue #67)."""
+    with (
+        _patch_download(return_value="/fake/cache"),
+        patch.object(models_mod, "cache_size", return_value=_empty_sizes()),
+    ):
+        result = runner.invoke(app, ["models", "pull"])
+
+    assert result.exit_code == 0
+    # parakeet: ~2.3 GiB
+    assert "~2.3 GiB" in result.stdout
+    # canary: ~1.1 GiB
+    assert "~1.1 GiB" in result.stdout
+    # whisper-finnish: ~2.9 GiB
+    assert "~2.9 GiB" in result.stdout
+    # whisper-turbo: ~1.5 GiB
+    assert "~1.5 GiB" in result.stdout
+    # pyannote: ~32 MiB
+    assert "~32 MiB" in result.stdout
+
+
+def test_render_pull_report_stages_and_sizes() -> None:
+    """Unit test: render_pull_report includes stage and expected size per line."""
+    for spec in models_mod.MODELS:
+        result = models_mod.PulledModel(spec, "/cache", None, 1.0)
+        report = models_mod.render_pull_report([result], None)
+        stage = models_mod.STAGES[spec.name]
+        assert f"[{stage}]" in report
+        # Expected size is present (format varies by magnitude)
+        assert "~" in report
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +419,8 @@ def test_render_pull_report_failure_line() -> None:
     report = models_mod.render_pull_report([result], {"parakeet": 0})
     assert "FAILED" in report
     assert "some error" in report
+    # Stage is present even on failure lines
+    assert "[decode A]" in report
 
 
 # ---------------------------------------------------------------------------
