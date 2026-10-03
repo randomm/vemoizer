@@ -56,6 +56,7 @@ __all__ = [
     "group_part_paths",
     "resolve_run_glossary_files",
     "prompt_term_set_hash",
+    "prompt_term_list",
 ]
 
 
@@ -283,37 +284,30 @@ def resolve_run_glossary_files(
     return [str(p) for p in files] or None
 
 
-def prompt_term_set_hash(files: list[str] | list[Path]) -> str | None:
-    """sha256 over the glossary *prompt-term set*, the input to ``glossary_prompt``.
+def prompt_term_list(files: list[str] | list[Path]) -> list[str]:
+    """The glossary *prompt-term set* for *files* (list order = priority).
 
     Reads each glossary file in list order (project layer first) and keeps
     the non-correction (no ``=>``), non-``@`` lines — the prompt terms —
     deduped case-insensitively with the first-seen spelling winning
-    (project over home, mirroring ``glossary_layers.merge``). The hash is
-    over the newline-joined list, so two glossaries that feed the same
-    whisper prompt hash equal, regardless of correction pairs, ``@``
-    names, or comment lines.
+    (project over home, mirroring ``glossary_layers.merge``). This is the
+    single derivation that :func:`prompt_term_set_hash` hashes and that
+    the run seam (``load_layers`` + ``merge``) produces, so the two
+    cannot drift silently.
 
-    The same function hashes both the run's glossary (stored in the
-    sidecar's ``options.glossary_sha256``) and the current glossary at
-    render time, so a mismatch means the prompt-term set actually changed.
-
-    ``None`` when *files* is empty or no file is readable (fail-open).
-
-    A present-but-unreadable glossary file (permission denied, I/O error)
-    is skipped silently here — the render command's ``_load_corrections``
-    prints the user-visible warning for that path. This function is also
-    called from the run path (``build_sidecar``), where no warning is
-    appropriate.
+    Non-regular paths (directories, special files) and missing/unreadable
+    files are skipped silently (fail-open, like a missing glossary).
     """
-    if not files:
-        return None
     from vemoizer.glossary import load_glossary
 
     seen: set[str] = set()
     terms: list[str] = []
     for f in files:
         path = Path(f)
+        # Skip non-regular paths up front: a FIFO or special file must
+        # not block render's drift check (a read could hang on a FIFO).
+        if not path.is_file():
+            continue
         try:
             lines = load_glossary(path)
         except (OSError, UnicodeDecodeError, ValueError):
@@ -329,4 +323,25 @@ def prompt_term_set_hash(files: list[str] | list[Path]) -> str | None:
             if key not in seen:
                 seen.add(key)
                 terms.append(line)
-    return hashlib.sha256("\n".join(terms).encode("utf-8")).hexdigest()
+    return terms
+
+
+def prompt_term_set_hash(files: list[str] | list[Path]) -> str | None:
+    """sha256 over the newline-joined :func:`prompt_term_list` of *files*.
+
+    The hash is over the prompt-term set only, so two glossaries that feed
+    the same whisper prompt hash equal, regardless of correction pairs,
+    ``@`` names, or comment lines.
+
+    The same function hashes both the run's glossary (stored in the
+    sidecar's ``options.glossary_sha256``) and the current glossary at
+    render time, so a mismatch means the prompt-term set actually changed.
+
+    ``None`` when *files* is empty (fail-open); a non-empty list of
+    files yields the hash of the (possibly empty) term set.
+    """
+    if not files:
+        return None
+    return hashlib.sha256(
+        "\n".join(prompt_term_list(files)).encode("utf-8")
+    ).hexdigest()

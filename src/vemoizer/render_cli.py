@@ -41,6 +41,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -128,6 +129,24 @@ def _load_corrections(files: list[Path]) -> dict[str, str]:
     return corrections
 
 
+def _existing_target_mode(target: Path) -> int | None:
+    """Mode bits of *target* as a regular file, or ``None``.
+
+    Follows a symlink for the regular-file test (a symlink whose pointee
+    is a regular file keeps its pointee's mode — the old ``write_text``
+    did too). ``None`` when the target does not exist (the writer uses
+    the umask default then) or is not a regular file (the writer falls
+    back to in-place).
+    """
+    try:
+        st = os.stat(target)  # follows symlinks, as the old write_text did
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    return stat.S_IMODE(st.st_mode)
+
+
 def _atomic_write_text(target: Path, content: str) -> None:
     """Write *content* to *target* atomically (temp file + ``os.replace``).
 
@@ -135,16 +154,28 @@ def _atomic_write_text(target: Path, content: str) -> None:
     replace is atomic on the same filesystem. ``os.replace`` over a symlink
     replaces the symlink itself (not the pointed-to file), making the
     write symlink-safe. On failure the temp file is cleaned up.
+
+    An existing *regular* target keeps its mode: the temp file is
+    ``os.chmod``-ed to the old ``st_mode & 0o7777`` before the replace,
+    so a user's ``chmod 600`` on a transcript survives a re-render. A
+    *non-regular* existing target (``/dev/null``, a FIFO, …) is written
+    in place via ``write_text`` instead — the temp+replace path cannot
+    represent such a file (the old, pre-atomic behaviour for those).
     """
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f"{target.name}.tmp-{os.getpid()}")
-    try:
-        tmp.write_text(content, encoding="utf-8")
-        os.replace(str(tmp), str(target))
-    except OSError:
-        with contextlib.suppress(OSError):  # cleanup is best-effort
-            tmp.unlink(missing_ok=True)
-        raise
+    mode = _existing_target_mode(target)
+    if mode is not None:
+        tmp = target.with_name(f"{target.name}.tmp-{os.getpid()}")
+        try:
+            tmp.write_text(content, encoding="utf-8")
+            os.chmod(tmp, mode)
+            os.replace(str(tmp), str(target))
+        except OSError:
+            with contextlib.suppress(OSError):  # cleanup is best-effort
+                tmp.unlink(missing_ok=True)
+            raise
+    else:
+        target.write_text(content, encoding="utf-8")
 
 
 def _persist_speaker_names(
