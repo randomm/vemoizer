@@ -32,7 +32,6 @@ logger = logging.getLogger(__name__)
 # re-applies the initial_prompt), not a tail reservation.
 GLOSSARY_PROMPT_TOKEN_BUDGET = 150
 
-_PROMPT_PREFIX = "Sanasto: "
 _SEPARATOR = ", "
 
 
@@ -234,8 +233,8 @@ def glossary_prompt(terms: list[str], tokenizer: Tokenizer | None = None) -> str
 
     Budgeted in WHISPER TOKENS, not characters (issue #76): the string must
     fit in ``GLOSSARY_PROMPT_TOKEN_BUDGET`` tokens INCLUDING the
-    ``"Sanasto: "`` prefix and the trailing period, so the glossary itself
-    can always fit in the 223-token keep-window mlx-whisper retains. The
+    trailing period, so the glossary itself can always fit in the
+    223-token keep-window mlx-whisper retains. The
     previous text is not budgeted here; the per-window re-seeding in
     whisper_transcriber is what guarantees the glossary reaches every
     decoding window.
@@ -259,16 +258,15 @@ def glossary_prompt(terms: list[str], tokenizer: Tokenizer | None = None) -> str
     if not asr_terms:
         return None
 
-    prefix_cost = _token_cost(tokenizer, _PROMPT_PREFIX)
     period_cost = _token_cost(tokenizer, ".")
     sep_cost = _token_cost(tokenizer, _SEPARATOR)
-    overhead = prefix_cost + period_cost
+    overhead = period_cost
     if overhead > GLOSSARY_PROMPT_TOKEN_BUDGET:
         # Degenerate: even an empty glossary overflows. Ship nothing.
-        # Unreachable with the default whisper tokenizer (the prefix +
-        # period fit with room to spare); a custom tokenizer that
-        # assigns more than ~150 tokens to "Sanasto: " would hit
-        # this, and the tokenizer type is logged so an operator can
+        # Unreachable with the default whisper tokenizer (the period
+        # alone costs a handful of tokens); a custom tokenizer that
+        # assigns more than ~150 tokens to the trailing period would
+        # hit this, and the tokenizer type is logged so an operator can
         # quickly identify the cause of the silently-dropped glossary.
         logger.warning(
             "glossary: prefix overhead %d tokens exceeds budget %d; "
@@ -308,4 +306,4 @@ def glossary_prompt(terms: list[str], tokenizer: Tokenizer | None = None) -> str
             GLOSSARY_PROMPT_TOKEN_BUDGET,
             ", ".join(dropped[:10]) + ("…" if len(dropped) > 10 else ""),
         )
-    return _PROMPT_PREFIX + _SEPARATOR.join(kept) + "."
+    return _SEPARATOR.join(kept) + "."
