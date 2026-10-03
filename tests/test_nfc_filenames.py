@@ -240,9 +240,21 @@ def test_sanitize_title_empty_for_separators_only():
     assert sanitize_title("/\\//") == ""
 
 
-def test_sanitize_title_keeps_colon_in_title():
-    # Colons are legal in POSIX filenames and fine in LLM titles.
-    assert sanitize_title("Q3: review") == "Q3: review"
+def test_sanitize_title_maps_colon_to_en_dash():
+    # ":" is the legacy HFS path separator on macOS (Finder shows it as
+    # "/"), and invalid on Windows/SMB — map it to an en dash with
+    # surrounding spaces instead of keeping it (issue #110).
+    assert sanitize_title("Planning: NG Nordic & IWS") == "Planning – NG Nordic & IWS"
+
+
+def test_sanitize_title_removes_windows_invalid_chars():
+    # "? * " < > |" are invalid in Windows and SMB filenames (issue #110).
+    assert sanitize_title('a?b*c"d<e>f|g') == "abcdefg"
+
+
+def test_sanitize_title_colon_surrounding_whitespace_collapses():
+    # "a:  b" -> "a –  b" -> "a – b" (whitespace-run collapse applies).
+    assert sanitize_title("a: b") == "a – b"
 
 
 def test_sanitize_title_nfc_output():

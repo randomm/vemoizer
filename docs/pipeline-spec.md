@@ -5,8 +5,10 @@ configuration schema. This document is the single source of truth for the
 pipeline — `AGENTS.md` and `CONTRIBUTING.md` point here rather than restating
 these details.
 
-Last updated: 2026-09 (issue #15 — spec corrections: Parakeet repo IDs,
-Canary load path, CC-BY diarization, runtime environment).
+Last updated: 2026-10 (issue #110 — `sanitize_title` now maps `:` to an
+en-dash separator and drops the other filesystem-invalid characters
+`* ? " < > |`; spec corrections earlier: Parakeet repo IDs, Canary load
+path, CC-BY diarization, runtime environment).
 
 ## Overview
 
@@ -375,9 +377,14 @@ existing NFC helpers:
 
 - `sanitize_title(raw: str) -> str` — NFC-normalizes the string, drops
   path separators, control characters (including zero-width joiners and
-  BOM), collapses internal whitespace to single spaces, removes leading
-  and trailing dots/spaces, and caps the result at 80 characters. An
-  empty result signals the caller to fall back.
+  BOM), and the other filesystem-invalid characters; maps `:` to an
+  en-dash separator (`" – "`, so an LLM title "Planning: NG Nordic"
+  becomes "Planning – NG Nordic" — a bare colon survives into a filename
+  that Finder renders as a path separator and that sync tools and
+  Windows/SMB shares reject); drops `* ? " < > |` outright; collapses
+  internal whitespace to single spaces, removes leading and trailing
+  dots/spaces, and caps the result at 80 characters. An empty result
+  signals the caller to fall back.
 - `dated_basename(title, *, date_str=None, fallback_stem=None) -> str`
   — builds `YYYY-MM-DD <title>` (date defaults to today, ISO format).
   The title is sanitized first; if sanitising leaves an empty string,
