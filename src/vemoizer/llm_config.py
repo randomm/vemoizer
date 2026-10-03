@@ -45,32 +45,7 @@ def load_config(path: Path | str) -> LLMConfig | None:
     section = raw.get(LLM_CONFIG_SECTION)
     if not isinstance(section, dict):
         return None
-
-    base_url = section.get("base_url")
-    model = section.get("model")
-    api_key_env = section.get("api_key_env")
-    timeout = section.get("timeout_seconds")
-
-    if not isinstance(base_url, str) or not base_url.strip():
-        return None
-    if not isinstance(model, str) or not model.strip():
-        return None
-    if not isinstance(api_key_env, str) or not api_key_env.strip():
-        return None
-    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
-        return None
-    if timeout <= 0:
-        return None
-    if not math.isfinite(float(timeout)):
-        # TOML's 1e400 parses to float("inf"); an infinite LLM timeout is
-        # as malformed as a missing one (issue #82 review).
-        return None
-    return LLMConfig(
-        base_url=base_url.rstrip("/"),
-        model=model.strip(),
-        api_key_env=api_key_env,
-        timeout_seconds=float(timeout),
-    )
+    return _parse_llm_section(section)
 
 
 _LEGACY_CONFIG_PATHS = (
@@ -140,7 +115,11 @@ def _load_legacy_file(path: Path) -> tuple[LLMConfig | None, Path | None]:
 
 
 def _parse_llm_section(section: dict[str, Any]) -> LLMConfig | None:
-    """Parse and validate the ``[llm]`` section; ``None`` when malformed."""
+    """Parse and validate the ``[llm]`` section; ``None`` when malformed.
+
+    Shared by the fail-open ``load_config`` and the strict ``_strict_load``;
+    both must fail the same value the same way.
+    """
     base_url = section.get("base_url")
     model = section.get("model")
     api_key_env = section.get("api_key_env")
