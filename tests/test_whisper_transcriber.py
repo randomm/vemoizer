@@ -514,7 +514,7 @@ def test_echo_vocabulary_none_without_prompt() -> None:
 
 
 def test_echo_vocabulary_includes_terms_and_label() -> None:
-    """Terms come from the configured prompt; the former label is added."""
+    """Terms from the configured prompt (case preserved) + the former label."""
     vocab = _echo_vocab("Pia, NG-TOPI, IBC.")
     assert vocab is not None
     assert "Sanasto" in vocab  # former label, always present
@@ -524,7 +524,7 @@ def test_echo_vocabulary_includes_terms_and_label() -> None:
 
 
 def test_filter_drops_prompt_label_echo() -> None:
-    """A fake decode returning 'Sanasto, Pia, NG-TOPI, ...' is filtered."""
+    """A fake decode echoing the former label plus terms is filtered."""
     seg = {
         "text": "Sanasto, Pia, NG-TOPI, IBC.",
         "start": 0.0,
@@ -538,6 +538,24 @@ def test_filter_drops_prompt_label_echo() -> None:
     segments, words = filter_echo_segments([seg], 0.0, vocab)
     assert segments == []
     assert words == []
+
+
+def test_echo_vocabulary_normalizes_hyphenated_terms() -> None:
+    """A hyphenated term is kept as-is (case preserved, hyphens intact);
+    :func:`_is_echo` matches the term directly when the hyphen is present
+    in the text, and falls back to the eval harness's proportional form
+    when it isn't (issue #109 review)."""
+    vocab = _echo_vocab("NG-TOPI, IBC.")
+    assert vocab is not None
+    assert "NG-TOPI" in vocab
+    assert "IBC" in vocab
+    # _is_echo matches the term directly when the hyphen is present:
+    from vemoizer.echo_filter import _is_echo
+
+    assert _is_echo("NG-TOPI, IBC", vocab) is True
+    # When the hyphen is transcribed as a space, the strict form doesn't
+    # match (the eval harness's proportional form handles that case).
+    assert _is_echo("NG TOPI, IBC", vocab) is False
 
 
 def test_filter_drops_bare_term_run() -> None:
@@ -663,7 +681,18 @@ def test_transcribe_no_glossary_keeps_all() -> None:
 
 
 def test_prompt_has_no_sanasto_prefix() -> None:
-    """The built glossary prompt carries no 'Sanasto' label (issue #109, opt 1)."""
-    from vemoizer.glossary import _PROMPT_PREFIX
+    """The built glossary prompt carries no 'Sanasto' label (issue #109, opt 1).
 
-    assert "Sanasto" not in _PROMPT_PREFIX
+    Regression guard on the *output* of glossary_prompt (the neutral form
+    has no label prefix), not on a module constant.
+    """
+    from vemoizer.glossary import glossary_prompt
+
+    class _Tok:
+        def encode(self, text: str) -> list[int]:
+            return [len(t) for t in text.split()]
+
+    prompt = glossary_prompt(["Nordea", "Riihimäki"], _Tok())
+    assert prompt is not None
+    assert not prompt.startswith("Sanasto")
+    assert "Sanasto" not in prompt

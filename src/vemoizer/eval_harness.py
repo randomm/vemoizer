@@ -31,6 +31,13 @@ from vemoizer.textnorm import textnorm
 
 logger = logging.getLogger(__name__)
 
+#: A hypothesis whose words fall outside the glossary by less than this
+#: fraction is classified as a prompt echo (issue #109). Tuned against
+#: the recorded echo shapes (0%–25% outside) vs. the shortest real
+#: sentences (50%+ outside); a stricter 0.2 would let a two-word echo
+#: slip through, a looser 0.5 would eat real one-term sentences.
+_PROMPT_ECHO_OUTSIDE_FRACTION = 0.3
+
 #: Aggregate key appended to the per-sample mapping by :func:`run_eval`.
 AGGREGATE_KEY = "aggregate"
 
@@ -110,19 +117,17 @@ def glossary_term_hit_rate(reference: str, hypothesis: str, terms: list[str]) ->
 def _is_prompt_echo(words: list[str], terms: list[str]) -> bool:
     """True when *words* is a prompt echo, not a real transcript (issue #109).
 
-    An echo is a hypothesis made up almost entirely of glossary tokens: at
-    least one glossary token is present and fewer than 30% of the words fall
-    outside the glossary. A real sentence (``"backlog on täynnä"``: 1/3
-    outside) keeps its term hits; a prompt-echo-shaped hypothesis
-    (``"sanasto pia ng-topi"``: 0 outside) or a bare term run with one
-    non-glossary filler word (``"sanasto, pia, ng-topi"`` → 1/4 outside) is
-    classified as an echo and counts zero regardless of how many terms it
-    lists. A bare single-word glossary token (``"backlog"``: 0% outside)
-    is also classified as an echo — with no other words there is no
-    sentence context, so it is more likely a prompt continuation. A
-    two-word hypothesis with one glossary token (``"backlog ja"``: 50%
-    outside) is never classified as an echo.
+    Proportional (non-strict) form of the echo check shared with the
+    transcriber's drop filter (``echo_filter._is_echo`` is the strict form
+    — every word glossary — because it deletes transcript text while this
+    only gates a metric): at least one glossary token is present and
+    fewer than :data:`_PROMPT_ECHO_OUTSIDE_FRACTION` of the words fall
+    outside the glossary. Boundary cases: a bare term run with no other
+    words (0% outside) is an echo; a real sentence (``"backlog on täynnä"``,
+    1/3 outside) is not.
     """
+    if not terms:
+        return False
     glossary = _glossary_token_set(terms)
     if not glossary:
         return False
@@ -132,7 +137,7 @@ def _is_prompt_echo(words: list[str], terms: list[str]) -> bool:
     if in_glossary < 1:
         return False
     outside = len(words) - in_glossary
-    return outside / len(words) < 0.3
+    return outside / len(words) < _PROMPT_ECHO_OUTSIDE_FRACTION
 
 
 def _glossary_token_set(terms: list[str]) -> set[str]:

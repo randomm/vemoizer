@@ -32,7 +32,6 @@ logger = logging.getLogger(__name__)
 # re-applies the initial_prompt), not a tail reservation.
 GLOSSARY_PROMPT_TOKEN_BUDGET = 150
 
-_PROMPT_PREFIX = ""
 _SEPARATOR = ", "
 
 
@@ -259,10 +258,9 @@ def glossary_prompt(terms: list[str], tokenizer: Tokenizer | None = None) -> str
     if not asr_terms:
         return None
 
-    prefix_cost = _token_cost(tokenizer, _PROMPT_PREFIX)
     period_cost = _token_cost(tokenizer, ".")
     sep_cost = _token_cost(tokenizer, _SEPARATOR)
-    overhead = prefix_cost + period_cost
+    overhead = period_cost
     if overhead > GLOSSARY_PROMPT_TOKEN_BUDGET:
         # Degenerate: even an empty glossary overflows. Ship nothing.
         # Unreachable with the default whisper tokenizer (the period
@@ -308,4 +306,4 @@ def glossary_prompt(terms: list[str], tokenizer: Tokenizer | None = None) -> str
             GLOSSARY_PROMPT_TOKEN_BUDGET,
             ", ".join(dropped[:10]) + ("…" if len(dropped) > 10 else ""),
         )
-    return _PROMPT_PREFIX + _SEPARATOR.join(kept) + "."
+    return _SEPARATOR.join(kept) + "."

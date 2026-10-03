@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Any
 import mlx.core as mx
 import numpy as np
 
-from .echo_filter import echo_vocabulary, filter_echo_segments
+from .echo_filter import _is_echo, echo_vocabulary
 from .models import get_model
 from .selfheal import heal
 from .transcriber import TranscriptionResult
@@ -246,13 +246,28 @@ class WhisperTranscriber:
         segments: list[dict[str, Any]] = []
         for index, raw in enumerate(raws):
             offset_s = index * WINDOW_SECONDS
+            window_texts: list[str] = []  # per-window text (issue #109)
             # Echo backstop (issue #109): whisper can continue the glossary
             # prompt instead of transcribing. Drop only the segments that
             # are the prompt being echoed — never a real sentence that merely
-            # contains one or more glossary terms.
-            raw_segments, raw_words = filter_echo_segments(
-                raw.get("segments") or [], offset_s, self._echo_terms
-            )
+            # contains one or more glossary terms. The strict form
+            # (_is_echo, every word a prompt term) is the only thing this
+            # path is safe to drop on; the eval harness's proportional form
+            # gates a metric, not transcript text.
+            raw_segments: list[dict[str, Any]] = []
+            for seg in raw.get("segments") or []:
+                text = str(seg.get("text", "")).strip()
+                if (
+                    text
+                    and self._echo_terms is not None
+                    and _is_echo(text, self._echo_terms)
+                ):
+                    logger.info(
+                        "dropping prompt echo at %.0fs",
+                        float(seg.get("start", 0.0)) + offset_s,
+                    )
+                    continue
+                raw_segments.append(seg)
             # A non-empty window that decoded to zero segments (malformed
             # payload, or the model hearing nothing) would otherwise flow
             # into the fail-open path in decode_meeting indistinguishable
@@ -273,6 +288,7 @@ class WhisperTranscriber:
                 text = str(seg.get("text", "")).strip()
                 if not text:
                     continue
+                window_texts.append(text)
                 entry: dict[str, Any] = {
                     "start": float(seg.get("start", 0.0)) + offset_s,
                     "end": float(seg.get("end", 0.0)) + offset_s,
@@ -285,12 +301,28 @@ class WhisperTranscriber:
                     if seg.get(key) is not None:
                         entry[key] = float(seg[key])
                 segments.append(entry)
-            words.extend(raw_words)
+                for w in seg.get("words") or []:
+                    word = str(w.get("word", "")).strip()
+                    if word:
+                        words.append(
+                            {
+                                "word": word,
+                                "start": float(w.get("start", 0.0)) + offset_s,
+                                "end": float(w.get("end", 0.0)) + offset_s,
+                            }
+                        )
+            # Per-window text: the filtered segments' text, falling back to
+            # raw["text"] when the window has no segments (malformed payload
+            # shape the debug log above anticipates) so a shape anomaly
+            # degrades to the old behaviour instead of silently losing text.
+            if not window_texts:
+                window_texts.append(str(raw.get("text", "")).strip())
 
         result: TranscriptionResult = {
-            # Built from the filtered segments, not raw["text"] — the raw
-            # string contains echo-segment text that was already dropped.
-            "text": " ".join(s["text"] for s in segments).strip(),
+            # Built from the per-window filtered segments (with the raw["text"]
+            # fallback above), not raw["text"] alone — the raw string contains
+            # echo-segment text that was already dropped.
+            "text": " ".join(t for t in window_texts if t).strip(),
             "words": words,
             "segments": segments,
             "transcribe_time": transcribe_time,

@@ -6,6 +6,14 @@ can continue the glossary ``initial_prompt`` instead of transcribing:
 are the prompt being echoed while keeping real sentences that contain one
 or more glossary terms, and is fail-open on any error (it never loses a
 real segment to a filter bug).
+
+Two consumers classify the same phenomenon and share :func:`_is_echo`
+with different strictness (the module-level comment on the function
+records the rationale): the transcriber uses the strict form (every word
+must be a prompt term — the only thing it is safe to drop is something
+we know to be the prompt); the eval harness uses the proportional form
+(a metric-shape check — a hypothesis that is *almost* pure prompt must
+not count its term hits, so a bit of surrounding filler is tolerated).
 """
 
 from __future__ import annotations
@@ -17,8 +25,10 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 #: The label word the prompt once carried. Even after the neutral form
-#: dropped it (issue #109, option 1), the recorded echo evidence shows it as
-#: the most-repeated token, so it stays on the echo vocabulary.
+#: dropped it (issue #109, option 1), the recorded echo evidence shows it
+#: as the most-repeated token, so the echo vocabulary keeps it for
+#: backward compatibility with pre-#109 echo recordings — even though the
+#: neutral prompt itself never echoes it.
 _PROMPT_LABEL = "Sanasto"
 
 
@@ -28,7 +38,15 @@ def echo_vocabulary(prompt: str | None) -> list[str] | None:
     ``None`` means no glossary was configured, in which case the filter is a
     no-op (nothing to echo). The terms come straight from the configured
     ``initial_prompt`` — the same string whisper was seeded with — so the
-    filter only ever looks for what it was actually primed to repeat.
+    filter only ever looks for what it was actually primed to repeat, plus
+    the former label word for backward compatibility (see
+    :data:`_PROMPT_LABEL`).
+
+    Each term is kept as-is (case preserved, hyphens intact); :func:`_is_echo`
+    compares case-insensitively and tolerates a hyphen being transcribed as
+    a comma/space (``"NG-TOPI"`` matches a segment echoing ``"NG TOPI"``),
+    so the two paths (this filter and the eval harness's echo check) never
+    disagree on hyphenated acronyms.
     """
     if prompt is None or not prompt.strip():
         return None
@@ -42,18 +60,30 @@ def echo_vocabulary(prompt: str | None) -> list[str] | None:
 def _is_echo(text: str, echo_terms: list[str]) -> bool:
     """True when *text* is the prompt being echoed, not real speech.
 
-    A segment is an echo when every word is a glossary term or the (former)
-    prompt label, in prompt order. A real sentence that contains one or more
-    glossary terms has at least one non-glossary word and is always kept.
-    Punctuation-only tokens (commas, periods) are ignored by the token
-    pattern; the case of a word is irrelevant.
+    A segment is an echo when every word is a prompt term (or the former
+    label, which :func:`echo_vocabulary` always includes) — no real
+    sentence containing one or more glossary terms can be an echo, because
+    it has at least one non-glossary word. The comparison is
+    case-insensitive and hyphen-tolerant: ``"NG-TOPI"`` in the vocabulary
+    matches ``"NG TOPI"`` in a segment (whisper often transcribes a hyphen
+    as a comma or space), so the filter and the eval harness's echo check
+    agree on hyphenated acronyms. Punctuation-only input (commas/periods
+    normalize away) is not an echo — there is nothing for the model to
+    have repeated.
+
+    The ``matched > 0`` guard at the end prevents ``_is_echo("")`` from
+    returning True when the regex finds no matches (empty input is
+    filtered by the caller, but the guard makes the contract
+    self-evident).
     """
+    if not text:
+        return False
     vocab = {t.lower() for t in echo_terms}
+    # Tokenize on word boundaries (commas/periods separate tokens; hyphens
+    # are word chars, so "NG-TOPI" stays one token and matches the
+    # vocabulary's "NG-TOPI" directly).
     matched = 0
-    for token in re.findall(r"[\w'][-\w']*", text, re.UNICODE):
-        # The token (commas/periods excluded by the pattern) must be a whole
-        # glossary term or the former label for the segment to be an echo;
-        # case-insensitive.
+    for token in re.findall(r"\w+[-\w]*", text, re.UNICODE):
         norm = token.lower()
         if norm in vocab:
             matched += 1
@@ -108,14 +138,27 @@ def filter_echo_segments(
         for seg in segments:
             text = str(seg.get("text", "")).strip()
             if text and _is_echo(text, echo_terms):
+                lower = text.lower()
                 logger.info(
                     "dropping prompt echo at %.0fs (echoed %d glossary term(s))",
                     float(seg.get("start", 0.0)) + offset_s,
-                    len([t for t in echo_terms if t.lower() in text.lower()]),
+                    len([t for t in echo_terms if t.lower() in lower]),
                 )
                 continue
             kept_segments.append(seg)
         return kept_segments, _words_on_timeline(kept_segments, offset_s)
     except Exception as e:  # noqa: BLE001 - fail-open: keep unfiltered
-        logger.warning("echo filter error, returning unfiltered: %s", e)
-        return list(segments), _words_on_timeline(segments, offset_s)
+        # Log the traceback: schema drift (a dict where a list is expected,
+        # a None entry in words) leaves only an exception message without
+        # it, and the fail-open path would then be un-diagnosable.
+        logger.warning("echo filter error, returning unfiltered: %s", e, exc_info=True)
+        try:
+            fallback_words = _words_on_timeline(segments, offset_s)
+        except Exception:
+            # The fallback itself can raise when the exception above came
+            # from inside _words_on_timeline (e.g. a non-numeric word
+            # timestamp); the fail-open contract still requires the
+            # segments to survive, so degrade to no words rather than
+            # propagate and lose the whole window.
+            fallback_words = []
+        return list(segments), fallback_words
