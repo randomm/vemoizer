@@ -173,3 +173,73 @@ def test_eval_check_without_baseline_file_fails_actionably(
 def test_eval_missing_corpus_exits_one(tmp_path) -> None:
     result = runner.invoke(app, ["eval", "--corpus", str(tmp_path / "nope")])
     assert result.exit_code == 1
+
+
+def test_eval_agreement_emits_metric_when_two_backends_scored(
+    tmp_path, monkeypatch
+) -> None:
+    """--agreement emits the informational metric when 2+ backends are scored."""
+    corpus = _corpus(tmp_path)
+    # "one": both decoders produce the same wrong text -> agreement on wrong
+    # "two": both decoders produce the same correct text -> not a wrong-answer case
+    _patch_backends(monkeypatch, {"one": "x y z", "two": "toinen testi"})
+    result = runner.invoke(
+        app,
+        ["eval", "--corpus", str(corpus), "--backend", "all", "--agreement"],
+    )
+    assert result.exit_code == 0
+    assert "[agreement_on_wrong]" in result.stdout
+    # "one" is agreement-on-wrong (both decoders say "x y z", reference is
+    # "moro maailma"); "two" is agreement-correct. So 1/2 = 0.5.
+    assert "[agreement_on_wrong]\t0.5000" in result.stdout
+
+
+def test_eval_agreement_not_emitted_for_single_backend(tmp_path, monkeypatch) -> None:
+    """--agreement with a single backend produces no agreement line."""
+    corpus = _corpus(tmp_path)
+    _patch_backends(monkeypatch, {"one": "moro maailma", "two": "toinen testi"})
+    result = runner.invoke(
+        app,
+        ["eval", "--corpus", str(corpus), "--backend", "parakeet", "--agreement"],
+    )
+    assert result.exit_code == 0
+    assert "[agreement_on_wrong]" not in result.stdout
+
+
+def test_eval_agreement_does_not_affect_wer_gate(tmp_path, monkeypatch) -> None:
+    """The agreement metric is informational: --check behaviour is unchanged."""
+    corpus = _corpus(tmp_path)
+    baseline_path = tmp_path / "wer_baseline.json"
+    _patch_backends(monkeypatch, {"one": "moro maailma", "two": "toinen testi"})
+    assert (
+        runner.invoke(
+            app,
+            [
+                "eval",
+                "--corpus",
+                str(corpus),
+                "--backend",
+                "all",
+                "--baseline",
+                str(baseline_path),
+                "--update-baseline",
+            ],
+        ).exit_code
+        == 0
+    )
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "--corpus",
+            str(corpus),
+            "--backend",
+            "all",
+            "--agreement",
+            "--baseline",
+            str(baseline_path),
+            "--check",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "baseline check passed" in result.stdout

@@ -27,6 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from vemoizer.slice_align import slice_similarity
 from vemoizer.textnorm import textnorm
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,24 @@ logger = logging.getLogger(__name__)
 #: sentences (50%+ outside); a stricter 0.2 would let a two-word echo
 #: slip through, a looser 0.5 would eat real one-term sentences.
 _PROMPT_ECHO_OUTSIDE_FRACTION = 0.3
+
+#: Two decodes are "in agreement" when their char-level normalized similarity
+#: is at least this fraction (issue #62). Same textnorm + SequenceMatcher
+#: ratio as :func:`vemoizer.slice_align.slice_similarity`; 0.8 is tuned
+#: against the TTS-corpus agreement band (0.70–0.88, issue #62) so a sample
+#: whose decoders merely tell a similar story (0.70–0.88) is not counted
+#: as agreeing, while a genuinely matching pair scores well above it.
+#: This constant is an informational threshold for the agreement metric
+#: only — it does not touch the pipeline's dispute detection (that uses
+#: :data:`vemoizer.slice_align.SLICE_DISPUTE_THRESHOLD` for span selection)
+#: and it must not be compared with :data:`vemoizer.spans.DISPUTE_THRESHOLD`
+#: (the word-pair LCS gate).
+AGREEMENT_THRESHOLD = 0.8
+
+#: A sample's shared-decoder hypothesis is "wrong" when its WER against the
+#: reference exceeds this (issue #62). Informational threshold — never a
+#: gate (invariant #2, the WER gate stays the only regression gate).
+_WRONG_WER = 0.3
 
 #: Aggregate key appended to the per-sample mapping by :func:`run_eval`.
 AGGREGATE_KEY = "aggregate"
@@ -190,6 +209,82 @@ def _terms_present(words: list[str], terms: list[str]) -> set[str]:
     return present
 
 
+def similarity(text_a: str, text_b: str) -> float:
+    """Char-level similarity of two texts in ``[0, 1]``.
+
+    Thin alias over :func:`vemoizer.slice_align.slice_similarity` — the
+    same textnorm + SequenceMatcher ratio the slice-level dispute detector
+    (issue #55) uses. Exposed here so the informational eval metrics
+    (e.g. :func:`agreement_on_wrong_sample`) share one definition of
+    "similar" with the pipeline's disagreement detector; the two cannot
+    quietly drift apart if the threshold is re-tuned.
+
+    Two empty texts are identical (1.0); one empty side is a total
+    disagreement (0.0).
+    """
+    return slice_similarity(text_a, text_b)
+
+
+def agreement_on_wrong_sample(
+    reference: str, hypothesis_a: str, hypothesis_b: str
+) -> bool:
+    """True when decoders A and B agree with each other AND the shared text
+    is wrong (issue #62).
+
+    A sample is "in agreement" when :func:`similarity` of the two
+    normalized texts is at least :data:`AGREEMENT_THRESHOLD` (the boundary
+    sample, where similarity equals the threshold exactly, **counts** as
+    in-agreement). The sample is "wrong" when the WER of *hypothesis_a*
+    against *reference* strictly exceeds :data:`_WRONG_WER` (the boundary
+    sample, where WER equals the threshold exactly, does **not** count as
+    wrong). A sample that is both is the case a two-way comparison cannot
+    detect on its own: the pipeline ships decode A, the LLM never
+    adjudicates (no dispute), and the WER aggregate is dragged down by the
+    shared miss. This is what the ``--backend all`` run's informational
+    ``agreement_on_wrong`` number is meant to expose.
+    """
+    if similarity(hypothesis_a, hypothesis_b) < AGREEMENT_THRESHOLD:
+        return False
+    return wer(reference, hypothesis_a) > _WRONG_WER
+
+
+def agreement_on_wrong(
+    references: dict[str, str],
+    hypothesis_a: dict[str, str],
+    hypothesis_b: dict[str, str],
+) -> float:
+    """Fraction of samples where decoders A and B agree with each other
+    (similarity ≥ :data:`AGREEMENT_THRESHOLD`) AND the shared hypothesis is
+    wrong against *references* (issue #62).
+
+    *references* maps sample stem -> reference transcript. *hypothesis_a*
+    and *hypothesis_b* are the per-sample hypothesis mappings from two
+    different decoders — the same shape :func:`run_eval`'s *hypotheses*
+    parameter produces. The function does not walk the corpus (the caller
+    already walked it twice); it pairs each stem in *hypothesis_a* against
+    the same stem in *hypothesis_b* and counts the samples where
+    :func:`agreement_on_wrong_sample` is true. A stem present in one
+    mapping but missing from the other, or missing from *references*, is
+    not counted (the caller is responsible for all three mappings covering
+    the same sample set, as the ``--backend all`` run's per-backend walks
+    guarantee).
+
+    Returns a fraction in ``[0, 1]``; 0.0 when *hypothesis_a* is empty.
+    Informational — the WER gate (:func:`compare_to_baseline`) is the only
+    regression gate; this number is reported, never gated (invariant #2).
+    """
+    if not hypothesis_a:
+        return 0.0
+    agree_and_wrong = sum(
+        1
+        for stem, hyp_a in hypothesis_a.items()
+        if stem in hypothesis_b
+        and stem in references
+        and agreement_on_wrong_sample(references[stem], hyp_a, hypothesis_b[stem])
+    )
+    return agree_and_wrong / len(hypothesis_a)
+
+
 def run_eval(
     corpus_dir: Path,
     transcribe: Callable[[Path], str],
@@ -211,7 +306,9 @@ def run_eval(
     *hypotheses* dict is passed, it is filled with the per-sample
     hypotheses (``{stem: hypothesis}``) as the walk progresses — that is
     what :func:`run_meeting_eval` reuses via its *reuse* parameter so the
-    meeting walk does not re-decode a sample the WER walk just scored.
+    meeting walk does not re-decode a sample the WER walk just scored,
+    and the seam the multi-backend ``agreement_on_wrong`` run reuses to
+    pair two decoders' per-sample outputs (issue #62).
     """
     if not corpus_dir.is_dir():
         raise FileNotFoundError(f"corpus directory not found: {corpus_dir}")
