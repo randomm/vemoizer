@@ -116,7 +116,7 @@ def _resolve_llm_config(config_path: str | None) -> LLMConfig | None:
     because its ``except Exception`` swallows ``ConfigError`` silently).
     ``None`` (no config found) is fine.
     """
-    from vemoizer.llm import _default_search, load_config
+    from vemoizer.llm_config import _default_search, load_config
 
     if config_path is not None:
         return load_config(config_path)
