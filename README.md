@@ -44,7 +44,8 @@ and LLM API keys redacted.
 ## Install as a tool
 
 Install the `vemoizer` command on your PATH and pre-download the
-revision-pinned models (~6 GB):
+revision-pinned models (per-model sizes in the
+`docs/pipeline-spec.md` → "Model manifest" table):
 
 ```bash
 uv tool install --editable ~/projects/vemoizer
@@ -56,7 +57,7 @@ vemoizer doctor           # optional: verify the local setup
 
 ```bash
 uv sync --group dev
-uv run vemoizer models pull     # pre-download the revision-pinned models (~6 GB)
+uv run vemoizer models pull     # pre-download the revision-pinned models
 ```
 
 Requirements: macOS on Apple Silicon, Python ≥ 3.11, `ffmpeg` on PATH.
@@ -71,6 +72,28 @@ model = "your-model"
 api_key_env = "VEMOIZER_LLM_API_KEY"   # name of the env var holding the key
 timeout_seconds = 30
 ```
+
+**Fully offline LLM (Ollama / llama.cpp).** The same config works with a
+local LLM server, making vemoizer fully offline — including adjudication
+and the Markdown notes. When the named env var is unset or empty the LLM
+stages are skipped entirely (no request is made); to get a fully offline
+run, point `api_key_env` at a variable that is *set* — a placeholder
+value is fine, since local servers such as Ollama do not enforce auth:
+
+```toml
+[llm]
+base_url = "http://localhost:11434/v1"   # Ollama
+model = "qwen2.5:14b"
+api_key_env = "OLLAMA_API_KEY"            # set it (any value works)
+timeout_seconds = 120
+```
+
+```bash
+export OLLAMA_API_KEY="ollama"   # placeholder; Ollama ignores it
+```
+
+llama.cpp server works the same way: `base_url = "http://localhost:8080"`.
+See `docs/pipeline-spec.md` → "Fully-offline LLM" for the full spec.
 
 **Diarization (optional, `--diarize`).** Uses pyannote's gated CC-BY-4.0
 weights: accept the license on HuggingFace and provide an access token
