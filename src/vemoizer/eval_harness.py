@@ -109,26 +109,35 @@ def glossary_term_hit_rate(reference: str, hypothesis: str, terms: list[str]) ->
     if not in_ref:
         return 1.0
     in_hyp = _terms_present(hyp_words, terms)
-    if _is_prompt_echo(hyp_words, terms):
+    # Compute the glossary token set once for the two calls below rather
+    # than rebuilding it inside each (the set is the same for both).
+    glossary = _glossary_token_set(terms)
+    if _is_prompt_echo(hyp_words, glossary):
         return 0.0
     return len(in_ref & in_hyp) / len(in_ref)
 
 
-def _is_prompt_echo(words: list[str], terms: list[str]) -> bool:
+def _is_prompt_echo(words: list[str], glossary: set[str]) -> bool:
     """True when *words* is a prompt echo, not a real transcript (issue #109).
 
-    Proportional (non-strict) form of the echo check shared with the
-    transcriber's drop filter (``echo_filter._is_echo`` is the strict form
-    — every word glossary — because it deletes transcript text while this
-    only gates a metric): at least one glossary token is present and
-    fewer than :data:`_PROMPT_ECHO_OUTSIDE_FRACTION` of the words fall
-    outside the glossary. Boundary cases: a bare term run with no other
-    words (0% outside) is an echo; a real sentence (``"backlog on täynnä"``,
-    1/3 outside) is not.
+    Proportional (non-strict) form of the echo check. Independent of the
+    transcriber's strict drop filter (``echo_filter._is_echo``) — the two
+    classify the same phenomenon with different tokenization and
+    strictness (see the module docstring in ``echo_filter``): this form
+    uses :func:`vemoizer.textnorm.textnorm` to normalize every word (so a
+    hyphen transcribed as a space still matches a hyphenated glossary term)
+    and tolerates up to
+    :data:`_PROMPT_ECHO_OUTSIDE_FRACTION` of the words falling outside the
+    glossary, because it only gates a metric and must not lose real term
+    hits on a real sentence that happens to contain a few glossary words.
+
+    *glossary* is the pre-computed lower-cased token set (see
+    :func:`_glossary_token_set`); the caller builds it once per hypothesis
+    rather than per word.
+
+    Boundary cases: a bare term run with no other words (0% outside) is an
+    echo; a real sentence (``"backlog on täynnä"``, 1/3 outside) is not.
     """
-    if not terms:
-        return False
-    glossary = _glossary_token_set(terms)
     if not glossary:
         return False
     if not words:

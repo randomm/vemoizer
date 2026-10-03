@@ -550,12 +550,13 @@ def test_echo_vocabulary_normalizes_hyphenated_terms() -> None:
     assert "NG-TOPI" in vocab
     assert "IBC" in vocab
     # _is_echo matches the term directly when the hyphen is present:
-    from vemoizer.echo_filter import _is_echo
+    from vemoizer.echo_filter import _is_echo, is_echo, vocabulary_set
 
-    assert _is_echo("NG-TOPI, IBC", vocab) is True
+    vocab_set = vocabulary_set(vocab)
+    assert is_echo("NG-TOPI, IBC", vocab) is True
     # When the hyphen is transcribed as a space, the strict form doesn't
     # match (the eval harness's proportional form handles that case).
-    assert _is_echo("NG TOPI, IBC", vocab) is False
+    assert _is_echo("NG TOPI, IBC", vocab_set) is False
 
 
 def test_filter_drops_bare_term_run() -> None:
@@ -615,7 +616,11 @@ def test_filter_noop_when_no_glossary() -> None:
 
 
 def test_filter_fail_open_on_error(caplog) -> None:
-    """On any filter error the unfiltered segments are returned (fail-open)."""
+    """On any filter error the unfiltered segments are returned (fail-open).
+
+    The log line reports the exception type and message only (no traceback)
+    so that a malformed payload cannot leak transcript text into the log.
+    """
     # A segment whose start is not numeric will raise in the log line's
     # float() conversion -> the except branch returns the unfiltered list.
     seg = {"text": "Sanasto, DCS.", "start": "bogus", "end": 1.0, "words": []}
@@ -625,6 +630,42 @@ def test_filter_fail_open_on_error(caplog) -> None:
     # Fail-open: the segment is not lost.
     assert len(segments) == 1
     assert segments[0]["text"] == "Sanasto, DCS."
+    # The warning is logged without a traceback (no exc_info) so that
+    # transcript fragments cannot leak into the log via the exception
+    # message or stack.
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert "echo filter error" in warnings[0].getMessage()
+    # No traceback in the message (exc_info would set this).
+    assert warnings[0].exc_info is None
+
+
+def test_filter_fail_open_degrades_words_with_warning(caplog) -> None:
+    """When the fallback _words_on_timeline also fails, the words degrade
+    to empty and a second warning is logged (distinguishable from the
+    outer 'returning unfiltered' warning)."""
+    # A word with a non-numeric start will raise in _words_on_timeline's
+    # float() conversion. The outer catch logs 'returning unfiltered',
+    # the inner catch logs 'words extraction failed' with a distinct
+    # message so the degradation is observable.
+    seg = {
+        "text": "Sanasto, DCS.",
+        "start": "bogus",  # raises in the outer float() for the drop log
+        "end": 1.0,
+        "words": [{"word": " Sanasto", "start": "bad", "end": 0.4}],
+    }
+    vocab = _echo_vocab("DCS.")
+    with caplog.at_level(logging.WARNING):
+        segments, words = filter_echo_segments([seg], 0.0, vocab)
+    # Segments survive (fail-open); words degrade to empty.
+    assert len(segments) == 1
+    assert segments[0]["text"] == "Sanasto, DCS."
+    assert words == []
+    # Two distinct warnings: outer + inner degradation.
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 2
+    assert "echo filter error" in warnings[0].getMessage()
+    assert "words extraction failed" in warnings[1].getMessage()
 
 
 def test_transcribe_drops_echo_segment_end_to_end() -> None:
