@@ -196,7 +196,7 @@ def _dropped_terms(
     glossary term may itself contain ``", "`` (e.g.
     ``Riihimäki, Nurmijärvi``).  A term is reported dropped only when the
     prompt body does not contain it at all.  ``glossary_prompt`` builds
-    the body as ``prefix + ", ".join(kept) + "."`` in file order, so a
+    the body as ``", ".join(kept) + "."`` (no prefix) in file order, so a
     term that survived budgeting always appears verbatim in the body.
     """
     if prompt is None:

@@ -247,6 +247,7 @@ class WhisperTranscriber:
 
         words: list[dict[str, Any]] = []
         segments: list[dict[str, Any]] = []
+        all_window_texts: list[str] = []  # accumulate text across all windows
         for index, raw in enumerate(raws):
             offset_s = index * WINDOW_SECONDS
             window_texts: list[str] = []  # per-window text (issue #109)
@@ -299,18 +300,22 @@ class WhisperTranscriber:
             # Words come from the filter's kept_words (already on the
             # recording timeline); no per-segment word loop needed here.
             words.extend(kept_words)
-            # Per-window text: the filtered segments' text, falling back to
-            # raw["text"] when the window has no segments (malformed payload
-            # shape the debug log above anticipates) so a shape anomaly
-            # degrades to the old behaviour instead of silently losing text.
-            if not window_texts:
+            # Per-window text: the filtered segments' text. Fallback to
+            # raw["text"] only when the window has NO segments (malformed
+            # payload shape the debug log above anticipates). When segments
+            # existed but were ALL filtered as echoes, window_texts is empty
+            # and we do NOT fall back — the echo must not resurrect in the
+            # headline text (issue #109, the all-echo window shape).
+            if not window_texts and not raw.get("segments"):
                 window_texts.append(str(raw.get("text", "")).strip())
+            all_window_texts.extend(window_texts)
 
         result: TranscriptionResult = {
-            # Built from the per-window filtered segments (with the raw["text"]
-            # fallback above), not raw["text"] alone — the raw string contains
-            # echo-segment text that was already dropped.
-            "text": " ".join(t for t in window_texts if t).strip(),
+            # Built from all windows' filtered segments (with the raw["text"]
+            # fallback above for zero-segment windows), not raw["text"] alone
+            # — the raw string contains echo-segment text that was already
+            # dropped.
+            "text": " ".join(t for t in all_window_texts if t).strip(),
             "words": words,
             "segments": segments,
             "transcribe_time": transcribe_time,
