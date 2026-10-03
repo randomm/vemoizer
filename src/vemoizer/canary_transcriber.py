@@ -33,7 +33,8 @@ from typing import Any
 import mlx.core as mx
 import numpy as np
 
-from .canary_mlx import SAMPLE_RATE, compute_features, load_canary_weights
+from .canary_features import SAMPLE_RATE, compute_features
+from .canary_mlx import load_canary_weights
 from .transcriber import TranscriptionResult
 
 logger = logging.getLogger(__name__)
