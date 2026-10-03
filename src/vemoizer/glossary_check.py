@@ -202,8 +202,6 @@ def _dropped_terms(
     if prompt is None:
         return []
     prompt_body = prompt
-    if prompt_body.startswith("Sanasto: "):
-        prompt_body = prompt_body[len("Sanasto: ") :]
     if prompt_body.endswith("."):
         prompt_body = prompt_body[:-1]
     return [t for t in terms if t not in prompt_body and not t.startswith("@")]

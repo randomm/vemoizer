@@ -91,7 +91,7 @@ def test_prompt_is_bounded_by_token_budget() -> None:
     prompt = glossary_prompt(terms, tok)
     assert prompt is not None
     # The prompt string must fit in GLOSSARY_PROMPT_TOKEN_BUDGET tokens,
-    # including the "Sanasto: " prefix and the trailing period.
+    # including the trailing period (the neutral form has no label prefix).
     assert len(tok.encode(prompt)) <= GLOSSARY_PROMPT_TOKEN_BUDGET
 
 

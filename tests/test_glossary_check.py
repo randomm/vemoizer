@@ -89,8 +89,10 @@ def test_prompt_printed_with_token_count(tmp_path, monkeypatch) -> None:
     f.write_text("hei\nmoi\n", encoding="utf-8")
     report = gc.check_file(f)
     assert report.prompt is not None
-    assert report.prompt.startswith("Sanasto: ")
-    # "Sanasto: hei, moi." — 18 chars = 18 tokens for the fake tokenizer
+    # Neutral form: no label prefix, just terms + trailing period.
+    assert not report.prompt.startswith("Sanasto: ")
+    # "hei, moi." — 8 chars = 8 tokens for the fake tokenizer
+    assert report.prompt == "hei, moi."
     assert report.prompt_tokens == len(report.prompt)
     text = gc.render_report(report)
     assert f"Prompt: {report.prompt}" in text
@@ -131,7 +133,7 @@ def test_comma_containing_term_not_false_positive(tmp_path, monkeypatch) -> None
     f = tmp_path / "g.txt"
     f.write_text("a, b\nc\nd\n", encoding="utf-8")
     report = gc.check_file(f)
-    assert report.prompt == "Sanasto: a, b, c, d."
+    assert report.prompt == "a, b, c, d."
     assert "a, b" not in report.dropped_terms
     assert "c" not in report.dropped_terms
     assert "d" not in report.dropped_terms
@@ -288,5 +290,5 @@ def test_cli_check_prints_prompt(tmp_path, monkeypatch) -> None:
     f.write_text("hello\n", encoding="utf-8")
     result = runner.invoke(app, ["glossary", "check", str(f)])
     assert result.exit_code == 0
-    assert "Sanasto: hello." in result.stdout
+    assert "Prompt: hello." in result.stdout
     assert "Prompt token count:" in result.stdout

@@ -9,12 +9,14 @@ derived from the word timestamps.
 
 from __future__ import annotations
 
+import logging
 import sys
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 
+from vemoizer.echo_filter import echo_vocabulary, filter_echo_segments
 from vemoizer.whisper_transcriber import (
     MODEL_ID,
     MODEL_REVISION,
@@ -491,3 +493,177 @@ def test_heal_redecode_never_gets_verbose_true() -> None:
     assert "verbose" not in kwargs, (
         f"Expected no verbose kwarg on heal path, got {kwargs.get('verbose')}"
     )
+
+
+# -- post-decode echo filter (issue #109) ----------------------------------
+#
+# Whisper can continue the glossary initial_prompt instead of transcribing
+# ("Sanasto, Pia, NG-TOPI, ..." in English meetings). The filter drops those
+# echo segments but must keep any real sentence that contains one or more
+# glossary terms. Fail-open: a filter error keeps the unfiltered transcript.
+
+
+def _echo_vocab(prompt):
+    return echo_vocabulary(prompt)
+
+
+def test_echo_vocabulary_none_without_prompt() -> None:
+    """No glossary configured => nothing to echo => filter is a no-op."""
+    assert _echo_vocab(None) is None
+    assert _echo_vocab("   ") is None
+
+
+def test_echo_vocabulary_includes_terms_and_label() -> None:
+    """Terms come from the configured prompt; the former label is added."""
+    vocab = _echo_vocab("Pia, NG-TOPI, IBC.")
+    assert vocab is not None
+    assert "Sanasto" in vocab  # former label, always present
+    assert "Pia" in vocab
+    assert "NG-TOPI" in vocab
+    assert "IBC" in vocab
+
+
+def test_filter_drops_prompt_label_echo() -> None:
+    """A fake decode returning 'Sanasto, Pia, NG-TOPI, ...' is filtered."""
+    seg = {
+        "text": "Sanasto, Pia, NG-TOPI, IBC.",
+        "start": 0.0,
+        "end": 1.5,
+        "words": [
+            {"word": " Sanasto", "start": 0.0, "end": 0.4},
+            {"word": " Pia", "start": 0.5, "end": 0.9},
+        ],
+    }
+    vocab = _echo_vocab("Pia, NG-TOPI, IBC.")
+    segments, words = filter_echo_segments([seg], 0.0, vocab)
+    assert segments == []
+    assert words == []
+
+
+def test_filter_drops_bare_term_run() -> None:
+    """A bare 'term, term, term' run (no label) is also an echo."""
+    seg = {
+        "text": "NG-TOPI, IBC, DCS.",
+        "start": 2.0,
+        "end": 3.0,
+        "words": [{"word": " NG-TOPI", "start": 2.0, "end": 2.5}],
+    }
+    vocab = _echo_vocab("NG-TOPI, IBC, DCS.")
+    segments, words = filter_echo_segments([seg], 0.0, vocab)
+    assert segments == []
+    assert words == []
+
+
+def test_filter_keeps_real_sentence_with_one_term() -> None:
+    """A real sentence containing one glossary term is kept unchanged."""
+    seg = {
+        "text": "We need to own the solution for IBC.",
+        "start": 0.0,
+        "end": 1.2,
+        "words": [
+            {"word": " We", "start": 0.0, "end": 0.2},
+            {"word": " IBC", "start": 0.9, "end": 1.2},
+        ],
+    }
+    vocab = _echo_vocab("IBC, DCS.")
+    segments, words = filter_echo_segments([seg], 0.0, vocab)
+    assert len(segments) == 1
+    assert segments[0]["text"] == "We need to own the solution for IBC."
+    assert [w["word"] for w in words] == ["We", "IBC"]
+
+
+def test_filter_keeps_mixed_segments_drops_echo_only() -> None:
+    """Only the echo segment is dropped; a real segment next to it stays."""
+    echo = {"text": "Sanasto, DCS.", "start": 0.0, "end": 0.5, "words": []}
+    real = {
+        "text": "the way we want to go",
+        "start": 1.0,
+        "end": 1.5,
+        "words": [{"word": " the", "start": 1.0, "end": 1.2}],
+    }
+    vocab = _echo_vocab("DCS.")
+    segments, words = filter_echo_segments([echo, real], 30.0, vocab)
+    assert len(segments) == 1
+    assert segments[0]["text"] == "the way we want to go"
+    assert [w["word"] for w in words] == ["the"]
+
+
+def test_filter_noop_when_no_glossary() -> None:
+    """With no glossary (vocab None) nothing is dropped, even term-like text."""
+    seg = {"text": "Pia, DCS, IBC.", "start": 0.0, "end": 1.0, "words": []}
+    segments, words = filter_echo_segments([seg], 0.0, None)
+    assert segments == [seg]
+    assert words == []
+
+
+def test_filter_fail_open_on_error(caplog) -> None:
+    """On any filter error the unfiltered segments are returned (fail-open)."""
+    # A segment whose start is not numeric will raise in the log line's
+    # float() conversion -> the except branch returns the unfiltered list.
+    seg = {"text": "Sanasto, DCS.", "start": "bogus", "end": 1.0, "words": []}
+    vocab = _echo_vocab("DCS.")
+    with caplog.at_level(logging.WARNING):
+        segments, _ = filter_echo_segments([seg], 0.0, vocab)
+    # Fail-open: the segment is not lost.
+    assert len(segments) == 1
+    assert segments[0]["text"] == "Sanasto, DCS."
+
+
+def test_transcribe_drops_echo_segment_end_to_end() -> None:
+    """The full transcribe() drops an echo segment and its words."""
+    raw = _raw(
+        [
+            _seg(
+                "Sanasto, NG-TOPI, IBC.",
+                [
+                    {"word": " Sanasto", "start": 0.0, "end": 0.4},
+                    {"word": " NG-TOPI", "start": 0.5, "end": 0.9},
+                ],
+            ),
+            _seg(
+                "we want to go that way",
+                [
+                    {"word": " we", "start": 1.0, "end": 1.2},
+                    {"word": " want", "start": 1.3, "end": 1.6},
+                ],
+            ),
+        ]
+    )
+    mock = _mock_whisper(raw)
+    with (
+        patch.dict("sys.modules", {"mlx_whisper": mock}),
+        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
+    ):
+        t = WhisperTranscriber(initial_prompt="NG-TOPI, IBC.")
+        result = t.transcribe(_audio(10.0))
+    assert len(result["segments"]) == 1
+    assert result["segments"][0]["text"] == "we want to go that way"
+    assert "Sanasto" not in " ".join(w["word"] for w in result["words"])
+
+
+def test_transcribe_no_glossary_keeps_all() -> None:
+    """Without a glossary, even a term-list segment is kept (no-op filter)."""
+    raw = _raw(
+        [
+            _seg(
+                "Pia, DCS, IBC.",
+                [{"word": " Pia", "start": 0.0, "end": 0.4}],
+            ),
+        ]
+    )
+    mock = _mock_whisper(raw)
+    with (
+        patch.dict("sys.modules", {"mlx_whisper": mock}),
+        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
+    ):
+        t = WhisperTranscriber()  # no prompt
+        result = t.transcribe(_audio(10.0))
+    assert len(result["segments"]) == 1
+    assert result["segments"][0]["text"] == "Pia, DCS, IBC."
+
+
+def test_prompt_has_no_sanasto_prefix() -> None:
+    """The built glossary prompt carries no 'Sanasto' label (issue #109, opt 1)."""
+    from vemoizer.glossary import _PROMPT_PREFIX
+
+    assert "Sanasto" not in _PROMPT_PREFIX

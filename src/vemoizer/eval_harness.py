@@ -80,6 +80,16 @@ def glossary_term_hit_rate(reference: str, hypothesis: str, terms: list[str]) ->
     same form (case/punctuation variants) are de-duplicated, so a glossary
     that lists both ``backlog`` and ``Backlog`` counts the term once.
 
+    Prompt echoes (issue #109) are excluded: a hypothesis that is *almost*
+    pure glossary — fewer than 30% of its words fall outside the glossary —
+    is not a real transcript; it is a continuation of the ``initial_prompt``
+    that whisper repeated on unclear or quiet audio. In such a hypothesis the
+    term hits are the prompt's, not the decoder's, and counting them would
+    inflate the metric exactly when the glossary prompt is failing. A real
+    sentence with one or a few glossary terms (``"backlog on täynnä"``)
+    keeps every occurrence; a prompt-echo-shaped hypothesis (``"sanasto pia
+    ng-topi"``) counts zero regardless of how many terms it lists.
+
     Returns ``terms_in_hyp / terms_in_ref``. Returns 1.0 when no term occurs
     in the reference (the hypothesis is vacuously complete for this
     glossary, and the sample contributes nothing to the metric either way);
@@ -92,7 +102,52 @@ def glossary_term_hit_rate(reference: str, hypothesis: str, terms: list[str]) ->
     if not in_ref:
         return 1.0
     in_hyp = _terms_present(hyp_words, terms)
+    if _is_prompt_echo(hyp_words, terms):
+        return 0.0
     return len(in_ref & in_hyp) / len(in_ref)
+
+
+def _is_prompt_echo(words: list[str], terms: list[str]) -> bool:
+    """True when *words* is a prompt echo, not a real transcript (issue #109).
+
+    An echo is a hypothesis made up almost entirely of glossary tokens: at
+    least one glossary token is present and fewer than 30% of the words fall
+    outside the glossary. A real sentence (``"backlog on täynnä"``: 1/3
+    outside) keeps its term hits; a prompt-echo-shaped hypothesis
+    (``"sanasto pia ng-topi"``: 0 outside) or a bare term run with one
+    non-glossary filler word (``"sanasto, pia, ng-topi"`` → 1/4 outside) is
+    classified as an echo and counts zero regardless of how many terms it
+    lists. A bare single-word glossary token (``"backlog"``: 0% outside)
+    is also classified as an echo — with no other words there is no
+    sentence context, so it is more likely a prompt continuation. A
+    two-word hypothesis with one glossary token (``"backlog ja"``: 50%
+    outside) is never classified as an echo.
+    """
+    glossary = _glossary_token_set(terms)
+    if not glossary:
+        return False
+    if not words:
+        return False
+    in_glossary = sum(1 for w in words if w in glossary)
+    if in_glossary < 1:
+        return False
+    outside = len(words) - in_glossary
+    return outside / len(words) < 0.3
+
+
+def _glossary_token_set(terms: list[str]) -> set[str]:
+    """All single tokens that make up any glossary term (normalized).
+
+    Multi-word terms are split: ``"sprint planning"`` contributes both
+    ``"sprint"`` and ``"planning"``. Used by :func:`_is_prompt_echo` to
+    decide how much of a hypothesis is glossary content versus real speech.
+    """
+    tokens: set[str] = set()
+    for raw in terms:
+        t = textnorm(raw)
+        if t:
+            tokens.update(t.split())
+    return tokens
 
 
 def _terms_present(words: list[str], terms: list[str]) -> set[str]:

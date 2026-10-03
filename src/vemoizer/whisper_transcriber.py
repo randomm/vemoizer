@@ -14,6 +14,13 @@ Each window is short, so its own rolling context stays inside the
 keep-window. Per-VAD-slice records for the dispute stage are derived from
 the word timestamps (:func:`slice_records_from_words`).
 
+On unclear or quiet audio — and especially in English meetings — whisper
+can continue the glossary ``initial_prompt`` instead of transcribing:
+``Sanasto, Pia, NG-TOPI, …`` (issue #109). The post-decode
+:func:`filter_echo_segments` drops such echo segments while keeping real
+sentences that contain one or more glossary terms, and is fail-open on
+any error (it never loses a real segment to a filter bug).
+
 Spike (see the issue #76 spike report): the per-window loop costs ~+40%
 wall-clock vs the single call (12.1 vs 8.7 min/hour measured on 15 min of
 synthetic audio), which is the price of the glossary actually reaching
@@ -37,6 +44,7 @@ from typing import TYPE_CHECKING, Any
 import mlx.core as mx
 import numpy as np
 
+from .echo_filter import echo_vocabulary, filter_echo_segments
 from .models import get_model
 from .selfheal import heal
 from .transcriber import TranscriptionResult
@@ -76,6 +84,11 @@ class WhisperTranscriber:
         self._mlx_whisper: Any = None
         self._load_failed = False
         self._load_once = threading.Lock()
+        # Prompt-derived echo vocabulary for the post-decode filter
+        # (issue #109): the glossary terms plus the former label word
+        # "Sanasto", case-insensitive. ``None`` (no prompt) means the
+        # filter is a no-op.
+        self._echo_terms = echo_vocabulary(initial_prompt)
         # ``language=None`` (the default) lets Whisper detect the language
         # per window (invariant #3: language is a property of a span, not
         # of a file — a hard-coded ``"fi"`` pin here forced Finnish on
@@ -233,6 +246,13 @@ class WhisperTranscriber:
         segments: list[dict[str, Any]] = []
         for index, raw in enumerate(raws):
             offset_s = index * WINDOW_SECONDS
+            # Echo backstop (issue #109): whisper can continue the glossary
+            # prompt instead of transcribing. Drop only the segments that
+            # are the prompt being echoed — never a real sentence that merely
+            # contains one or more glossary terms.
+            raw_segments, raw_words = filter_echo_segments(
+                raw.get("segments") or [], offset_s, self._echo_terms
+            )
             # A non-empty window that decoded to zero segments (malformed
             # payload, or the model hearing nothing) would otherwise flow
             # into the fail-open path in decode_meeting indistinguishable
@@ -249,7 +269,7 @@ class WhisperTranscriber:
                     index,
                     offset_s,
                 )
-            for seg in raw.get("segments") or []:
+            for seg in raw_segments:
                 text = str(seg.get("text", "")).strip()
                 if not text:
                     continue
@@ -265,19 +285,12 @@ class WhisperTranscriber:
                     if seg.get(key) is not None:
                         entry[key] = float(seg[key])
                 segments.append(entry)
-                for w in seg.get("words") or []:
-                    word = str(w.get("word", "")).strip()
-                    if word:
-                        words.append(
-                            {
-                                "word": word,
-                                "start": float(w.get("start", 0.0)) + offset_s,
-                                "end": float(w.get("end", 0.0)) + offset_s,
-                            }
-                        )
+            words.extend(raw_words)
 
         result: TranscriptionResult = {
-            "text": " ".join(str(raw["text"]).strip() for raw in raws).strip(),
+            # Built from the filtered segments, not raw["text"] — the raw
+            # string contains echo-segment text that was already dropped.
+            "text": " ".join(s["text"] for s in segments).strip(),
             "words": words,
             "segments": segments,
             "transcribe_time": transcribe_time,
