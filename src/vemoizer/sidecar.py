@@ -310,7 +310,7 @@ def prompt_term_list(files: list[str] | list[Path]) -> list[str]:
             continue
         try:
             lines = load_glossary(path)
-        except (OSError, UnicodeDecodeError, ValueError):
+        except (OSError, ValueError):
             # Fail-open: an unreadable file contributes no terms. The render
             # command's _load_corrections prints the user-visible warning for
             # the non-UTF-8 case; the run path has no such warning (the

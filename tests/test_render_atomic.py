@@ -67,25 +67,24 @@ def _imode(path: Path) -> int:
 def test_render_atomic_write_interrupted_leaves_previous_intact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An interrupted write (OSError during the temp file write) leaves the
+    """An interrupted write (OSError while opening the temp file) leaves the
     previous file intact and leaves no temp file behind."""
     isolate_home(monkeypatch, tmp_path, tmp_path)
     sc = _write_sidecar(tmp_path, _sidecar())
     existing_md = tmp_path / "sidecar.md"
     existing_md.write_text("original content", encoding="utf-8")
 
-    # Monkeypatch Path.write_text to raise OSError when writing the temp file.
-    from pathlib import Path as _Path
+    # Monkeypatch os.open to raise OSError when opening the temp file
+    # (whose name contains ".tmp-"). The writer's except block must clean
+    # up the temp (if it was created) and re-raise so the CLI exits 1.
+    original_open = os.open
 
-    original_write_text = _Path.write_text
-
-    def _failing_write_text(self, data, **kwargs):
-        # The temp file name contains ".tmp-"; the final target does not.
-        if ".tmp-" in self.name:
+    def _failing_open(*args, **kwargs):
+        if ".tmp-" in str(args[0]):
             raise OSError("simulated disk full")
-        return original_write_text(self, data, **kwargs)
+        return original_open(*args, **kwargs)
 
-    monkeypatch.setattr(_Path, "write_text", _failing_write_text)
+    monkeypatch.setattr(os, "open", _failing_open)
 
     result = runner.invoke(app, ["render", str(sc)])
     assert result.exit_code == 1
@@ -288,6 +287,86 @@ def test_render_out_file_named_dash_is_plain_file(
     assert result.exit_code == 0
     assert _imode(dash) == 0o600
     assert "# Alustus" in dash.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# No world-readable window on the temp file (issue #107 fix pass 3, #1)
+# ---------------------------------------------------------------------------
+
+
+def test_render_temp_file_private_before_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The temp file for a 0600 target is already 0600 at write time and
+    still 0600 at the moment just before ``os.replace`` — there is no
+    window in which the new content sits at the umask default (0644).
+    Reverting the writer to ``Path.write_text`` + post-write chmod makes
+    the captured mode 0644 and this test fails."""
+
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    sc = _write_sidecar(tmp_path, _sidecar())
+    md = tmp_path / "sidecar.md"
+    md.write_text("stale", encoding="utf-8")
+    md.chmod(0o600)
+
+    captured: list[tuple[str, int]] = []
+    original_fdopen = os.fdopen
+
+    def _spying_fdopen(fd: int, *args: Any, **kwargs: Any) -> Any:
+        # The write spy fires only in the fixed path (os.fdopen is called
+        # on the temp fd); in the reverted write_text path it does not —
+        # so the "writing" count is the discriminator.
+        captured.append(("writing", statmod.S_IMODE(os.fstat(fd).st_mode)))
+        return original_fdopen(fd, *args, **kwargs)
+
+    original_replace = os.replace
+
+    def _spying_replace(src: Any, dst: Any) -> None:
+        captured.append(("pre-replace", statmod.S_IMODE(os.stat(src).st_mode)))
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(os, "fdopen", _spying_fdopen)
+    monkeypatch.setattr(os, "replace", _spying_replace)
+
+    result = runner.invoke(app, ["render", str(sc)])
+    assert result.exit_code == 0
+
+    # The write spy fires only in the fixed path (os.fdopen is called on
+    # the temp fd); in the reverted write_text path it does not — so the
+    # "writing" spy count is the discriminator. The pre-replace stat
+    # captures the mode at replace time in both paths and must read 0600.
+    writing = [m for k, m in captured if k == "writing"]
+    assert len(writing) == 1
+    assert writing[0] == 0o600
+    pre_replace = [m for k, m in captured if k == "pre-replace"]
+    assert len(pre_replace) == 1
+    assert pre_replace[0] == 0o600
+    assert _imode(md) == 0o600
+
+
+# ---------------------------------------------------------------------------
+# Uncreatable parent directory (issue #107 fix pass 3, #2)
+# ---------------------------------------------------------------------------
+
+
+def test_render_parent_component_is_regular_file_exits_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When a parent path component of the output is a regular file,
+    the mkdir inside the writer fails: exit 1 with one clean
+    'could not write' error line (no traceback)."""
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    sc = _write_sidecar(tmp_path, _sidecar())
+    blocker = tmp_path / "blocker"
+    blocker.write_text("i am a file, not a directory", encoding="utf-8")
+    out = blocker / "sub" / "out.md"
+
+    result = runner.invoke(app, ["render", str(sc), "--out", str(out)])
+    assert result.exit_code == 1
+    assert "could not write" in result.stderr
+    assert "Traceback" not in result.stderr
+    # Exactly one error line about the write failure.
+    assert result.stderr.count("could not write") == 1
 
 
 # ---------------------------------------------------------------------------

@@ -338,17 +338,35 @@ def test_render_layered_glossary_missing_file_warns(
 # ---------------------------------------------------------------------------
 
 
+def _hash_sidecar_with_glossary(
+    tmp_path: Path, glossary_text: str, name: str = "sidecar.json"
+) -> tuple[Path, Path]:
+    """Write a glossary and a sidecar whose stored prompt-term-set hash
+    matches it; return ``(sidecar_path, glossary_path)``."""
+    import hashlib
+
+    from vemoizer.sidecar import prompt_term_list
+
+    glossary = tmp_path / "glossary.txt"
+    glossary.write_text(glossary_text, encoding="utf-8")
+    terms = prompt_term_list([glossary])
+    sc_data = _sidecar()
+    sc_data["options"]["glossary_sha256"] = hashlib.sha256(
+        "\n".join(terms).encode("utf-8")
+    ).hexdigest()
+    return _write_sidecar(tmp_path, sc_data, name), glossary
+
+
 def test_render_prompt_term_hash_mismatch_warns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Stored prompt-term-set hash differs from current: one stderr line."""
     isolate_home(monkeypatch, tmp_path, tmp_path)
-    g = tmp_path / "glossary.txt"
-    g.write_text("Blacksit => Flagship\n", encoding="utf-8")
-    sc_data = _sidecar()
+    sc, g = _hash_sidecar_with_glossary(tmp_path, "Blacksit => Flagship\n")
     # Store a hash that does NOT match the current prompt-term set.
     # The glossary has no prompt terms, so the prompt-term hash is
     # sha256("") — use a different value to guarantee a mismatch.
+    sc_data = json.loads(sc.read_text(encoding="utf-8"))
     sc_data["options"]["glossary_sha256"] = "deadbeef" * 8
     sc = _write_sidecar(tmp_path, sc_data)
     result = runner.invoke(app, ["render", str(sc), "--glossary", str(g)])
@@ -365,17 +383,11 @@ def test_render_prompt_term_hash_match_no_warning(
 ) -> None:
     """Matching prompt-term-set hash: no warning on stderr."""
     isolate_home(monkeypatch, tmp_path, tmp_path)
-    import hashlib
-
-    g = tmp_path / "glossary.txt"
-    # Glossary with prompt terms AND a correction pair.
-    g.write_text("Blacksit => Flagship\nFlagship\nNordea\n", encoding="utf-8")
-    # Compute the prompt-term-set hash: terms are {"Flagship", "Nordea"}
-    # (correction line excluded). The hash is over the newline-joined list.
-    expected_hash = hashlib.sha256(b"Flagship\nNordea").hexdigest()
-    sc_data = _sidecar()
-    sc_data["options"]["glossary_sha256"] = expected_hash
-    sc = _write_sidecar(tmp_path, sc_data)
+    # Glossary with prompt terms AND a correction pair; the stored hash
+    # covers the prompt terms only (correction line excluded).
+    sc, g = _hash_sidecar_with_glossary(
+        tmp_path, "Blacksit => Flagship\nFlagship\nNordea\n"
+    )
     result = runner.invoke(app, ["render", str(sc), "--glossary", str(g)])
     assert result.exit_code == 0
     assert "re-transcribe" not in result.stderr
@@ -387,15 +399,8 @@ def test_render_adding_correction_pair_no_warning(
     """Adding only a correction pair (``a => b``) does not trigger a warning
     because the prompt-term set is unchanged."""
     isolate_home(monkeypatch, tmp_path, tmp_path)
-    import hashlib
-
-    g = tmp_path / "glossary.txt"
     # Start with one prompt term.
-    g.write_text("Flagship\n", encoding="utf-8")
-    expected_hash = hashlib.sha256(b"Flagship").hexdigest()
-    sc_data = _sidecar()
-    sc_data["options"]["glossary_sha256"] = expected_hash
-    sc = _write_sidecar(tmp_path, sc_data)
+    sc, g = _hash_sidecar_with_glossary(tmp_path, "Flagship\n")
 
     # Render: no warning (hash matches).
     result = runner.invoke(app, ["render", str(sc), "--glossary", str(g)])
@@ -416,14 +421,7 @@ def test_render_adding_at_name_no_warning(
     because the prompt-term set is unchanged (``@`` terms are not prompt
     terms)."""
     isolate_home(monkeypatch, tmp_path, tmp_path)
-    import hashlib
-
-    g = tmp_path / "glossary.txt"
-    g.write_text("Flagship\n", encoding="utf-8")
-    expected_hash = hashlib.sha256(b"Flagship").hexdigest()
-    sc_data = _sidecar()
-    sc_data["options"]["glossary_sha256"] = expected_hash
-    sc = _write_sidecar(tmp_path, sc_data)
+    sc, g = _hash_sidecar_with_glossary(tmp_path, "Flagship\n")
 
     result = runner.invoke(app, ["render", str(sc), "--glossary", str(g)])
     assert result.exit_code == 0

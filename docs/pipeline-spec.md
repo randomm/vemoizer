@@ -609,9 +609,10 @@ atomically (temp file in the same directory + `os.replace`) to
 `<stem>.md` next to the sidecar, **overwriting** any existing file
 (the rendered output is fully derived from the sidecar, so the
 previous file is replaced — no ` (2)` suffix), unless `--out` is
-given. `os.replace` over a symlink at the target path replaces the
-symlink itself (not the pointed-to file), making the write
-symlink-safe.
+given. `os.replace` over a symlink whose pointee is a regular file replaces
+the symlink itself (not the pointed-to file), making the write symlink-safe;
+a symlink to a non-regular file is written through in place. The existing
+file's mode is preserved (default path and `--out` alike).
 
 Exit codes: `0` on success, `1` on an unreadable or malformed sidecar,
 `2` on a malformed `--name` value.

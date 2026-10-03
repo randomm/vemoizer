@@ -151,23 +151,32 @@ def _atomic_write_text(target: Path, content: str) -> None:
     """Write *content* to *target* atomically (temp file + ``os.replace``).
 
     The temp file is created in the **same directory** as *target* so the
-    replace is atomic on the same filesystem. ``os.replace`` over a symlink
-    replaces the symlink itself (not the pointed-to file), making the
-    write symlink-safe. On failure the temp file is cleaned up.
+    replace is atomic on the same filesystem, and it is opened with mode
+    0600 (0666 & ~umask for a new target, matching ``Path.write_text``)
+    so the temp is private from its first byte — no window in which the
+    new content is world-readable before the final ``os.chmod``.
+    ``os.replace`` over a symlink whose pointee is a regular file replaces
+    the symlink itself (not the pointed-to file); a symlink to a
+    non-regular file (``/dev/null``, a FIFO, …) is not treated as regular
+    and is written in place instead. On failure the temp file is cleaned
+    up.
 
     An existing *regular* target keeps its mode: the temp file is
     ``os.chmod``-ed to the old ``st_mode & 0o7777`` before the replace,
     so a user's ``chmod 600`` on a transcript survives a re-render. A
-    *non-regular* existing target (``/dev/null``, a FIFO, …) is written
+    *new* target gets the same mode ``Path.write_text`` would have
+    produced (0666 & ~umask). A *non-regular* existing target is written
     in place via ``write_text`` instead — the temp+replace path cannot
     represent such a file (the old, pre-atomic behaviour for those).
     """
-    target.parent.mkdir(parents=True, exist_ok=True)
     mode = _existing_target_mode(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
     if mode is not None:
         tmp = target.with_name(f"{target.name}.tmp-{os.getpid()}")
         try:
-            tmp.write_text(content, encoding="utf-8")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
             os.chmod(tmp, mode)
             os.replace(str(tmp), str(target))
         except OSError:
