@@ -8,9 +8,21 @@ re-transcribe. The LLM is never invoked.
 Glossary resolution mirrors ``run_preset``: the layered glossary
 (project + home layers, in that order) is used unless ``--glossary``
 replaces both layers entirely. The stored ``options.glossary_sha256``
-is compared against the hash of the current glossary files; a mismatch
-prints exactly one stderr line (corrections and names are applied
-regardless). A missing glossary file warns and proceeds (fail-open).
+is the sha256 over the run's **prompt-term set** — the non-correction,
+non-``@`` lines after layer merge, deduped case-insensitively (first-seen
+spelling wins), i.e. the canonical deduplicated prompt-term set that is
+the input to ``glossary_prompt`` before its token-budget truncation —
+and render recomputes the same hash (via the shared
+:func:`vemoizer.sidecar.prompt_term_set_hash`) over the current
+glossary files. Only a change to that set prints a drift warning;
+correction pairs (``wrong => right``) and ``@``-prefixed LLM-only names
+are render-safe and never warn.
+A missing glossary file warns and proceeds (fail-open).
+
+By default the rendered Markdown is written to ``<sidecar-stem>.md``
+next to the sidecar, **overwriting** any existing file — the output is
+fully derived from the sidecar, so the previous file is replaced, not
+accumulated. ``--out`` is the way to write elsewhere.
 
 ``--name LABEL=NAME`` values are persisted into the sidecar's
 ``speaker_names`` by rewriting the JSON in place atomically: the
@@ -29,12 +41,13 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import stat
 from pathlib import Path
 from typing import Any
 
 import typer
 
-from vemoizer.sidecar import sha256_over_files
+from vemoizer.sidecar import prompt_term_set_hash
 
 
 def _read_sidecar(path: Path) -> dict[str, Any] | None:
@@ -116,6 +129,64 @@ def _load_corrections(files: list[Path]) -> dict[str, str]:
     return corrections
 
 
+def _existing_target_mode(target: Path) -> int | None:
+    """Mode bits of *target* as a regular file, or ``None``.
+
+    Follows a symlink for the regular-file test (a symlink whose pointee
+    is a regular file keeps its pointee's mode — the old ``write_text``
+    did too). ``None`` when the target does not exist (the writer uses
+    the umask default then) or is not a regular file (the writer falls
+    back to in-place).
+    """
+    try:
+        st = os.stat(target)  # follows symlinks, as the old write_text did
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    return stat.S_IMODE(st.st_mode)
+
+
+def _atomic_write_text(target: Path, content: str) -> None:
+    """Write *content* to *target* atomically (temp file + ``os.replace``).
+
+    The temp file is created in the **same directory** as *target* so the
+    replace is atomic on the same filesystem, and it is opened with mode
+    0600 (0666 & ~umask for a new target, matching ``Path.write_text``)
+    so the temp is private from its first byte — no window in which the
+    new content is world-readable before the final ``os.chmod``.
+    ``os.replace`` over a symlink whose pointee is a regular file replaces
+    the symlink itself (not the pointed-to file); a symlink to a
+    non-regular file (``/dev/null``, a FIFO, …) is not treated as regular
+    and is written in place instead. On failure the temp file is cleaned
+    up.
+
+    An existing *regular* target keeps its mode: the temp file is
+    ``os.chmod``-ed to the old ``st_mode & 0o7777`` before the replace,
+    so a user's ``chmod 600`` on a transcript survives a re-render. A
+    *new* target gets the same mode ``Path.write_text`` would have
+    produced (0666 & ~umask). A *non-regular* existing target is written
+    in place via ``write_text`` instead — the temp+replace path cannot
+    represent such a file (the old, pre-atomic behaviour for those).
+    """
+    mode = _existing_target_mode(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if mode is not None:
+        tmp = target.with_name(f"{target.name}.tmp-{os.getpid()}")
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.chmod(tmp, mode)
+            os.replace(str(tmp), str(target))
+        except OSError:
+            with contextlib.suppress(OSError):  # cleanup is best-effort
+                tmp.unlink(missing_ok=True)
+            raise
+    else:
+        target.write_text(content, encoding="utf-8")
+
+
 def _persist_speaker_names(
     sidecar_path: Path, sidecar: dict[str, Any], names: dict[str, str]
 ) -> None:
@@ -132,14 +203,7 @@ def _persist_speaker_names(
     sidecar["speaker_names"].update(names)
 
     payload = json.dumps(sidecar, ensure_ascii=False, indent=2) + "\n"
-    tmp = sidecar_path.with_name(f"{sidecar_path.name}.tmp-{os.getpid()}")
-    try:
-        tmp.write_text(payload, encoding="utf-8")
-        os.replace(str(tmp), str(sidecar_path))
-    except OSError:
-        with contextlib.suppress(OSError):  # cleanup is best-effort
-            tmp.unlink(missing_ok=True)
-        raise
+    _atomic_write_text(sidecar_path, payload)
 
 
 def register_render(app) -> None:
@@ -194,11 +258,11 @@ def register_render(app) -> None:
 
         corrections = _load_corrections(files)
 
-        # --- Hash comparison ---
+        # --- Hash comparison (prompt-term set only) ---
         options = data.get("options")
         if isinstance(options, dict):
             stored_hash = options.get("glossary_sha256")
-            current_hash = sha256_over_files([str(f) for f in files]) if files else None
+            current_hash = prompt_term_set_hash(files) if files else None
             if (
                 stored_hash is not None
                 and current_hash is not None
@@ -241,18 +305,15 @@ def register_render(app) -> None:
         # --- Write output ---
         if out is not None:
             try:
-                out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_text(markdown, encoding="utf-8")
+                _atomic_write_text(out, markdown)
             except OSError as e:
                 typer.echo(f"error: could not write {out}: {e}", err=True)
                 raise typer.Exit(code=1) from e
             typer.echo(f"wrote {out}")
         else:
-            from vemoizer.output.naming import collision_free_path
-
-            md_path = collision_free_path(sidecar_path.parent, sidecar_path.stem, ".md")
+            md_path = sidecar_path.with_suffix(".md")
             try:
-                md_path.write_text(markdown, encoding="utf-8")
+                _atomic_write_text(md_path, markdown)
             except OSError as e:
                 typer.echo(f"error: could not write {md_path}: {e}", err=True)
                 raise typer.Exit(code=1) from e

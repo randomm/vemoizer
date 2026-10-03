@@ -33,6 +33,7 @@ fixture files in ``tests/fixtures/output/`` and by explicit unit tests in
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 #: Every output format the CLI accepts, in canonical order.
@@ -200,6 +201,25 @@ def format_json(transcript: dict[str, Any]) -> str:
     sn = transcript.get("speaker_names")
     if isinstance(sn, dict) and sn:
         out["speaker_names"] = sn
+    # M6 (issue #107): header keys persisted by build_sidecar so a
+    # sidecar → render → md round-trip reproduces the Kesto / Sanasto
+    # lines. Present-only: absent on expert transcribe JSON and old
+    # sidecars (no golden-fixture regeneration). Both are TYPE-guarded
+    # (matching the ``speaker_names`` mirror above) so a hand-edited or
+    # corrupted sidecar cannot persist a value the header formatter
+    # rejects: a non-numeric / non-finite duration_s would make a later
+    # render raise TypeError in _render_header, and a non-str
+    # glossary_source a TypeError in the Sanasto line's str() coercion.
+    duration = transcript.get("duration_s")
+    if (
+        isinstance(duration, (int, float))
+        and not isinstance(duration, bool)
+        and math.isfinite(duration)
+    ):
+        out["duration_s"] = duration
+    glossary = transcript.get("glossary_source")
+    if isinstance(glossary, str) and glossary:
+        out["glossary_source"] = glossary
     return json.dumps(out, ensure_ascii=False, indent=2) + "\n"
 
 

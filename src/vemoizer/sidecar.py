@@ -29,13 +29,17 @@ Design notes
   only when a measured PCM duration is available for that part (the
   measurement is fail-open: an ffmpeg error leaves the key omitted).
 
-* ``options.glossary_sha256`` is the sha256 over the concatenated raw bytes
-  of the exact glossary files the run used (project layer first, then home,
-  or the single explicit ``--glossary`` file), and is ``null`` when no
-  glossary file existed at run time. ``render`` recomputes the same hash
-  over the current layers for the drift warning, so the file *list* is the
-  shared contract — :func:`glossary_layer_files` resolves it exactly the way
-  ``run_preset`` does.
+* ``options.glossary_sha256`` is the sha256 over the *prompt-term set*
+  of the exact glossary files the run used (project layer first, then
+  home, or the single explicit ``--glossary`` file), as hashed by
+  :func:`prompt_term_set_hash` — the non-correction, non-``@`` lines
+  after layer merge, deduped case-insensitively (first-seen spelling
+  wins), i.e. the canonical deduplicated prompt-term set that is the
+  input to ``glossary_prompt`` before its token-budget truncation.
+  ``render`` recomputes the same hash over the current layers for the
+  drift warning, so an unchanged prompt-term set never warns (correction
+  pairs and ``@`` names are render-safe and never trip it). ``null``
+  when no glossary file existed at run time.
 """
 
 from __future__ import annotations
@@ -51,7 +55,8 @@ __all__ = [
     "group_part_names",
     "group_part_paths",
     "resolve_run_glossary_files",
-    "sha256_over_files",
+    "prompt_term_set_hash",
+    "prompt_term_list",
 ]
 
 
@@ -85,8 +90,8 @@ def build_sidecar(
       optional and fail-open (a decode failure leaves the key absent).
     * ``options``: ``{command, glossary_files, glossary_sha256}``.
       ``glossary_files`` is the list of files actually used (``[]`` when
-      none); ``glossary_sha256`` is the single sha256 over their
-      concatenated raw bytes in layer order, or ``None`` when
+      none); ``glossary_sha256`` is the sha256 over their prompt-term set
+      (see :func:`prompt_term_set_hash`), or ``None`` when
       ``glossary_files`` is empty.
     * ``speaker_names``: ``{}`` by default (``render``'s ``--name`` persists
       into it later). Never a ``clips`` key.
@@ -110,10 +115,21 @@ def build_sidecar(
     result["options"] = {
         "command": command,
         "glossary_files": files,
-        "glossary_sha256": sha256_over_files(files) if files else None,
+        "glossary_sha256": prompt_term_set_hash(files) if files else None,
     }
 
     result.setdefault("speaker_names", {})
+
+    # M6 (issue #107): drop an explicit None duration_s so a failed
+    # duration measurement (ffmpeg fail-open) leaves no duration_s key on
+    # the sidecar — format_json mirrors duration_s present-only (is not
+    # None), so a null value would otherwise land in the JSON and the
+    # sidecar → render → md round-trip would render a "Kesto: [00:00:00]"
+    # header line that the original run's md did not have. glossary_source
+    # is only ever set by the preset seam when a glossary was present, so
+    # no None-drop is needed there.
+    if result.get("duration_s") is None and "duration_s" in result:
+        result.pop("duration_s")
 
     result.pop("_source_durations", None)
     return result
@@ -268,18 +284,64 @@ def resolve_run_glossary_files(
     return [str(p) for p in files] or None
 
 
-def sha256_over_files(files: list[str] | list[Path]) -> str | None:
-    """sha256 over the concatenated raw bytes of *files*, in order.
+def prompt_term_list(files: list[str] | list[Path]) -> list[str]:
+    """The glossary *prompt-term set* for *files* (list order = priority).
 
-    ``None`` when no file can be read (fail-open, matching ``render``'s
-    missing-file warning path). Empty *files* yields ``None``.
+    Reads each glossary file in list order (project layer first) and keeps
+    the non-correction (no ``=>``), non-``@`` lines — the prompt terms —
+    deduped case-insensitively with the first-seen spelling winning
+    (project over home, mirroring ``glossary_layers.merge``). This is the
+    single derivation that :func:`prompt_term_set_hash` hashes and that
+    the run seam (``load_layers`` + ``merge``) produces, so the two
+    cannot drift silently.
+
+    Non-regular paths (directories, special files) and missing/unreadable
+    files are skipped silently (fail-open, like a missing glossary).
+    """
+    from vemoizer.glossary import load_glossary
+
+    seen: set[str] = set()
+    terms: list[str] = []
+    for f in files:
+        path = Path(f)
+        # Skip non-regular paths up front: a FIFO or special file must
+        # not block render's drift check (a read could hang on a FIFO).
+        if not path.is_file():
+            continue
+        try:
+            lines = load_glossary(path)
+        except (OSError, ValueError):
+            # Fail-open: an unreadable file contributes no terms. The render
+            # command's _load_corrections prints the user-visible warning for
+            # the non-UTF-8 case; the run path has no such warning (the
+            # file was already read successfully by load_layers/merge).
+            continue
+        for line in lines:
+            if line.startswith("@"):
+                continue
+            key = line.lower()
+            if key not in seen:
+                seen.add(key)
+                terms.append(line)
+    return terms
+
+
+def prompt_term_set_hash(files: list[str] | list[Path]) -> str | None:
+    """sha256 over the newline-joined :func:`prompt_term_list` of *files*.
+
+    The hash is over the prompt-term set only, so two glossaries that feed
+    the same whisper prompt hash equal, regardless of correction pairs,
+    ``@`` names, or comment lines.
+
+    The same function hashes both the run's glossary (stored in the
+    sidecar's ``options.glossary_sha256``) and the current glossary at
+    render time, so a mismatch means the prompt-term set actually changed.
+
+    ``None`` when *files* is empty (fail-open); a non-empty list of
+    files yields the hash of the (possibly empty) term set.
     """
     if not files:
         return None
-    h = hashlib.sha256()
-    for f in files:
-        try:
-            h.update(Path(f).read_bytes())
-        except OSError:  # fail-open: unreadable file -> no hash
-            return None
-    return h.hexdigest()
+    return hashlib.sha256(
+        "\n".join(prompt_term_list(files)).encode("utf-8")
+    ).hexdigest()

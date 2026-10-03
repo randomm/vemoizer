@@ -222,7 +222,14 @@ def _render_header(transcript: dict[str, Any], lang: str) -> list[str]:
             label = {"fi": "Keskustelijat", "en": "Speakers"}[lang]
             lines.append(f"{label}: {', '.join(legend)}")
 
-    glossary_source = str(transcript.get("glossary_source", "")).strip()
+    # Coerce with a non-string sentinel: a hand-edited sidecar may carry a
+    # non-string glossary_source (a dict/list, which str() cannot coerce
+    # without AttributeError); the line is then omitted rather than the
+    # render crashing (issue #107, fix pass 4).
+    glossary_source = transcript.get("glossary_source")
+    glossary_source = (
+        str(glossary_source).strip() if isinstance(glossary_source, str) else ""
+    )
     if glossary_source:
         label = {"fi": "Sanasto", "en": "Glossary"}[lang]
         lines.append(f"{label}: {glossary_source}")

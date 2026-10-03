@@ -2,7 +2,7 @@
 
 Pure-stdlib: no model imports, no network, no ffmpeg. The sidecar is
 assembled by :func:`vemoizer.sidecar.build_sidecar` and the pure helpers
-``glossary_layer_files`` / ``sha256_over_files``.
+``glossary_layer_files`` / ``prompt_term_set_hash``.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from vemoizer.sidecar import (
     glossary_layer_files,
     group_durations,
     group_part_paths,
-    sha256_over_files,
+    prompt_term_set_hash,
 )
 
 # ---------------------------------------------------------------------------
@@ -328,65 +328,86 @@ def test_group_durations_multi_part_paths(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# sha256_over_files
+# prompt_term_set_hash
 # ---------------------------------------------------------------------------
 
 
-def test_sha256_over_files_single(tmp_path: Path) -> None:
-    """sha256 over a single file's raw bytes."""
+def test_prompt_term_set_hash_prompt_terms_only(tmp_path: Path) -> None:
+    """Only non-correction, non-@ lines are hashed; pairs and @-names don't count."""
     f = tmp_path / "g.txt"
-    f.write_bytes(b"hello")
-    expected = hashlib.sha256(b"hello").hexdigest()
-    assert sha256_over_files([str(f)]) == expected
+    f.write_text(
+        "Blacksit => Flagship\nFlagship\nNordea\n@Howard\n",
+        encoding="utf-8",
+    )
+    expected = hashlib.sha256(b"Flagship\nNordea").hexdigest()
+    assert prompt_term_set_hash([str(f)]) == expected
 
 
-def test_sha256_over_files_multiple(tmp_path: Path) -> None:
-    """sha256 over concatenated raw bytes of multiple files, in order."""
-    f1 = tmp_path / "a.txt"
-    f2 = tmp_path / "b.txt"
-    f1.write_bytes(b"aaa")
-    f2.write_bytes(b"bbb")
-    expected = hashlib.sha256(b"aaabbb").hexdigest()
-    assert sha256_over_files([str(f1), str(f2)]) == expected
-
-
-def test_sha256_over_files_empty_list() -> None:
-    """Empty list: None (no files to hash)."""
-    assert sha256_over_files([]) is None
-
-
-def test_sha256_over_files_missing_file(tmp_path: Path) -> None:
-    """Missing file: None (fail-open)."""
-    f = tmp_path / "nonexistent.txt"
-    assert sha256_over_files([str(f)]) is None
-
-
-def test_sha256_over_files_non_utf8_file_hashes_bytes(tmp_path: Path) -> None:
-    """A non-UTF-8 glossary still hashes its raw bytes (never raises)."""
+def test_prompt_term_set_hash_ignores_pairs_and_at_names(tmp_path: Path) -> None:
+    """Adding only a correction pair or an @-name does not change the hash."""
     f = tmp_path / "g.txt"
-    f.write_bytes(b"\xff\xfe\x00bad")
-    expected = hashlib.sha256(b"\xff\xfe\x00bad").hexdigest()
-    assert sha256_over_files([str(f)]) == expected
+    f.write_text("Flagship\n", encoding="utf-8")
+    h1 = prompt_term_set_hash([str(f)])
+    f.write_text("Flagship\nBlacksit => Flagship\n@Howard\n", encoding="utf-8")
+    assert prompt_term_set_hash([str(f)]) == h1
 
 
-def test_sha256_over_files_deterministic(tmp_path: Path) -> None:
-    """Same files in same order produce the same hash."""
+def test_prompt_term_set_hash_dedup_case_insensitive_first_wins(tmp_path: Path) -> None:
+    """Dedup is case-insensitive, first-seen (project = first file) wins."""
+    proj = tmp_path / "project.txt"
+    home = tmp_path / "home.txt"
+    proj.write_text("Flagship\n", encoding="utf-8")
+    home.write_text("flagship\nNordea\n", encoding="utf-8")
+    expected = hashlib.sha256(b"Flagship\nNordea").hexdigest()
+    assert prompt_term_set_hash([str(proj), str(home)]) == expected
+
+
+def test_prompt_term_set_hash_empty_list_is_none() -> None:
+    assert prompt_term_set_hash([]) is None
+
+
+def test_prompt_term_set_hash_missing_file_fail_open(tmp_path: Path) -> None:
+    """A missing file contributes no terms; the remaining file still hashes."""
     f = tmp_path / "g.txt"
-    f.write_bytes(b"test")
-    h1 = sha256_over_files([str(f)])
-    h2 = sha256_over_files([str(f)])
-    assert h1 == h2
+    f.write_text("Flagship\n", encoding="utf-8")
+    missing = tmp_path / "absent.txt"
+    expected = hashlib.sha256(b"Flagship").hexdigest()
+    assert prompt_term_set_hash([str(missing), str(f)]) == expected
 
 
-def test_sha256_over_files_order_matters(tmp_path: Path) -> None:
-    """Different file order produces a different hash."""
-    f1 = tmp_path / "a.txt"
-    f2 = tmp_path / "b.txt"
-    f1.write_bytes(b"111")
-    f2.write_bytes(b"222")
-    h_ab = sha256_over_files([str(f1), str(f2)])
-    h_ba = sha256_over_files([str(f2), str(f1)])
-    assert h_ab != h_ba
+def test_prompt_term_set_hash_empty_prompt_set(tmp_path: Path) -> None:
+    """A glossary with only correction pairs hashes the empty set."""
+    f = tmp_path / "g.txt"
+    f.write_text("Blacksit => Flagship\n", encoding="utf-8")
+    assert prompt_term_set_hash([str(f)]) == hashlib.sha256(b"").hexdigest()
+
+
+def test_build_sidecar_stores_prompt_term_set_hash(tmp_path: Path) -> None:
+    """build_sidecar stores the prompt-term-set hash, so an untouched
+    glossary at render time hashes equal (no drift warning)."""
+    f = tmp_path / "g.txt"
+    f.write_text("Blacksit => Flagship\nFlagship\n", encoding="utf-8")
+    result: dict[str, Any] = {"text": "hei", "segments": []}
+    build_sidecar(result, command="meeting", glossary_files=[str(f)])
+    opts = cast(dict[str, Any], result["options"])
+    assert opts["glossary_sha256"] == hashlib.sha256(b"Flagship").hexdigest()
+
+
+def test_prompt_term_set_hash_non_utf8_file_skipped_fail_open(
+    tmp_path: Path,
+) -> None:
+    """A non-UTF-8 glossary file is skipped (fail-open); the remaining file
+    still hashes. prompt_term_set_hash does NOT warn — the render command's
+    _load_corrections prints the user-visible warning for that path."""
+    bad = tmp_path / "bad.txt"
+    bad.write_bytes(b"\xff\xfe\x00bad")
+    good = tmp_path / "good.txt"
+    good.write_text("Flagship\n", encoding="utf-8")
+    expected = hashlib.sha256(b"Flagship").hexdigest()
+    # The non-UTF-8 file is skipped; the good file still hashes.
+    assert prompt_term_set_hash([str(bad), str(good)]) == expected
+    # The non-UTF-8 file alone hashes the empty set.
+    assert prompt_term_set_hash([str(bad)]) == hashlib.sha256(b"").hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -470,3 +491,123 @@ def test_glossary_layer_files_project_parent_walkup(
     files = glossary_layer_files()
     assert len(files) == 1
     assert files[0] == tmp_path / ".vemoizer" / "glossary.txt"
+
+
+# ---------------------------------------------------------------------------
+# build_sidecar — header persistence (issue #107, finding 2)
+# ---------------------------------------------------------------------------
+
+
+def test_build_sidecar_persists_duration_s(tmp_path: Path) -> None:
+    """A result with duration_s (from pipeline.py) keeps it in the sidecar."""
+    result: dict[str, Any] = {
+        "text": "hei",
+        "segments": [],
+        "source_path": str(tmp_path / "a.m4a"),
+        "duration_s": 9.15,
+        "_source_durations": [9.15],
+    }
+    build_sidecar(result, command="meeting", glossary_files=None)
+    assert result["duration_s"] == 9.15
+    assert "_source_durations" not in result
+
+
+def test_build_sidecar_omits_duration_s_when_absent(tmp_path: Path) -> None:
+    """A result without duration_s (ffmpeg fail-open) has no duration_s key."""
+    result: dict[str, Any] = {
+        "text": "hei",
+        "segments": [],
+        "source_path": str(tmp_path / "a.m4a"),
+    }
+    build_sidecar(result, command="meeting", glossary_files=None)
+    assert "duration_s" not in result
+
+
+def test_build_sidecar_drops_explicit_null_duration_s(tmp_path: Path) -> None:
+    """An explicit None duration_s (duration measurement failed) is dropped.
+
+    build_sidecar drops the key so format_json's present-only mirror does
+    not serialize ``null`` — a null would render a "Kesto: [00:00:00]"
+    header line the original run's md did not have (issue #107, finding 2).
+    """
+    result: dict[str, Any] = {
+        "text": "hei",
+        "segments": [],
+        "source_path": str(tmp_path / "a.m4a"),
+        "duration_s": None,
+    }
+    build_sidecar(result, command="meeting", glossary_files=None)
+    assert "duration_s" not in result
+
+
+def test_build_sidecar_persists_glossary_source(tmp_path: Path) -> None:
+    """A result with glossary_source (stashed by the preset seam) keeps it."""
+    gfile = tmp_path / "glossary.txt"
+    gfile.write_text("Blacksit => Flagship\n", encoding="utf-8")
+    result: dict[str, Any] = {
+        "text": "hei",
+        "segments": [],
+        "source_path": str(tmp_path / "a.m4a"),
+        "duration_s": 10.0,
+        "glossary_source": f"{gfile} (1 terms)",
+        "_source_durations": [10.0],
+    }
+    build_sidecar(result, command="meeting", glossary_files=[str(gfile)])
+    assert result["glossary_source"] == f"{gfile} (1 terms)"
+
+
+def test_build_sidecar_omits_glossary_source_when_absent(tmp_path: Path) -> None:
+    """A result without glossary_source (no glossary) has no such key."""
+    result: dict[str, Any] = {
+        "text": "hei",
+        "segments": [],
+        "source_path": str(tmp_path / "a.m4a"),
+        "duration_s": 5.0,
+        "_source_durations": [5.0],
+    }
+    build_sidecar(result, command="meeting", glossary_files=None)
+    assert "glossary_source" not in result
+
+
+def test_sidecar_round_trip_md_includes_header_lines() -> None:
+    """A direct md render equals a sidecar → render → md render (issue #107, finding 2).
+
+    The sidecar carries duration_s and glossary_source; the rendered md
+    must include the Kesto and Sanasto header lines.
+    """
+    from vemoizer.output.markdown import format_md
+    from vemoizer.render import render_markdown
+
+    run_result: dict[str, Any] = {
+        "text": "Puhuttiin Blacksit-hankkeesta.",
+        "duration_s": 9.15,
+        "glossary_source": "/path/to/.vemoizer/glossary.txt (1 terms)",
+        "paragraphs": [
+            {
+                "start": 0.0,
+                "end": 5.0,
+                "text": "Puhuttiin Blacksit-hankkeesta.",
+                "speaker": "SPEAKER_1",
+            },
+        ],
+        "notes": {"title": "Alustus"},
+    }
+    sidecar = build_sidecar(dict(run_result), command="meeting", glossary_files=None)
+
+    # The sidecar carries both header keys.
+    assert sidecar["duration_s"] == 9.15
+    assert sidecar["glossary_source"] == "/path/to/.vemoizer/glossary.txt (1 terms)"
+
+    # Direct md render (what the original run wrote).
+    run_md = format_md(run_result)
+
+    # Sidecar → render → md render.
+    render_md = render_markdown(sidecar, corrections={}, speaker_names={})
+
+    # Both header lines present in both renders.
+    for md in (run_md, render_md):
+        assert "Kesto: [00:00:09]" in md
+        assert "Sanasto: /path/to/.vemoizer/glossary.txt (1 terms)" in md
+
+    # Round-trip identity.
+    assert render_md == run_md
