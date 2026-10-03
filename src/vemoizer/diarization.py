@@ -61,8 +61,8 @@ def _disable_pyannote_telemetry() -> None:
     pyannote 4.x ships usage metrics enabled by default and phones home to
     ``https://otel.pyannote.ai`` on every pipeline apply. The variable is
     read at import time, so this must run *before* ``import pyannote``.
-    ``setdefault`` lets a user deliberately opt in by exporting ``true``.
-    ``OTEL_SDK_DISABLED`` is belt-and-braces.
+    ``setdefault`` lets a user deliberately opt in by exporting ``true``;
+    ``OTEL_SDK_DISABLED`` is set the same way, as belt-and-braces.
     """
     os.environ.setdefault("PYANNOTE_METRICS_ENABLED", "false")
     os.environ.setdefault("OTEL_SDK_DISABLED", "true")

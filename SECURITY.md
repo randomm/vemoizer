@@ -9,28 +9,16 @@ the machine for ASR. The only network access in the ASR path is the
 one-time model download. There is no cloud-ASR fallback, and adding one
 is a product decision, not an implementation detail.
 
-Third-party telemetry is disabled. `pyannote.audio` 4.x ships OpenTelemetry
-usage metrics enabled by default (it would phone home to
-`otel.pyannote.ai` on every diarization run); vemoizer sets
-`PYANNOTE_METRICS_ENABLED=false` (via `setdefault`, so a user can
-deliberately opt in by exporting `true`) and `OTEL_SDK_DISABLED=true`
-before `pyannote` is imported (issue #103).
+Third-party telemetry is disabled (issue #103). `pyannote.audio` 4.x ships
+OpenTelemetry usage metrics enabled by default, sending spans to
+`otel.pyannote.ai` with duration and speaker-count metadata — see
+`docs/pipeline-spec.md` §9 for the policy. `OTEL_SDK_DISABLED=true` is set
+as belt-and-braces; both are `setdefault`, so a user can opt in.
 
 The optional LLM stage (adjudication, Markdown notes, speaker naming)
 sends transcript text — not audio — to the OpenAI-compatible endpoint
 configured by the user. No LLM is configured by default; every LLM call
 fails open when the config, the key, or the endpoint is unavailable.
-
-Third-party telemetry is disabled. pyannote.audio 4.x ships OpenTelemetry
-usage metrics enabled by default (span `oss-pipeline-apply` and friends,
-posted to `https://otel.pyannote.ai/v1/traces`) which would leak recording
-duration and speaker-count metadata to a third party, violating the
-local-only invariant above. vemoizer sets `PYANNOTE_METRICS_ENABLED=false`
-before pyannote is imported in the diarization path (issue #103), so a
-`--diarize` / `vemoizer meeting` run makes no connection to pyannote's
-telemetry endpoint. A user can still opt in by exporting
-`PYANNOTE_METRICS_ENABLED=true` in their shell; vemoizer uses `setdefault`
-so it never overrides a value already set in the environment.
 
 ## Secrets
 

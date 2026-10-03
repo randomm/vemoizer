@@ -221,7 +221,7 @@ def test_load_pipeline_preserves_user_opt_in(monkeypatch):
 
     # User's deliberate opt-in is preserved (setdefault, not set).
     assert os.environ["PYANNOTE_METRICS_ENABLED"] == "true"
-    # OTEL_SDK_DISABLED is set unconditionally (belt-and-braces).
+    # OTEL_SDK_DISABLED is set via setdefault (belt-and-braces).
     assert os.environ["OTEL_SDK_DISABLED"] == "true"
 
 

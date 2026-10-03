@@ -195,21 +195,14 @@ the final text.
   Metal) is fixed upstream in pyannote PR 1546 (linear → nearest); the
   version shipped must be ≥ that fix or the CPU fallback must be exercised.
 - A CPU fallback exists for machines where the fixed MPS path is unavailable.
-- **Telemetry is disabled (invariant #1, issue #103):** `pyannote.audio` 4.x
-  ships OpenTelemetry usage metrics enabled by default and would phone home
-  to `otel.pyannote.ai` on every pipeline run. Before `pyannote` is lazily
-  imported, the loader sets `PYANNOTE_METRICS_ENABLED=false` via
-  `setdefault` (a user can opt in by exporting `true`) and
-  `OTEL_SDK_DISABLED=true` as belt-and-braces.
 - Dependency of this package: `pyannote.audio==4.0.7` (CC-BY-4.0 gated weights, see above).
-- **Telemetry: disabled.** pyannote.audio ships OpenTelemetry usage metrics
-  enabled by default (spans to `otel.pyannote.ai` carrying version,
-  session id, model/pipeline name, audio duration, and speaker-count hints).
-  That would break invariant #1 (no network in the ASR path beyond the
-  one-time model download). The diarization lazy loader sets
-  `PYANNOTE_METRICS_ENABLED=false` via `os.environ.setdefault` before
-  pyannote is imported (issue #103), so a user who deliberately exports
-  `PYANNOTE_METRICS_ENABLED=true` can still opt in.
+- **Telemetry is disabled (invariant #1, issue #103):** `pyannote.audio` 4.x
+  ships OpenTelemetry usage metrics enabled by default, sending spans to
+  `otel.pyannote.ai` carrying version, session id, and audio duration /
+  speaker-count hints — which would break invariant #1. Before `pyannote`
+  is lazily imported, the loader sets `PYANNOTE_METRICS_ENABLED=false` and
+  `OTEL_SDK_DISABLED=true` (both via `setdefault`, as belt-and-braces), so
+  a user can opt in by exporting `PYANNOTE_METRICS_ENABLED=true`.
 
 ### 10. Assembly
 
