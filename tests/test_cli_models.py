@@ -399,6 +399,34 @@ def test_stage_and_size_maps_cover_registry() -> None:
     assert set(models_mod._EXPECTED_SIZE_GIB) == names
 
 
+def test_readme_does_not_restate_canonical_size_total() -> None:
+    """The README must point to the manifest table, not hard-code a total.
+
+    The ``models pull`` report computes on-disk sizes from
+    ``_EXPECTED_SIZE_GIB`` in the same ``models.py``. A hard-coded total
+    (e.g. ``~8 GB``) in the README would drift as any model revision is
+    bumped and contradict the spec's canonical table. See AGENTS.md
+    "200-PR test": point to the canonical source, never restate it.
+    """
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(
+        encoding="utf-8"
+    )
+    # The README may mention individual per-model sizes (fine), but must not
+    # restate the *aggregate* total in a form that could drift from the
+    # registry. The only legitimate total is in the spec's manifest paragraph
+    # ("total roughly 7.8 GiB"); the README should not duplicate that.
+    import re
+
+    # Find any "~<num> GB" pattern (not GiB — the spec uses GiB).
+    # The spec manifest uses GiB throughout; the README previously said
+    # "~8 GB" (two places) which contradicted the spec's 7.8 GiB.
+    matches = re.findall(r"~\d+(?:\.\d+)?\s+GB\b", readme)
+    assert not matches, (
+        f"README hard-codes a total GB figure {matches}; "
+        "point to the Model manifest table in docs/pipeline-spec.md instead."
+    )
+
+
 # ---------------------------------------------------------------------------
 # render_pull_report edge cases
 # ---------------------------------------------------------------------------
