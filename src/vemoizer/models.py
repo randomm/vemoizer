@@ -403,13 +403,12 @@ _EXPECTED_SIZE_GIB: dict[str, float] = {
 }
 
 
-def _expected_size_str(name: str) -> str:
+def expected_size_str(name: str) -> str:
     """Human-readable expected size for a model (e.g. ``~2.3 GiB``)."""
     gib = _EXPECTED_SIZE_GIB.get(name)
     if gib is None:
         return "?"
-    if gib < 0.1:  # 0.1 GiB ≈ 102 MiB: below this, MiB is more readable
-        return f"~{int(gib * 1024)} MiB"
+    if gib < 0.1:  # the GiB form would show 0.1; MiB is more readable below this
         return f"~{int(gib * 1024)} MiB"
     return f"~{gib:.1f} GiB"
 
@@ -419,14 +418,14 @@ def render_pull_report(results: list[PulledModel], sizes: dict[str, int] | None)
 
     Each model line carries its pipeline stage and expected on-disk size
     (issue #67) so users know what each download is for and what to expect
-    before pulling the revision-pinned models (~8 GB total).
+    before pulling the revision-pinned models.
     """
     lines: list[str] = []
     for result in results:
         spec = result.spec
         stage = STAGES.get(spec.name, "?")
         if result.error is None:
-            expected = _expected_size_str(spec.name)
+            expected = expected_size_str(spec.name)
             lines.append(
                 f"{spec.name} [{stage}]: pulled {spec.repo_id}@{spec.revision[:12]} "
                 f"({spec.revision} pinned, {result.seconds:.1f}s, {expected})"

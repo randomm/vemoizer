@@ -728,7 +728,10 @@ the API key. The key itself is never stored in the repo or the config file
 The `[llm]` config works with **any** OpenAI-compatible endpoint, including
 local servers. Pointing `base_url` at a local LLM runtime makes vemoizer
 fully offline — audio, transcripts, adjudication, and the Markdown notes
-never leave the machine.
+never leave the machine. Note: if `HTTP_PROXY`/`HTTPS_PROXY` are set
+(e.g. by a VPN or corporate MDM), the request to the local server may be
+routed through the proxy; unset them or set `NO_PROXY=localhost` for a
+genuinely offline run.
 
 **Key behavior.** Whether the LLM stages run at all depends on the named
 env var, not on the server: when the variable named by `api_key_env` is

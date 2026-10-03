@@ -169,7 +169,7 @@ def test_pull_report_includes_expected_size() -> None:
 
     assert result.exit_code == 0
     for spec in models_mod.MODELS:
-        assert models_mod._expected_size_str(spec.name) in result.stdout
+        assert models_mod.expected_size_str(spec.name) in result.stdout
 
 
 def test_render_pull_report_stages_and_sizes() -> None:
