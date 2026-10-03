@@ -88,19 +88,27 @@ def nfc_stem_and_suffix(path: Path | str) -> tuple[str, str]:
 def sanitize_title(raw: str) -> str:
     """Sanitize an LLM title for use in a dated output filename.
 
-    Path separators, control characters (including zero-width joiners
-    and the BOM), and leading/trailing dots and spaces are removed;
-    internal whitespace collapses to single spaces; the result is NFC
-    and capped at 80 characters. An empty result (blank or fully
-    stripped input) returns ``""`` so the caller can fall back to a
-    deterministic stem.
+    Path separators and filesystem-invalid characters are removed (the
+    others are ``?*\"<>|`` plus the control characters, which include the
+    zero-width joiners and the BOM); ``:`` — the legacy HFS path separator
+    and invalid on Windows/SMB — is mapped to an en dash with surrounding
+    spaces. Leading/trailing dots and spaces are removed, internal
+    whitespace collapses to single spaces, and the result is NFC and
+    capped at 80 characters. An empty result (blank or fully stripped
+    input) returns ``""`` so the caller can fall back to a deterministic
+    stem.
     """
     t = unicodedata.normalize("NFC", str(raw))
     # Path separators and control characters are dropped entirely, so
     # "a/b" becomes "ab" (not "a b"); zero-width joiners and the BOM
     # are the same — invisible characters that must not survive into a
     # filename.
-    t = re.sub(r"[/\\\u0000-\u001f\u007f\u200b-\u200f\ufeff]", "", t)
+    # ":" is the legacy HFS path separator on macOS (Finder renders it
+    # as "/") and is invalid on Windows/SMB, so it becomes an en dash
+    # with surrounding spaces ("Planning: X" -> "Planning – X"); the
+    # other Windows-invalid characters are dropped (issue #110).
+    t = re.sub(r":", " \u2013 ", t)
+    t = re.sub(r"[/\\?*\"<>|\u0000-\u001f\u007f\u200b-\u200f\ufeff]", "", t)
     t = _WHITESPACE_RUN.sub(" ", t)
     t = re.sub(r"\.{2,}", ".", t)
     t = t.strip(" .")
