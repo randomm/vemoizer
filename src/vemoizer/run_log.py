@@ -27,14 +27,23 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
-import re
 import stat
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+
+from .run_log_io import (
+    _BEARER_RE,  # noqa: F401 - re-exported for test access
+    _HF_TOKEN_RE,  # noqa: F401 - re-exported for test access
+    QuietFileHandler,
+    RedactingFormatter,
+)
+
+# Private aliases for the classes (tests import these by their old names).
+_RedactingFormatter = RedactingFormatter
+_QuietFileHandler = QuietFileHandler
 
 __all__ = ["configure", "file_log", "reset_run_log"]
 
@@ -68,14 +77,6 @@ LOG_DIR_NAME = ".vemoizer"
 
 #: The sub-directory that holds the per-file ``<stem>.log`` files.
 LOG_SUBDIR = "logs"
-
-#: ``hf_`` + 8-or-more alphanumerics — the HuggingFace access-token shape
-#: (real tokens are 36 chars). The unbounded quantifier still matches in
-#: linear time (no alternation, no nested quantifier), and a token longer
-#: than any real one is redacted in full instead of leaking its tail.
-_HF_TOKEN_RE = re.compile(r"hf_[A-Za-z0-9]{8,}")
-#: ``Bearer <token>`` — any HTTP auth header form, case-insensitive.
-_BEARER_RE = re.compile(r"Bearer\s+\S+", re.IGNORECASE)
 
 # --- once-per-run notice state (fail-open, design 5) ----------------------
 # A single short stderr notice per CLI invocation when the log cannot be
@@ -153,37 +154,11 @@ def configure(
     _context.llm_api_key_env = llm_api_key_env
 
 
-def _api_key_value() -> str | None:
-    """The LLM API key value to scrub, or ``None`` when not redactable."""
-    name = _context.llm_api_key_env
-    if not name:
-        return None
-    value = os.environ.get(name)
-    if value is None or len(value) < 8:
-        return None
-    return value
-
-
-# --- redaction (design 4) -------------------------------------------------
-
-
-class _RedactingFormatter(logging.Formatter):
-    """A file-log formatter that scrubs credentials after formatting.
-
-    A plain ``logging.Filter`` cannot see exception text (it runs before
-    ``Formatter.format`` populates ``exc_text``), so redaction is a
-    ``Formatter`` subclass: ``super().format()`` produces the complete
-    line (message + traceback), which is then rewritten (design 4).
-    """
-
-    def format(self, record: logging.LogRecord) -> str:
-        text = super().format(record)
-        text = _HF_TOKEN_RE.sub("hf_<redacted>", text)
-        text = _BEARER_RE.sub("Bearer <redacted>", text)
-        key = _api_key_value()
-        if key:
-            text = text.replace(key, "<redacted>")
-        return text
+# The LLM API key value to scrub is resolved from the run context at
+# format time. ``run_log_io.RedactingFormatter`` takes the value as a
+# constructor argument (it is stateless with respect to the run context);
+# the resolution stays in ``_open_log_file`` so the caller can read the
+# run context without importing it from the IO module.
 
 
 # --- terminal noise filter (non-verbose, design 2/3) ----------------------
@@ -205,42 +180,9 @@ class _NoThirdPartyInfoFilter(logging.Filter):
         return record.name == "vemoizer" or record.name.startswith("vemoizer.")
 
 
-# --- fail-open file handler (design 7) ------------------------------------
-
-
-class _QuietFileHandler(logging.FileHandler):
-    """A ``FileHandler`` (file path or pre-opened *stream*) that never lets a
-    write error reach the caller.
-
-    ``handle`` is overridden so a write failure (ENOSPC, EROFS, ...) is
-    routed to ``handleError`` — which swallows it and disables further
-    writes — instead of propagating (a mid-run write failure must behave
-    identically to no file logging, design 7).
-    """
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._disabled = False
-
-    def handle(self, record: logging.LogRecord) -> bool:  # noqa: D102
-        if self._disabled:
-            return False
-        if self.filter(record):
-            try:
-                self.emit(record)
-            except (KeyboardInterrupt, SystemExit):
-                raise
-            except Exception:
-                self.handleError(record)
-        return True
-
-    def handleError(self, record: logging.LogRecord) -> None:  # noqa: D102
-        self._disabled = True
-        # Fail-open: a close() failure (already-closed stream, EBADF, ...)
-        # must not escape the handler either — the run must behave as if
-        # the log never existed (design 7).
-        with contextlib.suppress(Exception):
-            self.close()
+# The fail-open file handler and the redacting formatter now live in
+# :mod:`vemoizer.run_log_io` (extracted in issue #117 for headroom). They
+# are imported at the top of this module.
 
 
 def _sanitise_stem(stem: str) -> str:
@@ -476,6 +418,14 @@ def _open_log_file(
     file cannot be created; never raises.
     """
     path = Path(key)
+    # Resolve the API key value from the run context (the run context is
+    # the authoritative source; the redaction formatter is stateless).
+    api_key_val: str | None = None
+    name = _context.llm_api_key_env
+    if name:
+        env_val = os.environ.get(name)
+        if env_val is not None and len(env_val) >= 8:
+            api_key_val = env_val
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(OSError):
@@ -489,11 +439,11 @@ def _open_log_file(
         with contextlib.suppress(OSError):
             os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)  # 0600 (best-effort)
         stream = os.fdopen(fd, "w", encoding="utf-8")
-        handler = _QuietFileHandler(str(path), mode="w", encoding="utf-8")
+        handler = QuietFileHandler(str(path), mode="w", encoding="utf-8")
         handler.close()
         logging.StreamHandler.__init__(handler, stream)
         handler.setLevel(logging.INFO)
-        handler.setFormatter(_RedactingFormatter())
+        handler.setFormatter(RedactingFormatter(api_key_val))
         return handler
     except Exception as e:  # noqa: BLE001 - fail-open: never change the run
         _notice(f"vemoizer: could not open run log {path}: {e}", quiet=quiet)
