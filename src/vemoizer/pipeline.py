@@ -16,7 +16,6 @@ released via ``cleanup()`` on every exit path.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -24,6 +23,7 @@ from typing import Any
 
 import numpy as np
 
+from .assembly import Candidate, _adjudicate, _b_text_in_span, _find_spans
 from .audio_contract import SAMPLE_RATE
 from .canary_transcriber import CanaryTranscriber
 from .confidence import flag_suspect_segments
@@ -46,16 +46,13 @@ from .progress import ProgressDisplay, StageProgress, format_duration
 from .readability import paragraphs, splice_verdicts, tidy_paragraphs
 from .redecode import WhisperReDecodeTranscriber
 from .repair import repair_paragraphs  # noqa: F401
-from .slice_align import find_disputed_slices
-from .spans import Span, apply_span_guardrails, span_context, words_in_span
+from .spans import Span, span_context, words_in_span
 from .speaker_align import assign_word_speakers, split_segments_at_speaker_changes
 from .vad import SpeechSegment, vad_segments
 from .vad import load_model as load_vad_model
 from .whisper_transcriber import decode_meeting
 
 logger = logging.getLogger(__name__)
-
-Candidate = dict[str, str]  # {"source": str, "text": str}
 
 
 def _speech_slices(audio: np.ndarray) -> list[tuple[int, np.ndarray]]:
@@ -86,57 +83,6 @@ def _speech_slices(audio: np.ndarray) -> list[tuple[int, np.ndarray]]:
     return [(seg.start, audio[seg.start : seg.end]) for seg in segments]
 
 
-def _b_text_in_span(result_b: dict[str, Any] | None, span: Span) -> str:
-    """Decode B's slice text overlapping *span* (B has no word timestamps)."""
-    if result_b is None:
-        return ""
-    parts: list[str] = []
-    for s in result_b.get("slices") or []:
-        if float(s["end_s"]) > span.start and float(s["start_s"]) < span.end:
-            text = str(s.get("text", "")).strip()
-            if text:
-                parts.append(text)
-    return " ".join(parts)
-
-
-def _find_spans(
-    result_a: dict[str, Any] | None, result_b: dict[str, Any] | None
-) -> list[Span]:
-    """Disputed spans between the decodes, guardrailed; ``[]`` = no consensus.
-
-    The dispute unit is the VAD slice: disputed when its normalized A/B
-    texts diverge below the slice-similarity threshold. The
-    ``VEMOIZER_DISABLE_CONSENSUS=1`` kill-switch and every failure path
-    land on ``[]`` — the run ships decode A alone (fail-open).
-    """
-    if os.environ.get("VEMOIZER_DISABLE_CONSENSUS") == "1":
-        logger.info("consensus disabled by VEMOIZER_DISABLE_CONSENSUS=1")
-        return []
-    if result_a is None or result_b is None:
-        logger.info("disputed spans: 0 (a decode is missing)")
-        return []
-    slices_a = list(result_a.get("slices") or [])
-    slices_b = list(result_b.get("slices") or [])
-    spans = find_disputed_slices(slices_a, slices_b)
-    if spans is None:
-        logger.info("disputed spans: 0 (no comparable slices, re-decode skipped)")
-        return []
-    speech_seconds = sum(float(s["end_s"]) - float(s["start_s"]) for s in slices_a)
-    guarded = apply_span_guardrails(spans, speech_seconds=speech_seconds)
-    if guarded is None:
-        logger.warning("disputed spans rejected by guardrails; shipping decode A")
-        return []
-    disputed_s = sum(s.end - s.start for s in guarded)
-    fraction = 100.0 * disputed_s / speech_seconds if speech_seconds > 0 else 0.0
-    logger.info(
-        "disputed spans: %d (%s of audio, %.0f%%)",
-        len(guarded),
-        format_duration(disputed_s),
-        fraction,
-    )
-    return guarded
-
-
 def _redecode_spans(
     audio: np.ndarray, spans: list[Span]
 ) -> list[dict[str, Any]] | None:
@@ -158,32 +104,6 @@ def _redecode_spans(
         return None
     finally:
         redecoder.cleanup()
-
-
-def _adjudicate(
-    span: Span,
-    a_text: str,
-    candidates: list[Candidate],
-    client: LLMClient | None,
-    context: str = "",
-) -> str:
-    """Final text for one disputed span, fail-open down the candidate list."""
-    if client is not None:
-        try:
-            verdict = client.adjudicate(a_text, candidates, context)
-            if verdict.strip():
-                return verdict
-        except Exception as e:  # noqa: BLE001 - fail-open stage boundary
-            logger.warning(
-                "adjudication failed for span [%0.2f, %0.2f): %s",
-                span.start,
-                span.end,
-                e,
-            )
-    for candidate in reversed(candidates):  # re-decode > decode B > decode A
-        if candidate["text"].strip():
-            return candidate["text"]
-    return a_text
 
 
 def _assemble(
