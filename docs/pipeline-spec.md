@@ -756,8 +756,11 @@ The metric is computed as follows:
   SequenceMatcher ratio) of the two decoders' normalized hypothesis texts
   is at least `AGREEMENT_THRESHOLD` (0.8, tuned against the TTS-corpus
   agreement band 0.70–0.88).
-- The sample is "wrong" when the WER of the shared hypothesis against the
-  reference exceeds `_WRONG_WER` (0.3).
+- The sample is "wrong" when the WER of **both** hypotheses (A and B) against
+  the reference exceeds `_WRONG_WER` (0.3). Checking both is the faithful
+  reading of "both clearly wrong": a high similarity score makes the two
+  WERs usually agree, but they can diverge, and counting only A would
+  over-count samples where B is actually correct.
 - `agreement_on_wrong` = (count of samples that are both in agreement and
   wrong) / (total samples scored by both backends).
 

@@ -52,8 +52,8 @@ _PROMPT_ECHO_OUTSIDE_FRACTION = 0.3
 #: (the word-pair LCS gate).
 AGREEMENT_THRESHOLD = 0.8
 
-#: A sample's shared-decoder hypothesis is "wrong" when its WER against the
-#: reference exceeds this (issue #62). Informational threshold — never a
+#: A sample's hypotheses are "wrong" when both hypotheses' WERs against
+#: the reference exceed this (issue #62). Informational threshold — never a
 #: gate (invariant #2, the WER gate stays the only regression gate).
 _WRONG_WER = 0.3
 
@@ -228,16 +228,22 @@ def similarity(text_a: str, text_b: str) -> float:
 def agreement_on_wrong_sample(
     reference: str, hypothesis_a: str, hypothesis_b: str
 ) -> bool:
-    """True when decoders A and B agree with each other AND the shared text
-    is wrong (issue #62).
+    """True when decoders A and B agree with each other AND both hypotheses
+    are wrong against the reference (issue #62).
 
     A sample is "in agreement" when :func:`similarity` of the two
     normalized texts is at least :data:`AGREEMENT_THRESHOLD` (the boundary
     sample, where similarity equals the threshold exactly, **counts** as
-    in-agreement). The sample is "wrong" when the WER of *hypothesis_a*
-    against *reference* strictly exceeds :data:`_WRONG_WER` (the boundary
-    sample, where WER equals the threshold exactly, does **not** count as
-    wrong). A sample that is both is the case a two-way comparison cannot
+    in-agreement). The sample is "wrong" when the WER of *both*
+    *hypothesis_a* and *hypothesis_b* against *reference* strictly exceeds
+    :data:`_WRONG_WER` (the boundary sample, where WER equals the threshold
+    exactly, does **not** count as wrong). Checking both hypotheses is the
+    faithful reading of the operator's definition "the fraction where they
+    are both clearly wrong against the reference": a high similarity score
+    makes the two WERs usually agree, but they can diverge (one decoder
+    closer to the reference than the other), and counting only A would
+    over-count samples where B is actually correct. A sample that is both
+    in-agreement and both-wrong is the case a two-way comparison cannot
     detect on its own: the pipeline ships decode A, the LLM never
     adjudicates (no dispute), and the WER aggregate is dragged down by the
     shared miss. This is what the ``--backend all`` run's informational
@@ -245,7 +251,10 @@ def agreement_on_wrong_sample(
     """
     if similarity(hypothesis_a, hypothesis_b) < AGREEMENT_THRESHOLD:
         return False
-    return wer(reference, hypothesis_a) > _WRONG_WER
+    return (
+        wer(reference, hypothesis_a) > _WRONG_WER
+        and wer(reference, hypothesis_b) > _WRONG_WER
+    )
 
 
 def agreement_on_wrong(
@@ -254,7 +263,7 @@ def agreement_on_wrong(
     hypothesis_b: dict[str, str],
 ) -> float:
     """Fraction of samples where decoders A and B agree with each other
-    (similarity ≥ :data:`AGREEMENT_THRESHOLD`) AND the shared hypothesis is
+    (similarity ≥ :data:`AGREEMENT_THRESHOLD`) AND both hypotheses are
     wrong against *references* (issue #62).
 
     *references* maps sample stem -> reference transcript. *hypothesis_a*

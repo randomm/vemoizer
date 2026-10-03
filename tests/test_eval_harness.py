@@ -507,6 +507,18 @@ def test_agreement_sample_same_wrong_text_is_true() -> None:
     assert agreement_on_wrong_sample("moro aami", "x y z", "x y z") is True
 
 
+def test_agreement_sample_a_wrong_b_right_is_false() -> None:
+    # A is wrong but B is right -> not "both clearly wrong".
+    # ref = "moro aami"; A = "x y z" (WER=1.0); B = "moro aami" (WER=0.0).
+    # similarity("x y z", "moro aami") is low -> disagreement -> False.
+    assert agreement_on_wrong_sample("moro aami", "x y z", "moro aami") is False
+
+
+def test_agreement_sample_a_right_b_wrong_is_false() -> None:
+    # A is right but B is wrong -> not "both clearly wrong".
+    assert agreement_on_wrong_sample("moro aami", "moro aami", "x y z") is False
+
+
 def test_agreement_sample_same_correct_text_is_false() -> None:
     # Both decoders agree but the text is right -> not a wrong-answer case.
     assert agreement_on_wrong_sample("moro aami", "moro aami", "moro aami") is False
