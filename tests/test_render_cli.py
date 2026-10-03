@@ -33,8 +33,8 @@ def test_preset_run_sidecar_glossary_files_exist_and_render_drift(
     """A meeting run with a project ``.vemoizer/glossary.txt`` stores the
     real layer file in ``options.glossary_files`` (not the deleted temp
     file). After the run, every stored path exists. ``vemoizer render``
-    emits no drift warning on the untouched glossary and exactly one
-    when the glossary is edited.
+    emits no drift warning on the untouched glossary (both sides hash the
+    same prompt-term set), and exactly one when a prompt term is added.
     """
     import vemoizer.pipeline as pipeline_module
 
@@ -79,30 +79,25 @@ def test_preset_run_sidecar_glossary_files_exist_and_render_drift(
     for p in stored_files:
         assert Path(p).is_file(), f"stored glossary path does not exist: {p}"
 
-    # The run stores a hash over the raw file bytes; render compares it to
-    # the prompt-term-set hash. The glossary has no prompt terms, so the
-    # prompt-term-set hash is sha256("") — different from the stored
-    # raw-bytes hash, so the baseline mismatch warning fires. Adding only
-    # correction pairs does not change the prompt-term set (no new warning);
-    # adding a prompt term does (one more warning).
+    # Both the run (build_sidecar) and render hash the glossary's
+    # prompt-term set (via prompt_term_set_hash), so an untouched
+    # glossary must NOT warn. Adding only correction pairs does not
+    # change the prompt-term set (no warning); adding a prompt term
+    # does (exactly one warning).
     assert opts["glossary_sha256"] is not None
 
     out_md = tmp_path / "rendered.md"
     result2 = runner.invoke(app, ["render", str(json_files[0]), "--out", str(out_md)])
     assert result2.exit_code == 0
-    baseline_warnings = result2.stderr.count("re-transcribe")
+    assert "re-transcribe" not in result2.stderr
 
-    # Add only a correction pair (no new prompt term): no additional warning.
+    # Add only a correction pair (no new prompt term): no warning.
     glossary.write_text("Blacksit => Flagship\nOldpair => Newpair\n", encoding="utf-8")
     result3 = runner.invoke(app, ["render", str(json_files[0]), "--out", str(out_md)])
     assert result3.exit_code == 0
-    assert result3.stderr.count("re-transcribe") == baseline_warnings
+    assert "re-transcribe" not in result3.stderr
 
-    # Add a prompt term: the prompt-term set changes, so the warning still
-    # fires (one line per invocation — the count is still 1, same as the
-    # baseline, because the prompt-term hash is still different from the
-    # stored raw-bytes hash). The key property tested here is that adding
-    # only correction pairs did NOT change the count (result3 == baseline).
+    # Add a prompt term: the prompt-term set changes, so exactly one warning.
     glossary.write_text(
         "Blacksit => Flagship\nOldpair => Newpair\nNewterm\n", encoding="utf-8"
     )
@@ -586,7 +581,7 @@ def test_render_round_trip_byte_identity(
 
     import hashlib
 
-    correct_hash = hashlib.sha256(g.read_bytes()).hexdigest()
+    correct_hash = hashlib.sha256(b"").hexdigest()
     sc_data = _sidecar()
     sc_data["options"]["glossary_sha256"] = correct_hash
     sc = _write_sidecar(tmp_path, sc_data)

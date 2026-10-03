@@ -29,13 +29,15 @@ Design notes
   only when a measured PCM duration is available for that part (the
   measurement is fail-open: an ffmpeg error leaves the key omitted).
 
-* ``options.glossary_sha256`` is the sha256 over the concatenated raw bytes
-  of the exact glossary files the run used (project layer first, then home,
-  or the single explicit ``--glossary`` file), and is ``null`` when no
-  glossary file existed at run time. ``render`` recomputes the same hash
-  over the current layers for the drift warning, so the file *list* is the
-  shared contract — :func:`glossary_layer_files` resolves it exactly the way
-  ``run_preset`` does.
+* ``options.glossary_sha256`` is the sha256 over the *prompt-term set*
+  of the exact glossary files the run used (project layer first, then
+  home, or the single explicit ``--glossary`` file), as hashed by
+  :func:`prompt_term_set_hash` — the non-correction, non-``@`` lines
+  after layer merge, i.e. exactly what ``glossary_prompt`` feeds to
+  whisper. ``render`` recomputes the same hash over the current layers
+  for the drift warning, so an unchanged prompt-term set never warns
+  (correction pairs and ``@`` names are render-safe and never trip it).
+  ``null`` when no glossary file existed at run time.
 """
 
 from __future__ import annotations
@@ -51,6 +53,7 @@ __all__ = [
     "group_part_names",
     "group_part_paths",
     "resolve_run_glossary_files",
+    "prompt_term_set_hash",
     "sha256_over_files",
 ]
 
@@ -85,8 +88,8 @@ def build_sidecar(
       optional and fail-open (a decode failure leaves the key absent).
     * ``options``: ``{command, glossary_files, glossary_sha256}``.
       ``glossary_files`` is the list of files actually used (``[]`` when
-      none); ``glossary_sha256`` is the single sha256 over their
-      concatenated raw bytes in layer order, or ``None`` when
+      none); ``glossary_sha256`` is the sha256 over their prompt-term set
+      (see :func:`prompt_term_set_hash`), or ``None`` when
       ``glossary_files`` is empty.
     * ``speaker_names``: ``{}`` by default (``render``'s ``--name`` persists
       into it later). Never a ``clips`` key.
@@ -110,7 +113,7 @@ def build_sidecar(
     result["options"] = {
         "command": command,
         "glossary_files": files,
-        "glossary_sha256": sha256_over_files(files) if files else None,
+        "glossary_sha256": prompt_term_set_hash(files) if files else None,
     }
 
     result.setdefault("speaker_names", {})
@@ -266,6 +269,48 @@ def resolve_run_glossary_files(
         return [str(options_glossary_path)]
     files = glossary_layer_files()
     return [str(p) for p in files] or None
+
+
+def prompt_term_set_hash(files: list[str] | list[Path]) -> str | None:
+    """sha256 over the glossary *prompt-term set*, the input to ``glossary_prompt``.
+
+    Reads each glossary file in list order (project layer first) and keeps
+    the non-correction (no ``=>``), non-``@`` lines — the prompt terms —
+    deduped case-insensitively with the first-seen spelling winning
+    (project over home, mirroring ``glossary_layers.merge``). The hash is
+    over the newline-joined list, so two glossaries that feed the same
+    whisper prompt hash equal, regardless of correction pairs, ``@``
+    names, or comment lines.
+
+    The same function hashes both the run's glossary (stored in the
+    sidecar's ``options.glossary_sha256``) and the current glossary at
+    render time, so a mismatch means the prompt-term set actually changed.
+
+    ``None`` when *files* is empty or no file is readable (fail-open,
+    matching ``sha256_over_files``).
+    """
+    if not files:
+        return None
+    from vemoizer.glossary import load_glossary
+
+    seen: set[str] = set()
+    terms: list[str] = []
+    for f in files:
+        path = Path(f)
+        try:
+            lines = load_glossary(path)
+        except (OSError, UnicodeDecodeError, ValueError):
+            # Fail-open: an unreadable file contributes no terms (the
+            # caller prints the missing-file warning separately).
+            continue
+        for line in lines:
+            if line.startswith("@"):
+                continue
+            key = line.lower()
+            if key not in seen:
+                seen.add(key)
+                terms.append(line)
+    return hashlib.sha256("\n".join(terms).encode("utf-8")).hexdigest()
 
 
 def sha256_over_files(files: list[str] | list[Path]) -> str | None:

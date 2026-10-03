@@ -18,6 +18,7 @@ from vemoizer.sidecar import (
     glossary_layer_files,
     group_durations,
     group_part_paths,
+    prompt_term_set_hash,
     sha256_over_files,
 )
 
@@ -325,6 +326,72 @@ def test_group_durations_multi_part_paths(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ingest_module, "pcm_duration_seconds", fake_pcm)
     assert group_durations([a, b]) == [1.0, 2.0]
+
+
+# ---------------------------------------------------------------------------
+# prompt_term_set_hash
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_term_set_hash_prompt_terms_only(tmp_path: Path) -> None:
+    """Only non-correction, non-@ lines are hashed; pairs and @-names don't count."""
+    f = tmp_path / "g.txt"
+    f.write_text(
+        "Blacksit => Flagship\nFlagship\nNordea\n@Howard\n",
+        encoding="utf-8",
+    )
+    expected = hashlib.sha256(b"Flagship\nNordea").hexdigest()
+    assert prompt_term_set_hash([str(f)]) == expected
+
+
+def test_prompt_term_set_hash_ignores_pairs_and_at_names(tmp_path: Path) -> None:
+    """Adding only a correction pair or an @-name does not change the hash."""
+    f = tmp_path / "g.txt"
+    f.write_text("Flagship\n", encoding="utf-8")
+    h1 = prompt_term_set_hash([str(f)])
+    f.write_text("Flagship\nBlacksit => Flagship\n@Howard\n", encoding="utf-8")
+    assert prompt_term_set_hash([str(f)]) == h1
+
+
+def test_prompt_term_set_hash_dedup_case_insensitive_first_wins(tmp_path: Path) -> None:
+    """Dedup is case-insensitive, first-seen (project = first file) wins."""
+    proj = tmp_path / "project.txt"
+    home = tmp_path / "home.txt"
+    proj.write_text("Flagship\n", encoding="utf-8")
+    home.write_text("flagship\nNordea\n", encoding="utf-8")
+    expected = hashlib.sha256(b"Flagship\nNordea").hexdigest()
+    assert prompt_term_set_hash([str(proj), str(home)]) == expected
+
+
+def test_prompt_term_set_hash_empty_list_is_none() -> None:
+    assert prompt_term_set_hash([]) is None
+
+
+def test_prompt_term_set_hash_missing_file_fail_open(tmp_path: Path) -> None:
+    """A missing file contributes no terms; the remaining file still hashes."""
+    f = tmp_path / "g.txt"
+    f.write_text("Flagship\n", encoding="utf-8")
+    missing = tmp_path / "absent.txt"
+    expected = hashlib.sha256(b"Flagship").hexdigest()
+    assert prompt_term_set_hash([str(missing), str(f)]) == expected
+
+
+def test_prompt_term_set_hash_empty_prompt_set(tmp_path: Path) -> None:
+    """A glossary with only correction pairs hashes the empty set."""
+    f = tmp_path / "g.txt"
+    f.write_text("Blacksit => Flagship\n", encoding="utf-8")
+    assert prompt_term_set_hash([str(f)]) == hashlib.sha256(b"").hexdigest()
+
+
+def test_build_sidecar_stores_prompt_term_set_hash(tmp_path: Path) -> None:
+    """build_sidecar stores the prompt-term-set hash, so an untouched
+    glossary at render time hashes equal (no drift warning)."""
+    f = tmp_path / "g.txt"
+    f.write_text("Blacksit => Flagship\nFlagship\n", encoding="utf-8")
+    result: dict[str, Any] = {"text": "hei", "segments": []}
+    build_sidecar(result, command="meeting", glossary_files=[str(f)])
+    opts = cast(dict[str, Any], result["options"])
+    assert opts["glossary_sha256"] == hashlib.sha256(b"Flagship").hexdigest()
 
 
 # ---------------------------------------------------------------------------
