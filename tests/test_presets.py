@@ -64,6 +64,14 @@ class TestMeetingPreset:
         opts = _opts("meeting", None, None, capsys)
         assert opts.config_path is None
 
+    def test_language_defaults_to_auto_not_a_pin(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Issue #108 option A: the preset default is per-window language
+        # detection, never a hard-coded "fi" pin (invariant #3).
+        opts = _opts("meeting", None, None, capsys)
+        assert opts.language == "auto"
+
     def test_meeting_terms_seed_whisper_prompt_and_llm(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -218,6 +226,46 @@ class TestInvalidCommand:
     def test_error_names_the_known_commands(self) -> None:
         with pytest.raises(ValueError, match=r"meeting, memo"):
             resolve_options("nope")
+
+
+class TestLanguageOverride:
+    """Issue #108 option B: run-level recognition-language override."""
+
+    def test_explicit_fi_wins(self, capsys: pytest.CaptureFixture[str]) -> None:
+        opts = _opts("meeting", None, {"language": "fi"}, capsys)
+        assert opts.language == "fi"
+
+    def test_explicit_en_wins(self, capsys: pytest.CaptureFixture[str]) -> None:
+        opts = _opts("meeting", None, {"language": "en"}, capsys)
+        assert opts.language == "en"
+
+    def test_explicit_auto_is_a_valid_value(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        opts = _opts("meeting", None, {"language": "auto"}, capsys)
+        assert opts.language == "auto"
+
+    def test_case_insensitive_normalization(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert _opts("meeting", None, {"language": "FI"}, capsys).language == "fi"
+        assert _opts("meeting", None, {"language": "En"}, capsys).language == "en"
+
+    def test_none_override_keeps_the_auto_default(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        opts = _opts("meeting", None, {"language": None}, capsys)
+        assert opts.language == "auto"
+
+    def test_unknown_value_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match=r"unknown language 'xx'"):
+            resolve_options("meeting", None, {"language": "xx"})
+
+    def test_memo_also_supports_the_override(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        opts = _opts("memo", None, {"language": "fi"}, capsys)
+        assert opts.language == "fi"
 
 
 def test_no_file_reads_during_resolve(monkeypatch: pytest.MonkeyPatch) -> None:

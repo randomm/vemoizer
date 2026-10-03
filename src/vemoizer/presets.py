@@ -80,6 +80,12 @@ class RunOptions:
     whisper_prompt: list[str]
     llm_terms: list[str]
     corrections: dict[str, str]
+    # Run-level recognition-language override for the meeting whisper decode
+    # (issue #108): ``"auto"`` = per-window detection (the default),
+    # ``"fi"``/``"en"`` pin every decode window. Distinct from the top-level
+    # config ``language`` key, which only picks the Markdown heading
+    # language (``_normalize_language``) — never recognition.
+    language: str
 
     @classmethod
     def expert_transcribe(
@@ -111,7 +117,16 @@ class RunOptions:
             whisper_prompt=[],
             llm_terms=[],
             corrections={},
+            # The expert command has no --language flag: auto-detect.
+            language="auto",
         )
+
+
+#: Recognition-language values ``--language`` / ``[meeting] language``
+#: accept: ``"auto"`` (per-window detection) or a whisper language code
+#: (``"fi"``, ``"en"``, ...). Case-insensitive at the CLI; ``resolve_options``
+#: lowercases and maps ``"auto"`` through unchanged.
+LANGUAGE_VALUES: tuple[str, ...] = ("auto", "fi", "en")
 
 
 def _normalize_language(language: str) -> str:
@@ -204,6 +219,7 @@ def resolve_options(
             whisper_prompt=[],
             llm_terms=[],
             corrections={},
+            language="auto",
         )
     else:
         # memo: whisper meeting decode, no diarization, no repair; the
@@ -219,6 +235,7 @@ def resolve_options(
             whisper_prompt=[],
             llm_terms=[],
             corrections={},
+            language="auto",
         )
     # --glossary REPLACES both layers entirely (no merging): when it is
     # given, the single file is passed straight through as glossary_path
@@ -250,6 +267,12 @@ def resolve_options(
         value = overrides.get(key)
         return value if value is not None else default
 
+    language_raw = _opt("language", base.language)
+    language = str(language_raw).strip().lower()
+    if language not in LANGUAGE_VALUES:
+        known = ", ".join(LANGUAGE_VALUES)
+        raise ValueError(f"unknown language {language_raw!r} (known: {known})")
+
     return replace(
         base,
         profile=str(_opt("profile", base.profile)),
@@ -263,4 +286,5 @@ def resolve_options(
         whisper_prompt=prompt_terms,
         llm_terms=llm_terms,
         corrections=dict(corrections),
+        language=language,
     )

@@ -62,7 +62,9 @@ LEGACY_DEPRECATION_NOTICE: str = (
 #: Known top-level and [llm] keys for strict validation. ``people`` is a
 #: top-level list (issue #93) that ``llm`` itself ignores; items that are
 #: not strings are filtered at read time, not validated here.
-_KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset({LLM_CONFIG_SECTION, "people"})
+_KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
+    {LLM_CONFIG_SECTION, "people", "meeting"}
+)
 _KNOWN_LLM_KEYS: frozenset[str] = frozenset(
     {"base_url", "model", "api_key_env", "timeout_seconds"}
 )
@@ -158,9 +160,9 @@ def _strict_load(path: Path) -> LLMConfig:
         if key not in _KNOWN_TOP_LEVEL_KEYS:
             raise ConfigError(f"unknown top-level key or section {key!r} in {path}")
         if isinstance(value, dict):
-            # Only ``[llm]`` is a table; ``people`` must be a top-level
-            # list (issue #93), not a table.
-            if key != LLM_CONFIG_SECTION:
+            # ``[llm]`` and ``[meeting]`` (issue #108) are tables; ``people``
+            # must be a top-level list (issue #93), not a table.
+            if key not in (LLM_CONFIG_SECTION, "meeting"):
                 raise ConfigError(
                     f"top-level key {key!r} must not be a table in {path}; "
                     "top-level 'people' must be a list"
@@ -263,6 +265,49 @@ def load_language(path: str | None = None) -> str:
     if not isinstance(value, str):
         return "fi"
     return "en" if value.strip().lower() == "en" else "fi"
+
+
+def load_meeting_language(path: str | None = None) -> str:
+    """The ``[meeting] language`` recognition override for one run.
+
+    Issue #108, option B: a run-level, explicit user choice — ``"fi"`` or
+    ``"en"`` (case-insensitive; ``"auto"`` is the value for the key absent,
+    meaning per-window detection). Same fail-open seam as :func:`load_language`
+    (missing file, unparseable TOML, absent or non-string value all yield
+    ``"auto"``) — a malformed config must never abort a transcription, and
+    unlike the top-level ``language`` key this one controls RECOGNITION,
+    not the Markdown heading language.
+    """
+    if path is not None and path != DEVNULL_SENTINEL:
+        raw = _read_toml(Path(path))
+    elif path is not None:
+        # "os.devnull" sentinel: no config at all → auto-detect.
+        return "auto"
+    else:
+        # Match the documented config search order (project walk-up →
+        # home → legacy, issue #82). The layered search is whole-file —
+        # the first EXISTING file wins, no per-key merging — so the
+        # [meeting] section is read only from the file that layer selects.
+        candidate = _find_nearest_vemoizer_config(Path.cwd())
+        if candidate is None or not candidate.is_file():
+            candidate = Path.home() / ".vemoizer" / "config.toml"
+        if candidate is None or not candidate.is_file():
+            candidate = next((p for p in _LEGACY_CONFIG_PATHS if p.is_file()), None)
+        raw = _read_toml(candidate) if candidate is not None else None
+    if not isinstance(raw, dict):
+        return "auto"
+    section = raw.get("meeting")
+    if not isinstance(section, dict):
+        return "auto"
+    value = section.get("language")
+    if not isinstance(value, str):
+        return "auto"
+    lowered = value.strip().lower()
+    if lowered == "en":
+        return "en"
+    if lowered in ("fi", "auto"):
+        return lowered
+    return "auto"
 
 
 def load_default_config(path: str | None = None) -> LLMConfig | None:

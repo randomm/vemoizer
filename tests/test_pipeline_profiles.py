@@ -126,7 +126,7 @@ def _patch_whisper_a(monkeypatch, text="hei maailma"):
         {"word": "maailma", "start": 0.5, "end": 1.0},
     ]
 
-    def fake_decode_meeting(audio, slices, initial_prompt=None):
+    def fake_decode_meeting(audio, slices, initial_prompt=None, **kwargs):
         return {
             "text": text,
             "words": words,
@@ -173,7 +173,9 @@ def test_meeting_profile_whisper_failure_fails_open_to_empty(
 
     # decode_meeting fails open to None internally; simulate that outcome.
     monkeypatch.setattr(
-        pipeline, "decode_meeting", lambda audio, slices, initial_prompt=None: None
+        pipeline,
+        "decode_meeting",
+        lambda audio, slices, initial_prompt=None, **kwargs: None,
     )
     _patch_decoders(
         monkeypatch,
@@ -203,7 +205,7 @@ def test_dictation_profile_never_touches_whisper(tmp_path, monkeypatch) -> None:
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
 
-    def _must_not_run(audio, slices, initial_prompt=None):
+    def _must_not_run(audio, slices, initial_prompt=None, **kwargs):
         raise AssertionError("decode_meeting ran under dictation profile")
 
     monkeypatch.setattr(pipeline, "decode_meeting", _must_not_run)
@@ -305,7 +307,7 @@ def test_glossary_reaches_whisper_and_notes(tmp_path, monkeypatch) -> None:
     gl.write_text("Flagship-hanke\nRiihimäki\n", encoding="utf-8")
     seen: dict = {}
 
-    def fake_decode_meeting(audio, slices, initial_prompt=None):
+    def fake_decode_meeting(audio, slices, initial_prompt=None, **kwargs):
         seen["initial_prompt"] = initial_prompt
         return {
             "text": "hei maailma",
@@ -373,7 +375,7 @@ def test_paragraph_hygiene_runs_in_the_pipeline(tmp_path, monkeypatch) -> None:
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
 
-    def fake_decode_meeting(audio, slices, initial_prompt=None):
+    def fake_decode_meeting(audio, slices, initial_prompt=None, **kwargs):
         loop = "Janni, " * 10 + "aloitetaan"
         return {
             "text": loop,
@@ -398,7 +400,7 @@ def test_glossary_corrections_apply_deterministically(tmp_path, monkeypatch) -> 
     gl = tmp_path / "glossary.txt"
     gl.write_text("Blacksit => Flagship\n", encoding="utf-8")
 
-    def fake_decode_meeting(audio, slices, initial_prompt=None):
+    def fake_decode_meeting(audio, slices, initial_prompt=None, **kwargs):
         return {
             "text": "he kutsuvat Blacksit-hankkeiksi",
             "words": [],
@@ -424,7 +426,7 @@ def test_fused_qa_splits_by_word_level_speakers(tmp_path, monkeypatch) -> None:
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
 
-    def fake_decode_meeting(audio, slices, initial_prompt=None):
+    def fake_decode_meeting(audio, slices, initial_prompt=None, **kwargs):
         return {
             "text": "mitä mieltä olet minusta hyvä",
             "words": [

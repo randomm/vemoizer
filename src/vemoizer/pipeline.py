@@ -37,7 +37,13 @@ from .glossary import (
     load_glossary,
 )
 from .ingest import IngestError, ingest_audio
-from .llm import LLMClient, LLMConfig, load_default_config, load_language
+from .llm import (
+    LLMClient,
+    LLMConfig,
+    load_default_config,
+    load_language,
+    load_meeting_language,
+)
 from .llm_tail import apply_llm_tail
 from .notes import generate_notes  # noqa: F401
 from .parakeet_transcriber import ParakeetTranscriber
@@ -225,6 +231,7 @@ def transcribe_file(
     glossary_path: str | None = None,
     speakers: SpeakerCount | None = None,
     display: ProgressDisplay | None = None,
+    language: str | None = None,
 ) -> dict:
     """Run the full consensus pipeline over one audio file.
 
@@ -241,6 +248,11 @@ def transcribe_file(
             the profile is ``meeting``, it is passed to ``decode_meeting``
             so the mlx-whisper tqdm shim drives the display's decode task.
             ``None`` (the default) keeps every existing call site unchanged.
+        language: Optional run-level recognition-language override for the
+            meeting decode (issue #108): a whisper language code (``"fi"``,
+            ``"en"``) pins every decode window; ``None`` (the default) or
+            ``"auto"`` leaves per-window detection on. Ignored by the
+            dictation profile.
 
     Returns:
         ``{"text": str, "segments": list[dict]}`` — the full transcript
@@ -286,6 +298,16 @@ def transcribe_file(
     )
 
     llm_config = load_default_config(config_path)
+    # Issue #108, option B: an explicit run-level recognition-language
+    # choice (CLI ``--language`` / presets ``RunOptions.language``),
+    # else the ``[meeting] language`` config key, else per-window
+    # detection (``None``). ``"auto"`` and other non-codes never pin.
+    meeting_language: str | None
+    if language is not None and language != "auto":
+        meeting_language = language
+    else:
+        configured = load_meeting_language(config_path)
+        meeting_language = None if configured == "auto" else configured
     # M6 (issue #75): duration (decoded-audio, never ffprobe) and section
     # language ride on the run dict — format_md / the report read them.
     result: dict[str, Any] = {
@@ -306,7 +328,10 @@ def transcribe_file(
     glossary = load_glossary(glossary_path)
     corrections = load_corrections(glossary_path)
     if profile == "meeting":
-        kwargs: dict[str, Any] = {"initial_prompt": glossary_prompt(glossary)}
+        kwargs: dict[str, Any] = {
+            "initial_prompt": glossary_prompt(glossary),
+            "language": meeting_language,
+        }
         if display is not None:
             kwargs["display"] = display
         result_a = decode_meeting(audio, slices, **kwargs)

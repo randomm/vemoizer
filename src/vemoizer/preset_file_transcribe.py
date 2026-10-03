@@ -63,6 +63,7 @@ def _transcribe_preset_file(
             glossary_path=glossary_path,
             speakers=options.speakers,
             display=display,
+            language=None if options.language == "auto" else options.language,
         )
     except (KeyboardInterrupt, SystemExit):
         raise

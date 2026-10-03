@@ -118,6 +118,108 @@ def test_meeting_speakers_override(tmp_path, monkeypatch) -> None:
     assert seen["speakers"] == (3, 5)
 
 
+def test_meeting_language_default_auto_passes_none(tmp_path, monkeypatch) -> None:
+    """Issue #108 option A: the default run has no language pin —
+    transcribe_file receives language=None so per-window detection runs."""
+    import vemoizer.pipeline as pipeline_module
+
+    seen: dict = {}
+
+    def fake_transcribe(path, **kwargs):
+        seen.update(kwargs)
+        return {
+            "text": "moikka",
+            "segments": [],
+            "notes": {"title": "Test"},
+        }
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    result = runner.invoke(app, ["meeting", "a.m4a"])
+    assert result.exit_code == 0
+    assert "language" in seen
+    assert seen["language"] is None
+
+
+def test_meeting_language_flag_pins_fi(tmp_path, monkeypatch) -> None:
+    """Issue #108 option B: --language fi pins recognition to Finnish."""
+    import vemoizer.pipeline as pipeline_module
+
+    seen: dict = {}
+
+    def fake_transcribe(path, **kwargs):
+        seen.update(kwargs)
+        return {
+            "text": "moikka",
+            "segments": [],
+            "notes": {"title": "Test"},
+        }
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    result = runner.invoke(app, ["meeting", "a.m4a", "--language", "fi"])
+    assert result.exit_code == 0
+    assert seen["language"] == "fi"
+
+
+def test_meeting_language_flag_case_insensitive_en(tmp_path, monkeypatch) -> None:
+    import vemoizer.pipeline as pipeline_module
+
+    seen: dict = {}
+
+    def fake_transcribe(path, **kwargs):
+        seen.update(kwargs)
+        return {
+            "text": "moikka",
+            "segments": [],
+            "notes": {"title": "Test"},
+        }
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    result = runner.invoke(app, ["meeting", "a.m4a", "--language", "EN"])
+    assert result.exit_code == 0
+    assert seen["language"] == "en"
+
+
+def test_meeting_language_auto_flag_passes_none(tmp_path, monkeypatch) -> None:
+    """--language auto is the explicit form of the default (option A)."""
+    import vemoizer.pipeline as pipeline_module
+
+    seen: dict = {}
+
+    def fake_transcribe(path, **kwargs):
+        seen.update(kwargs)
+        return {
+            "text": "moikka",
+            "segments": [],
+            "notes": {"title": "Test"},
+        }
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    result = runner.invoke(app, ["meeting", "a.m4a", "--language", "auto"])
+    assert result.exit_code == 0
+    assert seen["language"] is None
+
+
+def test_meeting_language_invalid_value_fails_closed_before_transcription(
+    tmp_path, monkeypatch
+) -> None:
+    """An unknown --language value must fail in milliseconds, not after
+    a decode."""
+    import vemoizer.pipeline as pipeline_module
+
+    def fake_transcribe(path, **kwargs):
+        raise AssertionError("transcribe_file must not run on a bad --language")
+
+    monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe)
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    result = runner.invoke(app, ["meeting", "a.m4a", "--language", "xx"])
+    assert result.exit_code == 2
+    assert "unknown language" in result.stderr
+
+
 def test_meeting_writes_md_and_json_to_cwd(tmp_path, monkeypatch) -> None:
     """meeting writes .md and .json to the CWD with a dated title."""
     import vemoizer.pipeline as pipeline_module

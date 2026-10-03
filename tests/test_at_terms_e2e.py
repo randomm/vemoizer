@@ -40,7 +40,7 @@ def _clean_env(monkeypatch, tmp_path, *, chdir_to: str | None = None) -> None:
 def _patch_whisper_meeting(monkeypatch, seen: dict, text: str = "hei maailma") -> None:
     """The meeting-profile decode seam; records the initial_prompt it got."""
 
-    def fake_decode_meeting(audio, slices, initial_prompt=None):
+    def fake_decode_meeting(audio, slices, initial_prompt=None, **kwargs):
         seen["initial_prompt"] = initial_prompt
         return {
             "text": text,

@@ -41,6 +41,7 @@ from vemoizer.cli_support import (
 from vemoizer.eval_cli import register_eval
 from vemoizer.glossary_check import register_glossary
 from vemoizer.names_cli import register_names
+from vemoizer.presets import LANGUAGE_VALUES as _LANGUAGE_VALUES
 from vemoizer.render_cli import register_render
 
 app = typer.Typer(
@@ -341,6 +342,16 @@ def meeting(
             "part markers). Mutually exclusive with --yes."
         ),
     ),
+    language: str = typer.Option(  # noqa: B008
+        "auto",
+        "--language",
+        help=(
+            "Recognition language for the whisper decode: auto (detect "
+            "per window, the default), fi, or en (issue #108). "
+            'A [meeting] language = "fi"|"en" key in the config file '
+            "sets the same choice without the flag."
+        ),
+    ),
 ) -> None:
     """Transcribe a meeting: whisper decode, diarization, repair, .md+.json."""
     _warn_on_battery()
@@ -360,6 +371,14 @@ def meeting(
     # below; --quiet suppresses the live progress line too.
     display = make_batch_display(quiet=quiet)
     speaker_count = _parse_speakers(speakers)
+    lowered = language.strip().lower()
+    if lowered not in _LANGUAGE_VALUES:
+        known = ", ".join(_LANGUAGE_VALUES)
+        typer.echo(
+            f"error: unknown language {language!r} (known: {known})",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     try:
         exit_code = run_preset(
             files,
@@ -369,6 +388,7 @@ def meeting(
             repair=repair,
             diarize=False if no_diarize else None,
             speakers=speaker_count,
+            language=lowered,
             quiet=quiet,
             yes=yes,
             no_group=no_group,
