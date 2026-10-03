@@ -500,6 +500,19 @@ revision=<full-SHA>)` and load from the returned local path, never from the
 bare repo ID (invariant #4). Omitting `revision` caches a moving ref;
 `HF_HUB_OFFLINE=1` is hard-off (raises if not cached).
 
+### Glossary prompt and echo filter (meeting decode)
+
+The glossary prompt passed to whisper as `initial_prompt` is a plain
+comma-separated term list ending in a period (e.g. `"Pia, NG-TOPI, IBC.")`
+— no label word (the former `Sanasto:` prefix was removed in issue #109).
+After each window's decode, the segments pass a post-decode echo filter
+(`echo_filter.filter_echo_segments`) that drops a segment only when
+every token is a glossary term (or the former label `Sanasto`) **and** it
+is a run of ≥ 2 terms or carries the label (a single bare term is kept).
+The filter is fail-open: on any error the segments are returned unfiltered,
+with one warning logged, or — if the words-extraction fallback also
+fails — two warnings (one for the error, one for the words degradation).
+
 ## CLI spec
 
 `vemoizer` (Typer; entry point in `pyproject.toml`). Four commands are

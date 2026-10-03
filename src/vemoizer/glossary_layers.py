@@ -145,10 +145,9 @@ def _budget_terms(
     # does not import glossary_layers.py so a top-level import would also
     # work, but keeping the cost helpers local makes the budget logic self-
     # contained.
-    prefix_cost = _token_cost(tokenizer, "Sanasto: ")
     period_cost = _token_cost(tokenizer, ".")
     sep_cost = _token_cost(tokenizer, ", ")
-    overhead = prefix_cost + period_cost
+    overhead = period_cost
     if overhead > budget:
         # Degenerate: even an empty glossary overflows — ship nothing.
         return llm_only_terms, list(asr_terms)

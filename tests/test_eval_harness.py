@@ -236,6 +236,83 @@ def test_term_hit_empty_terms_returns_one() -> None:
     assert glossary_term_hit_rate(ref, hyp, []) == 1.0
 
 
+# --- prompt echo exclusion (issue #109) ------------------------------------
+# A prompt echo is a hypothesis made up almost entirely of glossary tokens
+# (whisper continued the ``initial_prompt`` instead of transcribing). Such
+# a hypothesis must not inflate the term-hit metric: the term hits are the
+# prompt's, not the decoder's. A real sentence that contains one or a few
+# glossary terms keeps every occurrence.
+
+
+def test_term_hit_prompt_echo_all_glossary_tokens_is_zero() -> None:
+    # The canonical echo shape: a bare run of glossary terms, nothing else.
+    ref = "meidän sprint planning alkaa ja backlog on täynnä"
+    hyp = "sprint planning backlog priorisoimme prioriteetit"
+    terms = ["sprint planning", "backlog", "priorisoimme", "prioriteetit"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 0.0
+
+
+def test_term_hit_prompt_echo_with_single_filler_word_is_zero() -> None:
+    # A prompt echo with one non-glossary filler word (e.g. the "Sanasto"
+    # label or an "e.g." that whisper carried over) still classifies as an
+    # echo: 1/4 = 25% < 30%.
+    ref = "meidän sprint planning alkaa ja backlog on täynnä"
+    hyp = "sanasto sprint planning backlog priorisoimme"
+    terms = ["sprint planning", "backlog", "priorisoimme"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 0.0
+
+
+def test_term_hit_real_sentence_with_one_glossary_term_is_kept() -> None:
+    # A real sentence with one glossary term keeps its term hit — the
+    # echo filter must not over-suppress normal transcripts.
+    ref = "backlog on täynnä"
+    hyp = "backlog on täynnä"
+    terms = ["backlog"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 1.0
+
+
+def test_term_hit_real_sentence_with_two_glossary_terms_is_kept() -> None:
+    ref = "backlog on täynnä ja sprint planning alkaa"
+    hyp = "backlog on täynnä ja sprint planning alkaa"
+    terms = ["backlog", "sprint planning"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 1.0
+
+
+def test_term_hit_single_glossary_word_is_classified_as_echo() -> None:
+    # A one-word hypothesis that is exactly a glossary token: 0/1 = 0% outside
+    # → classified as an echo and scored 0.0. A bare "backlog" with no other
+    # words is more likely a prompt continuation than a real sentence, and
+    # the issue #109 decision is that echoes must not count as term hits.
+    ref = "backlog on täynnä"
+    hyp = "backlog"
+    terms = ["backlog"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 0.0
+
+
+def test_term_hit_real_sentence_two_words_one_glossary_is_kept() -> None:
+    # "backlog ja": 1/2 = 50% outside → not an echo, term hit kept.
+    ref = "backlog on täynnä"
+    hyp = "backlog ja"
+    terms = ["backlog"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 1.0
+
+
+def test_term_hit_prompt_echo_does_not_count_when_reference_has_no_terms() -> None:
+    # When no term occurs in the reference the metric is vacuously 1.0
+    # regardless of hypothesis shape (the echo check is short-circuited).
+    ref = "ei termejä tässä"
+    hyp = "sprint planning backlog priorisoimme prioriteetit"
+    terms = ["sprint planning", "backlog", "priorisoimme", "prioriteetit"]
+    assert glossary_term_hit_rate(ref, hyp, terms) == 1.0
+
+
+def test_term_hit_empty_glossary_never_classified_as_echo() -> None:
+    # No terms → no glossary token set → _is_prompt_echo returns False.
+    ref = "jokin puhdasta"
+    hyp = "jokin puhdasta"
+    assert glossary_term_hit_rate(ref, hyp, []) == 1.0
+
+
 # --- run_meeting_eval -------------------------------------------------------
 # The meeting eval consumes a single multi-speaker fixture: <stem>.wav +
 # <stem>.txt + <stem>.terms. The harness must skip samples without a .terms

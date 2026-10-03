@@ -14,6 +14,14 @@ Each window is short, so its own rolling context stays inside the
 keep-window. Per-VAD-slice records for the dispute stage are derived from
 the word timestamps (:func:`slice_records_from_words`).
 
+On unclear or quiet audio — and especially in English meetings — whisper
+can continue the glossary ``initial_prompt`` instead of transcribing:
+``Sanasto, Pia, NG-TOPI, …`` (issue #109). The post-decode
+:func:`filter_echo_segments` (from :mod:`echo_filter`) drops such echo
+segments while keeping real sentences that contain one or more glossary
+terms, and is fail-open on any error (it never loses a real segment to a
+filter bug).
+
 Spike (see the issue #76 spike report): the per-window loop costs ~+40%
 wall-clock vs the single call (12.1 vs 8.7 min/hour measured on 15 min of
 synthetic audio), which is the price of the glossary actually reaching
@@ -37,6 +45,7 @@ from typing import TYPE_CHECKING, Any
 import mlx.core as mx
 import numpy as np
 
+from .echo_filter import echo_vocabulary, filter_echo_segments
 from .models import get_model
 from .selfheal import heal
 from .transcriber import TranscriptionResult
@@ -76,6 +85,13 @@ class WhisperTranscriber:
         self._mlx_whisper: Any = None
         self._load_failed = False
         self._load_once = threading.Lock()
+        # Prompt-derived echo vocabulary for the post-decode filter
+        # (issue #109): the glossary terms plus the former label word
+        # "Sanasto", case-insensitive. ``None`` (no prompt) means the
+        # filter is a no-op. The lower-cased vocabulary set is built once
+        # per window inside filter_echo_segments and reused for every
+        # segment, so no per-call rebuild here.
+        self._echo_terms = echo_vocabulary(initial_prompt)
         # ``language=None`` (the default) lets Whisper detect the language
         # per window (invariant #3: language is a property of a span, not
         # of a file — a hard-coded ``"fi"`` pin here forced Finnish on
@@ -231,8 +247,19 @@ class WhisperTranscriber:
 
         words: list[dict[str, Any]] = []
         segments: list[dict[str, Any]] = []
+        all_window_texts: list[str] = []  # accumulate text across all windows
         for index, raw in enumerate(raws):
             offset_s = index * WINDOW_SECONDS
+            window_texts: list[str] = []  # per-window text (issue #109)
+            # Echo backstop (issue #109): whisper can continue the glossary
+            # prompt instead of transcribing. The filter_echo_segments call
+            # below (the single source of truth for the strict drop) returns
+            # the segments to keep and the words on the recording timeline;
+            # this loop only builds the per-window text and the output
+            # segments/words entries from the kept segments.
+            kept_segments, kept_words = filter_echo_segments(
+                raw.get("segments") or [], offset_s, self._echo_terms
+            )
             # A non-empty window that decoded to zero segments (malformed
             # payload, or the model hearing nothing) would otherwise flow
             # into the fail-open path in decode_meeting indistinguishable
@@ -249,10 +276,15 @@ class WhisperTranscriber:
                     index,
                     offset_s,
                 )
-            for seg in raw.get("segments") or []:
+            # Build the per-segment entries from the kept segments. The
+            # words list is taken wholesale from kept_words (already shifted
+            # onto the recording timeline by the filter); the per-segment
+            # confidence keys are copied from the original segment dicts.
+            for seg in kept_segments:
                 text = str(seg.get("text", "")).strip()
                 if not text:
                     continue
+                window_texts.append(text)
                 entry: dict[str, Any] = {
                     "start": float(seg.get("start", 0.0)) + offset_s,
                     "end": float(seg.get("end", 0.0)) + offset_s,
@@ -265,19 +297,25 @@ class WhisperTranscriber:
                     if seg.get(key) is not None:
                         entry[key] = float(seg[key])
                 segments.append(entry)
-                for w in seg.get("words") or []:
-                    word = str(w.get("word", "")).strip()
-                    if word:
-                        words.append(
-                            {
-                                "word": word,
-                                "start": float(w.get("start", 0.0)) + offset_s,
-                                "end": float(w.get("end", 0.0)) + offset_s,
-                            }
-                        )
+            # Words come from the filter's kept_words (already on the
+            # recording timeline); no per-segment word loop needed here.
+            words.extend(kept_words)
+            # Per-window text: the filtered segments' text. Fallback to
+            # raw["text"] only when the window has NO segments (malformed
+            # payload shape the debug log above anticipates). When segments
+            # existed but were ALL filtered as echoes, window_texts is empty
+            # and we do NOT fall back — the echo must not resurrect in the
+            # headline text (issue #109, the all-echo window shape).
+            if not window_texts and not raw.get("segments"):
+                window_texts.append(str(raw.get("text", "")).strip())
+            all_window_texts.extend(window_texts)
 
         result: TranscriptionResult = {
-            "text": " ".join(str(raw["text"]).strip() for raw in raws).strip(),
+            # Built from all windows' filtered segments (with the raw["text"]
+            # fallback above for zero-segment windows), not raw["text"] alone
+            # — the raw string contains echo-segment text that was already
+            # dropped.
+            "text": " ".join(t for t in all_window_texts if t).strip(),
             "words": words,
             "segments": segments,
             "transcribe_time": transcribe_time,

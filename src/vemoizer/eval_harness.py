@@ -31,6 +31,13 @@ from vemoizer.textnorm import textnorm
 
 logger = logging.getLogger(__name__)
 
+#: A hypothesis whose words fall outside the glossary by less than this
+#: fraction is classified as a prompt echo (issue #109). Tuned against
+#: the recorded echo shapes (0%–25% outside) vs. the shortest real
+#: sentences (50%+ outside); a stricter 0.2 would let a two-word echo
+#: slip through, a looser 0.5 would eat real one-term sentences.
+_PROMPT_ECHO_OUTSIDE_FRACTION = 0.3
+
 #: Aggregate key appended to the per-sample mapping by :func:`run_eval`.
 AGGREGATE_KEY = "aggregate"
 
@@ -80,6 +87,16 @@ def glossary_term_hit_rate(reference: str, hypothesis: str, terms: list[str]) ->
     same form (case/punctuation variants) are de-duplicated, so a glossary
     that lists both ``backlog`` and ``Backlog`` counts the term once.
 
+    Prompt echoes (issue #109) are excluded: a hypothesis that is *almost*
+    pure glossary — fewer than 30% of its words fall outside the glossary —
+    is not a real transcript; it is a continuation of the ``initial_prompt``
+    that whisper repeated on unclear or quiet audio. In such a hypothesis the
+    term hits are the prompt's, not the decoder's, and counting them would
+    inflate the metric exactly when the glossary prompt is failing. A real
+    sentence with one or a few glossary terms (``"backlog on täynnä"``)
+    keeps every occurrence; a prompt-echo-shaped hypothesis (``"sanasto pia
+    ng-topi"``) counts zero regardless of how many terms it lists.
+
     Returns ``terms_in_hyp / terms_in_ref``. Returns 1.0 when no term occurs
     in the reference (the hypothesis is vacuously complete for this
     glossary, and the sample contributes nothing to the metric either way);
@@ -92,7 +109,64 @@ def glossary_term_hit_rate(reference: str, hypothesis: str, terms: list[str]) ->
     if not in_ref:
         return 1.0
     in_hyp = _terms_present(hyp_words, terms)
+    # Compute the glossary token set once for the two calls below rather
+    # than rebuilding it inside each (the set is the same for both).
+    glossary = _glossary_token_set(terms)
+    if _is_prompt_echo(hyp_words, glossary):
+        return 0.0
     return len(in_ref & in_hyp) / len(in_ref)
+
+
+def _is_prompt_echo(words: list[str], glossary: set[str]) -> bool:
+    """True when *words* is a prompt echo, not a real transcript (issue #109).
+
+    Proportional (non-strict) form of the echo check. Independent of the
+    transcriber's strict drop filter (``echo_filter._is_echo``) — the two
+    classify the same phenomenon with different tokenization and
+    strictness (see the module docstring in ``echo_filter``): this form
+    runs every word through :func:`vemoizer.textnorm.textnorm` (the same
+    normalizer as the hypothesis words), which casefolds, replaces
+    punctuation — hyphens included — with spaces, and collapses
+    whitespace. Because the glossary token set is built from the same
+    normalization, a hyphenated term and an echo that transcribes it with
+    or without the hyphen land on the same fragment tokens (``NG-TOPI`` →
+    ``ng topi`` on both sides), so the hyphen never breaks the match; it
+    tolerates up to
+    :data:`_PROMPT_ECHO_OUTSIDE_FRACTION` of the words falling outside the
+    glossary, because it only gates a metric and must not lose real term
+    hits on a real sentence that happens to contain a few glossary words.
+
+    *glossary* is the pre-computed lower-cased token set (see
+    :func:`_glossary_token_set`); the caller builds it once per hypothesis
+    rather than per word.
+
+    Boundary cases: a bare term run with no other words (0% outside) is an
+    echo; a real sentence (``"backlog on täynnä"``, 1/3 outside) is not.
+    """
+    if not glossary:
+        return False
+    if not words:
+        return False
+    in_glossary = sum(1 for w in words if w in glossary)
+    if in_glossary < 1:
+        return False
+    outside = len(words) - in_glossary
+    return outside / len(words) < _PROMPT_ECHO_OUTSIDE_FRACTION
+
+
+def _glossary_token_set(terms: list[str]) -> set[str]:
+    """All single tokens that make up any glossary term (normalized).
+
+    Multi-word terms are split: ``"sprint planning"`` contributes both
+    ``"sprint"`` and ``"planning"``. Used by :func:`_is_prompt_echo` to
+    decide how much of a hypothesis is glossary content versus real speech.
+    """
+    tokens: set[str] = set()
+    for raw in terms:
+        t = textnorm(raw)
+        if t:
+            tokens.update(t.split())
+    return tokens
 
 
 def _terms_present(words: list[str], terms: list[str]) -> set[str]:
