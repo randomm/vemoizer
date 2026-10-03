@@ -2,7 +2,7 @@
 
 Pure-stdlib: no model imports, no network, no ffmpeg. The sidecar is
 assembled by :func:`vemoizer.sidecar.build_sidecar` and the pure helpers
-``glossary_layer_files`` / ``sha256_over_files``.
+``glossary_layer_files`` / ``prompt_term_set_hash``.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from vemoizer.sidecar import (
     group_durations,
     group_part_paths,
     prompt_term_set_hash,
-    sha256_over_files,
 )
 
 # ---------------------------------------------------------------------------
@@ -394,66 +393,21 @@ def test_build_sidecar_stores_prompt_term_set_hash(tmp_path: Path) -> None:
     assert opts["glossary_sha256"] == hashlib.sha256(b"Flagship").hexdigest()
 
 
-# ---------------------------------------------------------------------------
-# sha256_over_files
-# ---------------------------------------------------------------------------
-
-
-def test_sha256_over_files_single(tmp_path: Path) -> None:
-    """sha256 over a single file's raw bytes."""
-    f = tmp_path / "g.txt"
-    f.write_bytes(b"hello")
-    expected = hashlib.sha256(b"hello").hexdigest()
-    assert sha256_over_files([str(f)]) == expected
-
-
-def test_sha256_over_files_multiple(tmp_path: Path) -> None:
-    """sha256 over concatenated raw bytes of multiple files, in order."""
-    f1 = tmp_path / "a.txt"
-    f2 = tmp_path / "b.txt"
-    f1.write_bytes(b"aaa")
-    f2.write_bytes(b"bbb")
-    expected = hashlib.sha256(b"aaabbb").hexdigest()
-    assert sha256_over_files([str(f1), str(f2)]) == expected
-
-
-def test_sha256_over_files_empty_list() -> None:
-    """Empty list: None (no files to hash)."""
-    assert sha256_over_files([]) is None
-
-
-def test_sha256_over_files_missing_file(tmp_path: Path) -> None:
-    """Missing file: None (fail-open)."""
-    f = tmp_path / "nonexistent.txt"
-    assert sha256_over_files([str(f)]) is None
-
-
-def test_sha256_over_files_non_utf8_file_hashes_bytes(tmp_path: Path) -> None:
-    """A non-UTF-8 glossary still hashes its raw bytes (never raises)."""
-    f = tmp_path / "g.txt"
-    f.write_bytes(b"\xff\xfe\x00bad")
-    expected = hashlib.sha256(b"\xff\xfe\x00bad").hexdigest()
-    assert sha256_over_files([str(f)]) == expected
-
-
-def test_sha256_over_files_deterministic(tmp_path: Path) -> None:
-    """Same files in same order produce the same hash."""
-    f = tmp_path / "g.txt"
-    f.write_bytes(b"test")
-    h1 = sha256_over_files([str(f)])
-    h2 = sha256_over_files([str(f)])
-    assert h1 == h2
-
-
-def test_sha256_over_files_order_matters(tmp_path: Path) -> None:
-    """Different file order produces a different hash."""
-    f1 = tmp_path / "a.txt"
-    f2 = tmp_path / "b.txt"
-    f1.write_bytes(b"111")
-    f2.write_bytes(b"222")
-    h_ab = sha256_over_files([str(f1), str(f2)])
-    h_ba = sha256_over_files([str(f2), str(f1)])
-    assert h_ab != h_ba
+def test_prompt_term_set_hash_non_utf8_file_skipped_fail_open(
+    tmp_path: Path,
+) -> None:
+    """A non-UTF-8 glossary file is skipped (fail-open); the remaining file
+    still hashes. prompt_term_set_hash does NOT warn — the render command's
+    _load_corrections prints the user-visible warning for that path."""
+    bad = tmp_path / "bad.txt"
+    bad.write_bytes(b"\xff\xfe\x00bad")
+    good = tmp_path / "good.txt"
+    good.write_text("Flagship\n", encoding="utf-8")
+    expected = hashlib.sha256(b"Flagship").hexdigest()
+    # The non-UTF-8 file is skipped; the good file still hashes.
+    assert prompt_term_set_hash([str(bad), str(good)]) == expected
+    # The non-UTF-8 file alone hashes the empty set.
+    assert prompt_term_set_hash([str(bad)]) == hashlib.sha256(b"").hexdigest()
 
 
 # ---------------------------------------------------------------------------

@@ -366,8 +366,9 @@ them (present-only, so old JSON without the keys and the expert
 hash covers only the glossary *prompt terms* — the non-correction
 (`=>`-free), non-`@`-prefixed lines — after layer merge, deduped
 case-insensitively with first-seen spelling winning (project over home),
-newline-joined, then sha256. This is exactly what `glossary_prompt`
-feeds to whisper; correction pairs and `@`-names are render-safe and
+newline-joined, then sha256. This is the canonical deduplicated
+prompt-term set, the input to `glossary_prompt` before its token-budget
+truncation; correction pairs and `@`-names are render-safe and
 ever excluded. `render` recomputes the same hash over the current
 glossary files via the shared `prompt_term_set_hash`, so a mismatch
 means the prompt-term set genuinely changed.
@@ -604,10 +605,13 @@ proceeds (fail-open).
 `--name LABEL=NAME` values are persisted into the sidecar's
 `speaker_names` key by rewriting the JSON in place atomically (temp
 file in the same directory + `os.replace`). The output `.md` is written
-to `<stem>.md` next to the sidecar, **overwriting** any existing file
+atomically (temp file in the same directory + `os.replace`) to
+`<stem>.md` next to the sidecar, **overwriting** any existing file
 (the rendered output is fully derived from the sidecar, so the
 previous file is replaced — no ` (2)` suffix), unless `--out` is
-given.
+given. `os.replace` over a symlink at the target path replaces the
+symlink itself (not the pointed-to file), making the write
+symlink-safe.
 
 Exit codes: `0` on success, `1` on an unreadable or malformed sidecar,
 `2` on a malformed `--name` value.

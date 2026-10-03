@@ -33,11 +33,13 @@ Design notes
   of the exact glossary files the run used (project layer first, then
   home, or the single explicit ``--glossary`` file), as hashed by
   :func:`prompt_term_set_hash` — the non-correction, non-``@`` lines
-  after layer merge, i.e. exactly what ``glossary_prompt`` feeds to
-  whisper. ``render`` recomputes the same hash over the current layers
-  for the drift warning, so an unchanged prompt-term set never warns
-  (correction pairs and ``@`` names are render-safe and never trip it).
-  ``null`` when no glossary file existed at run time.
+  after layer merge, deduped case-insensitively (first-seen spelling
+  wins), i.e. the canonical deduplicated prompt-term set that is the
+  input to ``glossary_prompt`` before its token-budget truncation.
+  ``render`` recomputes the same hash over the current layers for the
+  drift warning, so an unchanged prompt-term set never warns (correction
+  pairs and ``@`` names are render-safe and never trip it). ``null``
+  when no glossary file existed at run time.
 """
 
 from __future__ import annotations
@@ -54,7 +56,6 @@ __all__ = [
     "group_part_paths",
     "resolve_run_glossary_files",
     "prompt_term_set_hash",
-    "sha256_over_files",
 ]
 
 
@@ -297,8 +298,13 @@ def prompt_term_set_hash(files: list[str] | list[Path]) -> str | None:
     sidecar's ``options.glossary_sha256``) and the current glossary at
     render time, so a mismatch means the prompt-term set actually changed.
 
-    ``None`` when *files* is empty or no file is readable (fail-open,
-    matching ``sha256_over_files``).
+    ``None`` when *files* is empty or no file is readable (fail-open).
+
+    A present-but-unreadable glossary file (permission denied, I/O error)
+    is skipped silently here — the render command's ``_load_corrections``
+    prints the user-visible warning for that path. This function is also
+    called from the run path (``build_sidecar``), where no warning is
+    appropriate.
     """
     if not files:
         return None
@@ -311,8 +317,10 @@ def prompt_term_set_hash(files: list[str] | list[Path]) -> str | None:
         try:
             lines = load_glossary(path)
         except (OSError, UnicodeDecodeError, ValueError):
-            # Fail-open: an unreadable file contributes no terms (the
-            # caller prints the missing-file warning separately).
+            # Fail-open: an unreadable file contributes no terms. The render
+            # command's _load_corrections prints the user-visible warning for
+            # the non-UTF-8 case; the run path has no such warning (the
+            # file was already read successfully by load_layers/merge).
             continue
         for line in lines:
             if line.startswith("@"):
@@ -322,20 +330,3 @@ def prompt_term_set_hash(files: list[str] | list[Path]) -> str | None:
                 seen.add(key)
                 terms.append(line)
     return hashlib.sha256("\n".join(terms).encode("utf-8")).hexdigest()
-
-
-def sha256_over_files(files: list[str] | list[Path]) -> str | None:
-    """sha256 over the concatenated raw bytes of *files*, in order.
-
-    ``None`` when no file can be read (fail-open, matching ``render``'s
-    missing-file warning path). Empty *files* yields ``None``.
-    """
-    if not files:
-        return None
-    h = hashlib.sha256()
-    for f in files:
-        try:
-            h.update(Path(f).read_bytes())
-        except OSError:  # fail-open: unreadable file -> no hash
-            return None
-    return h.hexdigest()
