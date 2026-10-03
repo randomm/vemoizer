@@ -49,6 +49,17 @@ def _mock_whisper(raw):
     return m
 
 
+def _kw(call, name: str) -> object:
+    """Read one keyword argument from a mocked call.
+
+    MagicMock's ``call_args_list`` iteration yields objects whose
+    ``kwargs`` indexing is not type-checkable, so the index access is
+    centralized here (issue #128) instead of suppressing it at every
+    per-window assertion.
+    """
+    return call.kwargs[name]
+
+
 def _audio(seconds: float) -> np.ndarray:
     return np.zeros(int(seconds * 16_000), dtype=np.float32)
 
@@ -94,7 +105,7 @@ def test_transcribe_decodes_each_window_separately() -> None:
     # The default is per-window language detection (issue #108, option A):
     # language=None on EVERY window, never a file-level pin.
     for call in mock.transcribe.call_args_list:
-        assert call.kwargs["language"] is None  # type: ignore[index]
+        assert _kw(call, "language") is None
 
 
 def test_transcribe_language_override_pins_every_window() -> None:
@@ -121,7 +132,7 @@ def test_transcribe_language_override_pins_every_window() -> None:
 
     assert mock.transcribe.call_count == 2
     for call in mock.transcribe.call_args_list:
-        assert call.kwargs["language"] == "fi"  # type: ignore[index]
+        assert _kw(call, "language") == "fi"
 
 
 def test_window_returning_none_raises_with_window_index() -> None:
@@ -317,7 +328,7 @@ def test_decode_meeting_heals_hallucination_walls() -> None:
     assert heal_kwargs["condition_on_previous_text"] is False
     # Option A: decode_meeting's default leaves per-window detection on.
     for call in mock.transcribe.call_args_list:
-        assert call.kwargs["language"] is None  # type: ignore[index]
+        assert _kw(call, "language") is None
     assert "Kiitos" not in result["text"]
     assert "demossa" in result["text"]
     # healed words shifted onto the recording timeline (slice offset 9s)
@@ -363,7 +374,7 @@ def test_decode_meeting_falls_back_to_prompt_free_redecode() -> None:
     assert fallback["initial_prompt"] is None
     assert fallback["condition_on_previous_text"] is False
     for call in mock.transcribe.call_args_list:
-        assert call.kwargs["language"] is None  # type: ignore[index]
+        assert _kw(call, "language") is None
 
 
 def test_decode_meeting_language_kwarg_pins_every_window() -> None:
@@ -383,7 +394,7 @@ def test_decode_meeting_language_kwarg_pins_every_window() -> None:
     assert result is not None
     assert mock.transcribe.call_count >= 1
     for call in mock.transcribe.call_args_list:
-        assert call.kwargs["language"] == "fi"  # type: ignore[index]
+        assert _kw(call, "language") == "fi"
 
 
 # -- verbose kwarg pinning (issue #105, lens MEDIUM) ------------------------
