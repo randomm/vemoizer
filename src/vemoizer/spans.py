@@ -192,6 +192,26 @@ def merge_spans(spans: Sequence[Span]) -> list[Span]:
     return merged
 
 
+def high_confidence_word_pairs(pairs: Sequence[AlignedPair]) -> list[AlignedPair]:
+    """The aligned word pairs both decodes agree on strongly (issue #62).
+
+    A pair is *high-confidence* when both sides are present and their
+    word-level :func:`similarity` is at least
+    :data:`HIGH_CONFIDENCE_THRESHOLD` (the two decodes are confident they
+    heard the same word). One-sided pairs (insertion/deletion) are never
+    high-confidence: a word only one decoder produced cannot be a
+    consensus. These are the spans the two-way comparison sees as clean —
+    and the spans where "two decoders agree on the wrong answer" hides.
+    """
+    return [
+        (a, b)
+        for a, b in pairs
+        if a is not None
+        and b is not None
+        and similarity(a, b) >= HIGH_CONFIDENCE_THRESHOLD
+    ]
+
+
 def find_disputed_spans(pairs: Sequence[AlignedPair]) -> list[Span]:
     """Find the disputed time ranges of an aligned decode pair.
 
@@ -268,6 +288,15 @@ MAX_DISPUTED_FRACTION = 0.25
 #: speech. A 3-second clip disputing wholly is normal, and re-decoding all
 #: of it is affordable; the fraction guard exists to bound cost at scale.
 MIN_SPEECH_FOR_FRACTION_GUARD_S = 60.0
+
+#: A slice whose two decodes agree at least this strongly (word-level
+#: similarity) is "high confidence": both models are confident they heard
+#: the same thing, which is precisely the agreement-on-wrong-answer case
+#: a two-way comparison is blind to (issue #62). The same metric family as
+#: :data:`DISPUTE_THRESHOLD` (word-level LCS similarity), so a slice both
+#: models transcribed identically scores ``1.0`` and is trivially
+#: high-confidence.
+HIGH_CONFIDENCE_THRESHOLD: float = 0.75
 
 
 def apply_span_guardrails(

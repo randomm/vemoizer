@@ -8,7 +8,8 @@ these details.
 Last updated: 2026-10 (issue #110 — `sanitize_title` now maps `:` to an
 en-dash separator and drops the other filesystem-invalid characters
 `* ? " < > |`; spec corrections earlier: Parakeet repo IDs, Canary load
-path, CC-BY diarization, runtime environment).
+path, CC-BY diarization, runtime environment; issue #62 — informational
+`agreement_on_wrong` eval metric + spec gap/caveat docs).
 
 ## Overview
 
@@ -713,7 +714,77 @@ emitted to stderr before long transcription.
   (issue #13)
 - `vemoizer eval --corpus <dir>` — WER regression over the fixture corpus
   (accuracy claims in PRs must come from this output, not model cards)
+- `vemoizer eval --agreement` — informational `agreement_on_wrong` metric
+  over the fixture corpus (issue #62)
 - `vemoizer models pull` — pre-download and revision-pin all models
+
+### `vemoizer eval` — WER gate and informational metrics (issues #11, #51, #62)
+
+`vemoizer eval` is registered with `hidden=True` and does not appear in the
+main `--help`. It scores one or more decode backends over the stem-paired
+fixture corpus (`tests/fixtures/corpus`) and, with `--check`, gates against
+the committed WER baseline (`tests/fixtures/wer_baseline.json`).
+
+**WER gate.** The WER aggregate (macro average over samples) is the only
+regression gate. `--check` exits 2 on any regression beyond tolerance
+(0.02, overridable in the baseline file) or on a corpus fingerprint mismatch.
+The gate is per-backend: `--backend all` runs parakeet, canary, and consensus
+independently, and the baseline file carries one number set per backend.
+
+**Informational `agreement_on_wrong` metric (issue #62).** The WER aggregate
+is a necessary-but-not-sufficient measure of the consensus pipeline's
+effectiveness: it cannot detect *agreement on a wrong answer*, the case where
+two independent decoders produce similar text for the same audio and that
+shared text is wrong against the reference. In that case the pipeline ships
+decode A, the LLM never adjudicates (no dispute is flagged), and the WER
+aggregate inherits the shared error — the two-way comparison has no way to
+know the answer is wrong.
+
+The metric is informational: it is reported, never gated (invariant #2,
+the WER gate stays the only regression gate). It is computed over all
+ordered backend pairs and all samples, and is only meaningful when at least
+two backends are scored (a single-backend run has no second decoder to
+compare against, so the metric is not emitted).
+
+The metric is computed as follows:
+- A sample is "in agreement" when the char-level similarity (textnorm +
+  SequenceMatcher ratio) of the two decoders' normalized hypothesis texts
+  is at least `AGREEMENT_THRESHOLD` (0.8, tuned against the TTS-corpus
+  agreement band 0.70–0.88).
+- The sample is "wrong" when the WER of the shared hypothesis against the
+  reference exceeds `_WRONG_WER` (0.3).
+- `agreement_on_wrong` = (count of samples that are both in agreement and
+  wrong) / (total samples scored by both backends).
+
+The metric is emitted as a single line `[agreement_on_wrong]\t<value>` after
+the per-backend WER output. It does not affect the baseline file or the
+`--check` gate; it is a diagnostic number for PR review.
+
+**Spec gaps and caveats (issue #62).**
+
+- The WER gate compares measured per-sample WER against the committed
+  baseline. A sample that is *new* (not in the baseline) is flagged as a
+  regression (the corpus drifted and the baseline needs a deliberate
+  update); this is by design, not a bug.
+- The `agreement_on_wrong` metric is **not** part of the WER gate. It is
+  informational only: a high value indicates the two-way consensus pipeline
+  is producing wrong-but-confident output, which the WER aggregate alone
+  cannot distinguish from a general accuracy decline.
+- The Whisper re-decode (issue #55) is currently a re-decoder, not a
+  third detector. The issue body's suggestion to use it as a third
+  detector for high-confidence disagreement sampling is deferred (operator
+  decision superseded the issue body); the spec documents the gap so the
+  decision is not lost.
+- The multi-speaker gate (meeting eval, issue #76) is a separate
+  informational metric (term-hit rate) that is also not part of the WER
+  gate; it is emitted only when the corpus contains a `.terms` pair.
+- The TTS corpus (Piper Finnish, `tests/fixtures/corpus`) is a regression
+  gate, not a challenge set: on clean TTS both decoders are often similarly
+  wrong (slice similarity 0.70–0.88), and two-way comparison cannot detect
+  agreement on the wrong answer. The real-speech (Common Voice) corpus
+  (issue #62, sibling workstream) is an additive challenge set; the
+  `agreement_on_wrong` metric is more meaningful on that corpus because
+  the decoders are more likely to agree on a wrong answer in real speech.
 
 ## Configuration
 

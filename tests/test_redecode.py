@@ -34,6 +34,7 @@ from vemoizer.redecode import (
     WhisperReDecodeTranscriber,
     _to_result,
     extract_slice,
+    third_decode_spans,
 )
 from vemoizer.spans import Span
 
@@ -490,7 +491,126 @@ def test_redecode_result_is_immutable() -> None:
     assert result.ok is True
 
 
+def test_construction_does_not_download() -> None:
+    with patch("huggingface_hub.snapshot_download") as mock_dl:
+        transcriber = WhisperReDecodeTranscriber()
+        mock_dl.assert_not_called()
+        assert transcriber.model is None
+
+
+def test_transcribe_protocol_surface_skips_failed_span(
+    loaded_transcriber: tuple[WhisperReDecodeTranscriber, MagicMock],
+) -> None:
+    transcriber, mock_whisper_transcribe = loaded_transcriber
+    # First span succeeds, second fails (fail-open for that span only).
+    mock_whisper_transcribe.side_effect = [
+        {"text": "ok", "segments": []},
+        RuntimeError("timeout"),
+    ]
+    audio = _audio(10.0)
+    result = transcriber.transcribe(audio, spans=[Span(0.0, 1.0), Span(5.0, 6.0)])
+    # The successful span's text is preserved; the failed one is skipped.
+    assert result["text"] == "ok"
+    assert result["words"] == []
+
+
 def test_span_validation_is_inherited() -> None:
     # ReDecodeResult carries a Span; a malformed Span is rejected.
     with pytest.raises(ValueError):
         Span(1.0, 0.5)
+
+
+# ---------------------------------------------------------------------------
+# third_decode_spans(): the Whisper re-decode as a *detector* (issue #62)
+# ---------------------------------------------------------------------------
+
+
+def _slice(
+    index: int, start: float, end: float, text: str, language: str | None = None
+) -> dict:
+    record: dict = {"index": index, "start_s": start, "end_s": end, "text": text}
+    if language is not None:
+        record["language"] = language
+    return record
+
+
+def test_third_decode_flags_high_confidence_disagreement() -> None:
+    """A≈B (similarity >= 0.75, currently NOT disputed) but C differs.
+
+    This is the agreement-on-wrong-answer case the two-way comparison
+    cannot see: the A and B texts are identical, so ``find_disputed_slices``
+    leaves the slice clean, yet the C decode says something else. The
+    detector must mark it disputed.
+    """
+    from vemoizer.slice_align import find_disputed_slices
+
+    a = _slice(0, 0.0, 2.0, "moottori pyörähti hienosti")
+    b = _slice(0, 0.0, 2.0, "moottori pyörähti hienosti")
+    # Two-way: identical texts -> no disputed spans (the blind spot).
+    assert find_disputed_slices([a], [b]) == []
+    # C disagrees -> the detector flags the slice.
+    spans = third_decode_spans([a], [b], {0: "piksel välähti äkillisesti"})
+    assert len(spans) == 1
+    assert spans[0].start == 0.0
+    assert spans[0].end == 2.0
+
+
+def test_third_decode_no_spans_when_c_agrees() -> None:
+    """A≈B and C also agrees -> nothing to sample (the detectors agree)."""
+    a = _slice(0, 0.0, 2.0, "moottori pyörähti")
+    b = _slice(0, 0.0, 2.0, "moottori pyörähti")
+    assert third_decode_spans([a], [b], {0: "moottori pyörähti"}) == []
+
+
+def test_third_decode_no_spans_when_a_and_b_disagree() -> None:
+    """The high-confidence gate: A and B that diverge are already handled
+    by the two-way comparison; the detector only covers A≈B slices, so a
+    low A/B similarity never qualifies even when C differs.
+    """
+    a = _slice(0, 0.0, 2.0, "moottori pyörähti hienosti")
+    b = _slice(0, 0.0, 2.0, "aivan eri juttu tässä nyt")
+    assert third_decode_spans([a], [b], {0: "aivan jotain muuta"}) == []
+
+
+def test_third_decode_missing_c_for_slice_is_skipped() -> None:
+    """A slice the third decode has not covered is skipped (fail-open): a
+    missing detector cannot manufacture a dispute.
+    """
+    a = _slice(0, 0.0, 2.0, "moottori pyörähti")
+    b = _slice(0, 0.0, 2.0, "moottori pyörähti")
+    a2 = _slice(1, 2.0, 4.0, "moottori pyörähti")
+    b2 = _slice(1, 2.0, 4.0, "moottori pyörähti")
+    # Only slice 0 has a C text; slice 1 must not qualify.
+    assert third_decode_spans([a, a2], [b, b2], {0: "piksel välähti"}) == [
+        Span(0.0, 2.0)
+    ]
+    # No C text at all -> no spans.
+    assert third_decode_spans([a], [b], {}) == []
+
+
+def test_third_decode_missing_b_for_slice_is_skipped() -> None:
+    """A slice missing from B cannot establish the A≈B agreement, so it
+    does not qualify regardless of what C says.
+    """
+    a = _slice(0, 0.0, 2.0, "moottori pyörähti")
+    b2 = _slice(1, 2.0, 4.0, "moottori pyörähti")
+    assert third_decode_spans([a], [b2], {0: "piksel välähti"}) == []
+
+
+def test_third_decode_language_from_first_reported_side() -> None:
+    """The span's language follows the A → B → C precedence (invariant #3)."""
+    a = _slice(0, 0.0, 2.0, "moottori pyörähti", language="fi")
+    b = _slice(0, 0.0, 2.0, "moottori pyörähti", language="fi")
+    spans = third_decode_spans([a], [b], {0: "piksel välähti"})
+    assert len(spans) == 1
+    assert spans[0].language == "fi"
+
+
+def test_third_decode_uses_slice_bounds() -> None:
+    """Span bounds are the VAD slice's real bounds, not synthetic times."""
+    a = _slice(3, 7.5, 9.25, "moottori pyörähti")
+    b = _slice(3, 7.5, 9.25, "moottori pyörähti")
+    spans = third_decode_spans([a], [b], {3: "piksel välähti"})
+    assert len(spans) == 1
+    assert spans[0].start == 7.5
+    assert spans[0].end == 9.25

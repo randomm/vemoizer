@@ -49,9 +49,9 @@ from .parakeet_transcriber import ParakeetTranscriber
 from .presets import _normalize_language
 from .progress import ProgressDisplay, StageProgress, format_duration
 from .readability import paragraphs, splice_verdicts, tidy_paragraphs
-from .redecode import WhisperReDecodeTranscriber
+from .redecode import WhisperReDecodeTranscriber, third_decode_spans
 from .repair import repair_paragraphs  # noqa: F401
-from .spans import Span, span_context, words_in_span
+from .spans import Span, merge_spans, span_context, words_in_span
 from .speaker_align import assign_word_speakers, split_segments_at_speaker_changes
 from .vad import SpeechSegment, vad_segments
 from .vad import load_model as load_vad_model
@@ -107,6 +107,65 @@ def _redecode_spans(
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
         logger.warning("re-decode stage failed; skipping: %s", e)
         return None
+    finally:
+        redecoder.cleanup()
+
+
+def _consensus_c_spans(
+    audio: np.ndarray,
+    spans: list[Span],
+    slices_a: list[dict[str, Any]],
+    slices_b: list[dict[str, Any]],
+) -> list[Span]:
+    """Issue #62: let the Whisper decode act as a *detector*, not just a re-decoder.
+
+    The two-way A/B comparison is blind to slices both decoders are
+    confidently wrong on. Run one whole-file C decode and flag the spans
+    where A≈B but the C text disagrees; those are sampled for re-decode
+    + adjudication alongside the A/B-disputed spans.
+
+    Fail-open: any failure (model unavailable, decode error, empty result)
+    leaves the span set unchanged — a missing C detector cannot manufacture
+    a dispute, and a C failure must never abort the run. The cost is one
+    extra greedy Whisper pass; the re-decode stays targeted (seconds, not
+    the file). With an empty span set the C decode is skipped entirely
+    (nothing to reconcile), so short clips pay nothing.
+    """
+    if not spans:
+        return spans
+    redecoder = WhisperReDecodeTranscriber()
+    try:
+        redecoder._ensure_loaded()
+        if redecoder.model is None or redecoder._model_path is None:
+            return spans
+        raw = redecoder._mlx_whisper.transcribe(
+            audio,
+            path_or_hf_repo=redecoder._model_path,
+            word_timestamps=False,
+            task="transcribe",
+            temperature=0.0,
+            condition_on_previous_text=False,
+        )
+        c_text = " ".join(
+            str(seg.get("text", "")).strip() for seg in raw.get("segments") or []
+        ).strip()
+        if not c_text:
+            return spans
+        extra = third_decode_spans(slices_a, slices_b, {0: c_text})
+        if not extra:
+            return spans
+        # Union, deduplicated by (start, end); the detector adds spans the
+        # two-way comparison never saw (that is the whole point).
+        merged = merge_spans(spans + extra)
+        if merged != spans:
+            logger.info(
+                "C detector: %d span(s) flagged where A≈B but C disagrees",
+                len(extra),
+            )
+        return merged
+    except Exception as e:  # noqa: BLE001 - fail-open stage boundary
+        logger.warning("C detector decode failed; continuing without it: %s", e)
+        return spans
     finally:
         redecoder.cleanup()
 
@@ -375,6 +434,10 @@ def transcribe_file(
                     canary.cleanup()
 
     spans = _find_spans(result_a, result_b) if run_consensus else []
+    if run_consensus and spans and result_a is not None and result_b is not None:
+        spans = _consensus_c_spans(
+            audio, spans, list(result_a["slices"]), list(result_b["slices"])
+        )
     redecoded: list[dict[str, Any]] | None = None
     if spans:
         redecoded = _redecode_spans(audio, spans)

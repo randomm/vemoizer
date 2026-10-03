@@ -37,6 +37,14 @@ logger = logging.getLogger(__name__)
 #: word-level unit flagged 53-87 % of the memo.
 SLICE_DISPUTE_THRESHOLD = 0.55
 
+#: A slice whose normalized A/B texts are at least this similar is
+#: "high confidence": both decodes agree strongly, so a two-way
+#: comparison sees the slice as clean — and cannot see the
+#: agreement-on-wrong-answer case where both decoders are confidently
+#: wrong in the same way (issue #62). The Whisper re-decode output is
+#: what exposes those spans (see :func:`find_high_confidence_disagreement`).
+SLICE_HIGH_CONFIDENCE_THRESHOLD = 0.75
+
 
 def slice_similarity(text_a: str, text_b: str) -> float:
     """Char-level similarity of two normalized slice texts in ``[0, 1]``.
@@ -106,3 +114,56 @@ def find_disputed_slices(
         threshold,
     )
     return merge_spans([span for _sim, span in disputed])
+
+
+def find_high_confidence_disagreement(
+    slices_a: list[dict[str, Any]],
+    slices_b: list[dict[str, Any]],
+    slices_c: list[dict[str, Any]],
+    *,
+    agreement_threshold: float = SLICE_HIGH_CONFIDENCE_THRESHOLD,
+    threshold: float = SLICE_DISPUTE_THRESHOLD,
+) -> list[Span]:
+    """Spans where A and B agree but the third decode (C) disagrees (issue #62).
+
+    This is the agreement-on-wrong-answer detector: the two-way A/B
+    comparison is blind to slices both decoders are confidently wrong on,
+    because their texts are similar. A slice qualifies when its A and B
+    texts are similar at least *agreement_threshold* (the high-confidence,
+    currently-clean case) while its text disagrees with the C text by
+    more than the dispute *threshold*. The span bounds are the VAD slice's
+    real bounds (the A record) and it carries the first reported language
+    in the A → B → C order (invariant #3).
+
+    C is the Whisper re-decode output. When the re-decode has not run for
+    a slice (C record missing), the slice is silently skipped: the third
+    detector simply has no opinion there, and a missing detector must not
+    manufacture a dispute (fail-open). Records are ``{index, start_s,
+    end_s, text, language?}``; slices missing from A or B do not qualify
+    either (the high-confidence agreement cannot be established).
+    """
+    b_by_index = {s["index"]: s for s in slices_b}
+    c_by_index: dict[Any, dict[str, Any]] = {s["index"]: s for s in slices_c}
+    spans: list[Span] = []
+    for a in slices_a:
+        b = b_by_index.get(a["index"])
+        c = c_by_index.get(a["index"])
+        if b is None or c is None:
+            continue
+        a_text = str(a.get("text", ""))
+        b_text = str(b.get("text", ""))
+        c_text = str(c.get("text", ""))
+        if not (a_text and b_text and c_text):
+            continue  # an empty side cannot establish agreement or disagreement
+        if slice_similarity(a_text, b_text) < agreement_threshold:
+            continue  # not the high-confidence (currently-clean) case
+        if slice_similarity(a_text, c_text) >= threshold:
+            continue  # the third decode also agrees: nothing to sample
+        language = a.get("language") or b.get("language") or c.get("language")
+        spans.append(Span(float(a["start_s"]), float(a["end_s"]), language))
+    if spans:
+        logger.info(
+            "high-confidence disagreement: %d slice(s) where A≈B but C differs",
+            len(spans),
+        )
+    return merge_spans(spans)

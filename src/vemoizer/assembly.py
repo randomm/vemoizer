@@ -24,7 +24,7 @@ from typing import Any
 
 from .llm import LLMClient
 from .progress import format_duration
-from .slice_align import find_disputed_slices
+from .slice_align import find_disputed_slices, find_high_confidence_disagreement
 from .spans import Span, apply_span_guardrails
 
 logger = logging.getLogger(__name__)
@@ -33,13 +33,18 @@ Candidate = dict[str, str]  # {"source": str, "text": str}
 
 
 def _find_spans(
-    result_a: dict[str, Any] | None, result_b: dict[str, Any] | None
+    result_a: dict[str, Any] | None,
+    result_b: dict[str, Any] | None,
+    result_c: dict[str, Any] | None = None,
 ) -> list[Span]:
     """Disputed spans between the decodes, guardrailed; ``[]`` = no consensus.
 
     The dispute unit is the VAD slice: disputed when its normalized A/B
-    texts diverge below the slice-similarity threshold. The
-    ``VEMOIZER_DISABLE_CONSENSUS=1`` kill-switch and every failure path
+    texts diverge below the slice-similarity threshold. The third decode's
+    per-slice text (*result_c*, issue #62) additionally flags the
+    high-confidence A≈B slices the C text disagrees with — the
+    agreement-on-wrong-answer case the two-way comparison is blind to.
+    The ``VEMOIZER_DISABLE_CONSENSUS=1`` kill-switch and every failure path
     land on ``[]`` — the run ships decode A alone (fail-open).
     """
     if os.environ.get("VEMOIZER_DISABLE_CONSENSUS") == "1":
@@ -54,6 +59,17 @@ def _find_spans(
     if spans is None:
         logger.info("disputed spans: 0 (no comparable slices, re-decode skipped)")
         return []
+    # Issue #62: the two-way A/B comparison is blind to slices both
+    # decoders are confidently wrong on. The third decode is a *detector*
+    # too: when it has produced per-slice text, sample the spans where
+    # A≈B but the C text disagrees. No C result → no C text → no new
+    # spans (zero-cost, no behaviour change for runs without it).
+    slices_c = list((result_c or {}).get("slices") or [])
+    c_records = [
+        {"index": s["index"], "text": str(s.get("text", ""))} for s in slices_c
+    ]
+    if c_records:
+        spans += find_high_confidence_disagreement(slices_a, slices_b, c_records)
     speech_seconds = sum(float(s["end_s"]) - float(s["start_s"]) for s in slices_a)
     guarded = apply_span_guardrails(spans, speech_seconds=speech_seconds)
     if guarded is None:

@@ -13,11 +13,14 @@ import pytest
 
 from vemoizer.eval_harness import (
     AGGREGATE_KEY,
+    agreement_on_wrong,
+    agreement_on_wrong_sample,
     compare_to_baseline,
     corpus_fingerprint,
     glossary_term_hit_rate,
     run_eval,
     run_meeting_eval,
+    similarity,
     wer,
 )
 
@@ -473,3 +476,86 @@ def test_compare_new_sample_missing_from_baseline_flags() -> None:
     measured = {"new": 0.0, AGGREGATE_KEY: 0.0}
     regressions = compare_to_baseline(measured, {AGGREGATE_KEY: 0.0}, tolerance=0.02)
     assert [r.name for r in regressions] == ["new"]
+
+
+# --- similarity / agreement_on_wrong_sample / agreement_on_wrong (#62) ---
+# Informational metric: how often two independent decoders agree with each
+# other AND the shared text is wrong against the reference. Reported, never
+# gated (invariant #2, the WER gate stays the only regression gate).
+
+
+def test_similarity_identical_is_one() -> None:
+    assert similarity("moro aami", "Moro, aami!") == 1.0
+
+
+def test_similarity_both_empty_is_one() -> None:
+    assert similarity("", "") == 1.0
+
+
+def test_similarity_one_empty_is_zero() -> None:
+    assert similarity("abc", "") == 0.0
+
+
+def test_similarity_high_but_not_one() -> None:
+    # Two different sentences: similar but not identical -> between 0 and 1.
+    val = similarity("moro aami", "moro aami mutta")
+    assert 0.0 < val < 1.0
+
+
+def test_agreement_sample_same_wrong_text_is_true() -> None:
+    # Both decoders produce the same text and it is wrong -> agreement on a
+    # wrong answer.
+    assert agreement_on_wrong_sample("moro aami", "x y z", "x y z") is True
+
+
+def test_agreement_sample_same_correct_text_is_false() -> None:
+    # Both decoders agree but the text is right -> not a wrong-answer case.
+    assert agreement_on_wrong_sample("moro aami", "moro aami", "moro aami") is False
+
+
+def test_agreement_sample_different_texts_is_false() -> None:
+    # Decoders do not agree with each other -> not counted regardless of
+    # accuracy.
+    assert (
+        agreement_on_wrong_sample(
+            "moro aami", "completely different text", "entirely other words"
+        )
+        is False
+    )
+
+
+def test_agreement_sample_wrong_but_only_slightly_off_is_false() -> None:
+    # The shared text is close to the reference (WER <= 0.3) -> not "wrong"
+    # enough to count.
+    assert agreement_on_wrong_sample("moro aami", "moro aami", "moro aami") is False
+
+
+def test_agreement_sample_one_side_empty_is_false() -> None:
+    # Total disagreement (one side empty) -> not in agreement.
+    assert agreement_on_wrong_sample("moro aami", "x y z", "") is False
+
+
+def test_agreement_over_mapping_counts_shared_stems() -> None:
+    # Two samples, one agreement-on-wrong, one agreement-correct -> 0.5.
+    refs = {"one": "moro aami", "two": "toista tallaista"}
+    hyp_a = {"one": "x y z", "two": "toista tallaista"}
+    hyp_b = {"one": "x y z", "two": "toista tallaista"}
+    # "one": both agree and wrong -> counts.
+    # "two": both agree and right -> does not count.
+    assert agreement_on_wrong(refs, hyp_a, hyp_b) == pytest.approx(0.5)
+
+
+def test_agreement_over_mapping_empty_is_zero() -> None:
+    assert agreement_on_wrong({"one": "moro aami"}, {}, {"one": "x y z"}) == 0.0
+
+
+def test_agreement_over_mapping_no_shared_stems_is_zero() -> None:
+    refs = {"one": "moro aami", "two": "toista tallaista"}
+    assert agreement_on_wrong(refs, {"one": "x y z"}, {"two": "x y z"}) == 0.0
+
+
+def test_agreement_over_mapping_all_wrong_and_agreeing_is_one() -> None:
+    refs = {"one": "moro aami", "two": "toista tallaista"}
+    hyp_a = {"one": "x y z", "two": "p q r"}
+    hyp_b = {"one": "x y z", "two": "p q r"}
+    assert agreement_on_wrong(refs, hyp_a, hyp_b) == 1.0

@@ -24,6 +24,7 @@ from vemoizer.spans import (
     Span,
     apply_span_guardrails,
     find_disputed_spans,
+    high_confidence_word_pairs,
     merge_spans,
     similarity,
 )
@@ -399,3 +400,59 @@ def test_fraction_guard_skipped_for_short_recordings() -> None:
     is affordable. The fraction abort is a cost bound at scale only."""
     spans = [Span(0.0, 3.0)]
     assert apply_span_guardrails(spans, speech_seconds=3.0) == spans
+
+
+# ---------------------------------------------------------------------------
+# high_confidence_word_pairs(): the agreement-on-wrong-answer input set
+# (issue #62)
+# ---------------------------------------------------------------------------
+
+
+def test_high_confidence_pairs_include_identical_words() -> None:
+    a = make_word("moottori", 0.0, 0.4)
+    pairs = [(a, copy.deepcopy(a))]
+    assert high_confidence_word_pairs(pairs) == pairs
+
+
+def test_high_confidence_pairs_exclude_disputed_words() -> None:
+    # A real disagreement (well below the threshold) is not high-confidence.
+    pairs = [(make_word("moottori", 0.0, 0.4), make_word("piksel", 0.0, 0.4))]
+    assert high_confidence_word_pairs(pairs) == []
+
+
+def test_high_confidence_pairs_boundary_at_threshold_is_included() -> None:
+    # "abde" vs "abce": LCS 3 / longer 4 = 0.75 == HIGH_CONFIDENCE_THRESHOLD.
+    # The rule is >=, so exactly-at-threshold agreement counts as
+    # high-confidence (the A≈B, currently-clean case).
+    pairs = [(make_word("abde", 0.0, 0.4), make_word("abce", 0.0, 0.4))]
+    assert high_confidence_word_pairs(pairs) == pairs
+
+
+def test_high_confidence_pairs_boundary_below_threshold_excluded() -> None:
+    # Just below the threshold: "abc" vs "abd" -> LCS 2 / longer 3 = 0.667
+    # < 0.75, so the pair is not high-confidence.
+    pairs = [(make_word("abc", 0.0, 0.3), make_word("abd", 0.0, 0.3))]
+    assert high_confidence_word_pairs(pairs) == []
+
+
+def test_high_confidence_pairs_never_include_one_sided_pairs() -> None:
+    # A one-sided insertion/deletion cannot be a consensus — a word only
+    # one decoder produced is never high-confidence.
+    pairs = [
+        (make_word("hei", 0.0, 0.3), None),
+        (None, make_word("hei", 0.0, 0.3)),
+    ]
+    assert high_confidence_word_pairs(pairs) == []
+
+
+def test_high_confidence_pairs_empty_input() -> None:
+    assert high_confidence_word_pairs([]) == []
+
+
+def test_high_confidence_pairs_preserve_input_order() -> None:
+    pairs = [
+        (make_word("moottori", 0.0, 0.2), make_word("moottori", 0.0, 0.2)),
+        (make_word("piksel", 0.3, 0.5), make_word("moottori", 0.3, 0.5)),
+        (make_word("kone", 0.6, 0.8), make_word("kone", 0.6, 0.8)),
+    ]
+    assert high_confidence_word_pairs(pairs) == [pairs[0], pairs[2]]

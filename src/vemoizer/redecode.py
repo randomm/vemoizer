@@ -48,6 +48,11 @@ import mlx.core as mx
 import numpy as np
 
 from .models import get_model
+from .slice_align import (
+    SLICE_DISPUTE_THRESHOLD,
+    SLICE_HIGH_CONFIDENCE_THRESHOLD,
+    find_high_confidence_disagreement,
+)
 from .spans import Span
 from .transcriber import TranscriptionResult
 
@@ -134,6 +139,40 @@ def _to_result(span: Span, raw: dict[str, Any]) -> ReDecodeResult:
         text=str(raw.get("text", "")).strip(),
         words=words,
         ok=True,
+    )
+
+
+def third_decode_spans(
+    slices_a: list[dict[str, Any]],
+    slices_b: list[dict[str, Any]],
+    slice_texts: dict[int, str],
+    *,
+    agreement_threshold: float = SLICE_HIGH_CONFIDENCE_THRESHOLD,
+    threshold: float = SLICE_DISPUTE_THRESHOLD,
+) -> list[Span]:
+    """Spans where the third decode acts as a *detector*, not a re-decoder.
+
+    The re-decode normally only ever hears the spans the two-way A/B
+    comparison flagged — so a slice both decoders are confidently wrong
+    on is never re-decoded and the disagreement is never visible
+    (agreement-on-wrong-answer, issue #62). This inverts the dependency:
+    given the per-slice texts the third decode already produced
+    (``{slice_index: text}``, e.g. a whole-file C decode), return the spans
+    where A and B agree at least *agreement_threshold* while the C text
+    disagrees with A by more than *threshold*. Those are the spans to
+    sample for adjudication.
+
+    Slices the third decode has not covered (no entry in *slice_texts*)
+    are skipped — a missing detector cannot manufacture a dispute
+    (fail-open). Slice records are ``{index, start_s, end_s, text,
+    language?}`` from :func:`vemoizer.decode_stage.decode_all`; a slice
+    missing from A or B does not qualify (the high-confidence agreement
+    cannot be established).
+    """
+    return find_high_confidence_disagreement(
+        slices_a,
+        slices_b,
+        [{"index": index, "text": text} for index, text in sorted(slice_texts.items())],
     )
 
 
