@@ -44,7 +44,7 @@ and LLM API keys redacted.
 ## Install as a tool
 
 Install the `vemoizer` command on your PATH and pre-download the
-revision-pinned models (~6 GB):
+revision-pinned models (~8 GB):
 
 ```bash
 uv tool install --editable ~/projects/vemoizer
@@ -56,7 +56,7 @@ vemoizer doctor           # optional: verify the local setup
 
 ```bash
 uv sync --group dev
-uv run vemoizer models pull     # pre-download the revision-pinned models (~6 GB)
+uv run vemoizer models pull     # pre-download the revision-pinned models (~8 GB)
 ```
 
 Requirements: macOS on Apple Silicon, Python ≥ 3.11, `ffmpeg` on PATH.

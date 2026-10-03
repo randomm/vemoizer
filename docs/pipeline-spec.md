@@ -488,10 +488,11 @@ nothing clip-related is ever written to a persistent location, and no
 | Diarization | `pyannote/speaker-diarization-community-1` | n/a (pyannote.audio 4.0.7) | `3533c8cf8e369892e6b79ff1bf80f7b0286a54ee` | ~32 MiB | CC-BY-4.0, HF-gated (form + token) |
 | VAD | silero-vad | bundled in `silero-vad==6.2.1` pip package | package version | bundled | ONNX mode, no separate download |
 
-Expected sizes are measured against the local HuggingFace cache (issue #67) and
-shown per-model in the `models pull` report. The five pipeline models total
-roughly 7.8 GB on disk; loaded lazily and sequentially, all fit on a 16 GB
-Mac.
+Expected sizes are the per-model constants in `_EXPECTED_SIZE_GIB` in
+`src/vemoizer/models.py` (issue #67), measured against the local HuggingFace
+cache and shown per-model in the `models pull` report. The five pipeline
+models total roughly 7.8 GiB on disk; loaded lazily and sequentially, all
+fit on a 16 GB Mac.
 
 The first five rows are the `MODELS` registry in `src/vemoizer/models.py`
 in pipeline order (parakeet, canary, whisper-finnish, whisper-turbo,
@@ -861,9 +862,10 @@ glossary for the `meeting` and `memo` presets:
   ingest time; a missing binary produces an actionable install message).
 - **`uv`** for dependency management (`uv sync --group dev`).
 - **Models live in the HuggingFace cache** (`~/.cache/huggingface/hub`).
-  Budget ~5–6 GB for the three-model consensus set (Parakeet ~1.25 GB,
-  Canary port ~0.7–1 GB, Whisper-large-f16 ~3.3 GB); all three fit on a
-  16 GB Mac when loaded lazily and sequentially.
+  Budget ~7.8 GiB for the five pipeline models (Parakeet ~2.3 GiB, Canary
+  ~1.1 GiB, Whisper-Finnish ~2.9 GiB, Whisper-turbo ~1.5 GiB, pyannote
+  ~32 MiB — per-model sizes in the Model manifest); all fit on a 16 GB
+  Mac when loaded lazily and sequentially.
 - **LLM**: optional, any OpenAI-compatible endpoint via config; API key
   from an environment variable named in the config.
 - Transcription is local, full stop: audio and transcripts never leave the

@@ -168,16 +168,8 @@ def test_pull_report_includes_expected_size() -> None:
         result = runner.invoke(app, ["models", "pull"])
 
     assert result.exit_code == 0
-    # parakeet: ~2.3 GiB
-    assert "~2.3 GiB" in result.stdout
-    # canary: ~1.1 GiB
-    assert "~1.1 GiB" in result.stdout
-    # whisper-finnish: ~2.9 GiB
-    assert "~2.9 GiB" in result.stdout
-    # whisper-turbo: ~1.5 GiB
-    assert "~1.5 GiB" in result.stdout
-    # pyannote: ~32 MiB
-    assert "~32 MiB" in result.stdout
+    for spec in models_mod.MODELS:
+        assert models_mod._expected_size_str(spec.name) in result.stdout
 
 
 def test_render_pull_report_stages_and_sizes() -> None:
@@ -398,6 +390,13 @@ def test_diarization_constants_match_registry() -> None:
     registry = {s.name: s for s in models_mod.MODELS}["pyannote"]
     assert registry.repo_id == DIARIZATION_REPO_ID
     assert registry.revision == DIARIZATION_REVISION
+
+
+def test_stage_and_size_maps_cover_registry() -> None:
+    """STAGES and _EXPECTED_SIZE_GIB stay in sync with the MODELS registry."""
+    names = {s.name for s in models_mod.MODELS}
+    assert set(models_mod.STAGES) == names
+    assert set(models_mod._EXPECTED_SIZE_GIB) == names
 
 
 # ---------------------------------------------------------------------------

@@ -408,7 +408,8 @@ def _expected_size_str(name: str) -> str:
     gib = _EXPECTED_SIZE_GIB.get(name)
     if gib is None:
         return "?"
-    if gib < 0.1:
+    if gib < 0.1:  # 0.1 GiB ≈ 102 MiB: below this, MiB is more readable
+        return f"~{int(gib * 1024)} MiB"
         return f"~{int(gib * 1024)} MiB"
     return f"~{gib:.1f} GiB"
 
@@ -418,7 +419,7 @@ def render_pull_report(results: list[PulledModel], sizes: dict[str, int] | None)
 
     Each model line carries its pipeline stage and expected on-disk size
     (issue #67) so users know what each download is for and what to expect
-    before pulling ~6 GB.
+    before pulling the revision-pinned models (~8 GB total).
     """
     lines: list[str] = []
     for result in results:
