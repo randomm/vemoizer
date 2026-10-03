@@ -8,13 +8,21 @@ or more glossary terms, and is fail-open on any error (it never loses a
 real segment to a filter bug).
 
 The same phenomenon (prompt echo) is classified independently by two
-callers: the transcriber uses the strict form :func:`_is_echo` (every
-word a prompt term — the only thing it is safe to drop is something we
-know to be the prompt), and the eval harness uses its own proportional
-form ``_is_prompt_echo`` (a metric-shape check — a hypothesis that is
-*almost* pure prompt must not count its term hits, so a bit of
-surrounding filler is tolerated). They classify the same phenomenon
-independently with different strictness.
+callers: the transcriber uses the strict form :func:`_is_echo` (an echo is
+a *run* of prompt terms — or a single segment carrying the label — the
+only thing it is safe to drop is something we know to be the prompt), and
+the eval harness uses its own proportional form ``_is_prompt_echo`` (a
+metric-shape check — a hypothesis that is *almost* pure prompt must not
+count its term hits, so a bit of surrounding filler is tolerated). They
+classify the same phenomenon independently with different strictness.
+
+The strict form deliberately keeps a single-word segment that is one
+glossary term (``"Jira."``, ``"Kubernetes"``): a bare term with no other
+words is more often a real one-word answer than a prompt continuation,
+and dropping it would lose real speech. A prompt echo is a *run* of
+prompt terms (``"term, term, …"``) or a segment that carries the
+former label (``"Sanasto"``), which whisper only ever repeats as part of
+the prompt.
 """
 
 from __future__ import annotations
@@ -67,7 +75,12 @@ def _is_echo(text: str, vocab: set[str]) -> bool:
     rebuilding the set on every call.
 
     A segment is an echo when every word is a prompt term (or the former
-    label, which :func:`echo_vocabulary` always includes) — no real
+    label, which :func:`echo_vocabulary` always includes) **and** it is
+    either a *run* of at least two tokens or carries the label token
+    :data:`_PROMPT_LABEL` (case-insensitive). A single-token segment that
+    is one glossary term (``"Jira."``, ``"Kubernetes"``) is **not** an echo
+    and is kept: an echo is a run of prompt terms or the label, not a lone
+    term — a real one-word answer would be lost otherwise. No real
     sentence containing one or more glossary terms can be an echo, because
     it has at least one non-glossary word. The comparison is
     case-insensitive. Hyphenated terms match only when the hyphen survives
@@ -87,8 +100,9 @@ def _is_echo(text: str, vocab: set[str]) -> bool:
     # Tokenize on word boundaries (commas/periods separate tokens; hyphens
     # are word chars, so "NG-TOPI" stays one token and matches the
     # vocabulary's "NG-TOPI" directly).
+    tokens = re.findall(r"\w+[-\w]*", text, re.UNICODE)
     matched = 0
-    for token in re.findall(r"\w+[-\w]*", text, re.UNICODE):
+    for token in tokens:
         norm = token.lower()
         if norm in vocab:
             matched += 1
@@ -97,7 +111,17 @@ def _is_echo(text: str, vocab: set[str]) -> bool:
             # breaks the echo: this is what keeps a genuine sentence that
             # happens to mention a glossary term intact.
             return False
-    return matched > 0
+    if matched == 0:
+        # Punctuation-only or empty: nothing for the model to have
+        # repeated — not an echo.
+        return False
+    if matched >= 2:
+        # A run of prompt terms (the canonical echo shape: ``"term, term,
+        # …"``).
+        return True
+    # Exactly one token: an echo only when it carries the former label
+    # (whisper never echoes a lone term without the label).
+    return _PROMPT_LABEL.lower() in tokens[0].lower()
 
 
 def is_echo(text: str, echo_terms: list[str]) -> bool:
