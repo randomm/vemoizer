@@ -29,6 +29,12 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+
+def _no_api_key() -> str | None:
+    """Default API-key getter: no key is ever redacted."""
+    return None
+
+
 #: ``hf_`` + 8-or-more alphanumerics — the HuggingFace access-token shape
 #: (real tokens are 36 chars). The unbounded quantifier still matches in
 #: linear time (no alternation, no nested quantifier), and a token longer
@@ -57,7 +63,7 @@ class RedactingFormatter(logging.Formatter):
     had them — keeping the run context and the environment in the caller.
     """
 
-    def __init__(self, api_key_getter: Callable[[], str | None] = lambda: None) -> None:
+    def __init__(self, api_key_getter: Callable[[], str | None] = _no_api_key) -> None:
         super().__init__()
         self._api_key_getter = api_key_getter
 

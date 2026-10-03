@@ -167,7 +167,7 @@ def _guard_no_repo_root_output_files():
 
 
 # --- logging-state snapshot (issue #111 M4c) ---------------------------------
-# The ``file_log`` context manager attaches a ``_QuietFileHandler`` to the
+# The ``file_log`` context manager attaches a ``QuietFileHandler`` to the
 # root logger (and optionally the ``huggingface_hub`` logger) and raises
 # the root level to INFO. If a test forgets to exit the ``with`` block (or
 # the context manager raises before ``finally``), the handler and level

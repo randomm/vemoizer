@@ -42,7 +42,8 @@ from typing import cast
 import pytest
 
 import vemoizer.run_log as run_log_module
-from vemoizer.run_log import _QuietFileHandler, configure, file_log, reset_run_log
+from vemoizer.run_log import configure, file_log, reset_run_log
+from vemoizer.run_log_io import _HF_TOKEN_RE, QuietFileHandler
 
 pytestmark = pytest.mark.usefixtures("run_log_state")
 
@@ -454,8 +455,6 @@ class TestRedaction:
         in linear time (no catastrophic backtracking on a repeated prefix)."""
         import time
 
-        from vemoizer.run_log import _HF_TOKEN_RE
-
         pathological = "hf_" + ("a" * 9 + "!") * 5000
         start = time.perf_counter()
         _HF_TOKEN_RE.sub("redacted", pathological)
@@ -527,7 +526,7 @@ class TestFailOpen:
             orig_stream = handler.stream
             _set_stream(handler, _RaisingStream())
             logging.getLogger("vemoizer.t").info("boom during write")
-            # The handler may be a _QuietFileHandler (with _disabled) or a
+            # The handler may be a QuietFileHandler (with _disabled) or a
             # base FileHandler (without it); either way, the write failure
             # must not escape and the handler must be disabled/closed.
             if hasattr(handler, "_disabled"):
@@ -660,7 +659,7 @@ class TestRelativeUndo:
     def test_undo_is_idempotent(self, tmp_path: Path):
         """Detaching twice must be harmless (identity-based removal is a
         no-op on already-removed instances)."""
-        handler = _QuietFileHandler(str(tmp_path / "i.log"), mode="w")
+        handler = QuietFileHandler(str(tmp_path / "i.log"), mode="w")
         handler.setLevel(logging.INFO)
         undo = run_log_module._attach(handler, verbose=False)
         run_log_module._detach(undo)

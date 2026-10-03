@@ -1,7 +1,7 @@
 """RedactingFormatter per-record API-key getter behaviour (issue #117).
 
 The formatter must call its ``api_key_getter`` on EVERY record (the original
-``run_log._RedactingFormatter`` called ``_api_key_value()`` per record), so
+``run_log_io.RedactingFormatter`` calls the getter per record), so
 a mid-span ``configure`` change or environment change is honoured, and the
 getter must not be invoked at construction time.
 """

@@ -11,7 +11,8 @@ is False its records never reach root, so the handler is attached directly
 there too — never twice (design 1). A span writes one INFO ``log started
 for <stem>`` line on open; a nested same-stem span adds no second line.
 
-Privacy: a :class:`_RedactingFormatter` rewrites the message and
+Privacy: a :class:`~vemoizer.run_log_io.RedactingFormatter` rewrites the
+message and
 exception text, so HuggingFace tokens (``hf_…``), ``Bearer …`` header
 values, and the ``api_key_env`` value can never land in a log (design 4).
 
@@ -34,16 +35,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .run_log_io import (
-    _BEARER_RE,  # noqa: F401 - re-exported for test access
-    _HF_TOKEN_RE,  # noqa: F401 - re-exported for test access
-    QuietFileHandler,
-    RedactingFormatter,
-)
-
-# Private aliases for the classes (tests import these by their old names).
-_RedactingFormatter = RedactingFormatter
-_QuietFileHandler = QuietFileHandler
+from .run_log_io import QuietFileHandler, RedactingFormatter
 
 __all__ = ["configure", "file_log", "reset_run_log"]
 
@@ -415,7 +407,7 @@ def _claim(base_dir: Path, stem: str, claim_key: str) -> Path:
 
 def _open_log_file(
     base: Path, stem: str, key: str, quiet: bool | None
-) -> _QuietFileHandler | None:
+) -> QuietFileHandler | None:
     """Create the log directory/file and return the handler (fail-open).
 
     Returns ``None`` (with a once-per-run notice) when the directory or
