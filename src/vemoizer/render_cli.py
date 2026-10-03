@@ -9,8 +9,10 @@ Glossary resolution mirrors ``run_preset``: the layered glossary
 (project + home layers, in that order) is used unless ``--glossary``
 replaces both layers entirely. The stored ``options.glossary_sha256``
 is the sha256 over the run's **prompt-term set** — the non-correction,
-non-``@`` lines after layer merge, exactly what ``glossary_prompt``
-feeds to whisper — and render recomputes the same hash (via the shared
+non-``@`` lines after layer merge, deduped case-insensitively (first-seen
+spelling wins), i.e. the canonical deduplicated prompt-term set that is
+the input to ``glossary_prompt`` before its token-budget truncation —
+and render recomputes the same hash (via the shared
 :func:`vemoizer.sidecar.prompt_term_set_hash`) over the current
 glossary files. Only a change to that set prints a drift warning;
 correction pairs (``wrong => right``) and ``@``-prefixed LLM-only names
@@ -126,6 +128,25 @@ def _load_corrections(files: list[Path]) -> dict[str, str]:
     return corrections
 
 
+def _atomic_write_text(target: Path, content: str) -> None:
+    """Write *content* to *target* atomically (temp file + ``os.replace``).
+
+    The temp file is created in the **same directory** as *target* so the
+    replace is atomic on the same filesystem. ``os.replace`` over a symlink
+    replaces the symlink itself (not the pointed-to file), making the
+    write symlink-safe. On failure the temp file is cleaned up.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f"{target.name}.tmp-{os.getpid()}")
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        os.replace(str(tmp), str(target))
+    except OSError:
+        with contextlib.suppress(OSError):  # cleanup is best-effort
+            tmp.unlink(missing_ok=True)
+        raise
+
+
 def _persist_speaker_names(
     sidecar_path: Path, sidecar: dict[str, Any], names: dict[str, str]
 ) -> None:
@@ -142,14 +163,7 @@ def _persist_speaker_names(
     sidecar["speaker_names"].update(names)
 
     payload = json.dumps(sidecar, ensure_ascii=False, indent=2) + "\n"
-    tmp = sidecar_path.with_name(f"{sidecar_path.name}.tmp-{os.getpid()}")
-    try:
-        tmp.write_text(payload, encoding="utf-8")
-        os.replace(str(tmp), str(sidecar_path))
-    except OSError:
-        with contextlib.suppress(OSError):  # cleanup is best-effort
-            tmp.unlink(missing_ok=True)
-        raise
+    _atomic_write_text(sidecar_path, payload)
 
 
 def register_render(app) -> None:
@@ -251,8 +265,7 @@ def register_render(app) -> None:
         # --- Write output ---
         if out is not None:
             try:
-                out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_text(markdown, encoding="utf-8")
+                _atomic_write_text(out, markdown)
             except OSError as e:
                 typer.echo(f"error: could not write {out}: {e}", err=True)
                 raise typer.Exit(code=1) from e
@@ -260,7 +273,7 @@ def register_render(app) -> None:
         else:
             md_path = sidecar_path.with_suffix(".md")
             try:
-                md_path.write_text(markdown, encoding="utf-8")
+                _atomic_write_text(md_path, markdown)
             except OSError as e:
                 typer.echo(f"error: could not write {md_path}: {e}", err=True)
                 raise typer.Exit(code=1) from e
