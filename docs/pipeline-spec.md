@@ -483,7 +483,8 @@ After each window's decode, the segments pass a post-decode echo filter
 every token is a glossary term (or the former label `Sanasto`) **and** it
 is a run of ≥ 2 terms or carries the label (a single bare term is kept).
 The filter is fail-open: on any error the segments are returned unfiltered,
-with one warning logged.
+with one warning logged, or — if the words-extraction fallback also
+fails — two warnings (one for the error, one for the words degradation).
 
 ## CLI spec
 

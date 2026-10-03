@@ -124,9 +124,14 @@ def _is_prompt_echo(words: list[str], glossary: set[str]) -> bool:
     transcriber's strict drop filter (``echo_filter._is_echo``) — the two
     classify the same phenomenon with different tokenization and
     strictness (see the module docstring in ``echo_filter``): this form
-    uses :func:`vemoizer.textnorm.textnorm` to normalize every word (so a
-    hyphen transcribed as a space still matches a hyphenated glossary term)
-    and tolerates up to
+    runs every word through :func:`vemoizer.textnorm.textnorm` (the same
+    normalizer as the hypothesis words), which casefolds, replaces
+    punctuation — hyphens included — with spaces, and collapses
+    whitespace. Because the glossary token set is built from the same
+    normalization, a hyphenated term and an echo that transcribes it with
+    or without the hyphen land on the same fragment tokens (``NG-TOPI`` →
+    ``ng topi`` on both sides), so the hyphen never breaks the match; it
+    tolerates up to
     :data:`_PROMPT_ECHO_OUTSIDE_FRACTION` of the words falling outside the
     glossary, because it only gates a metric and must not lose real term
     hits on a real sentence that happens to contain a few glossary words.
