@@ -37,12 +37,15 @@ from .glossary import (
     load_glossary,
 )
 from .ingest import IngestError, ingest_audio
-from .llm import (
-    LLMClient,
+from .llm import LLMClient, load_config, load_default_config
+from .llm_config import (
+    LLM_CONFIG_SECTION,
     LLMConfig,
-    load_default_config,
-    load_language,
-    load_meeting_language,
+    _parse_llm_section,
+    _parse_meeting_language,
+    _parse_section_language,
+    _read_toml,
+    _resolve_config_path,
 )
 from .llm_tail import apply_llm_tail
 from .notes import generate_notes  # noqa: F401
@@ -297,22 +300,54 @@ def transcribe_file(
         format_duration(time.monotonic() - ingest_start),
     )
 
-    llm_config = load_default_config(config_path)
+    # One config read per run (issue #108 review): the layered search
+    # (issue #82) resolves the file once and its TOML is parsed once; the
+    # LLM section, the ``[meeting]`` recognition-language override, and
+    # the cosmetic section language all read from that same raw dict.
+    config_file = _resolve_config_path(config_path)
+    config_raw = _read_toml(config_file) if config_file is not None else None
+    if config_file is not None:
+        # Explicit path: the fail-open ``load_config`` contract (missing or
+        # malformed file → ``None``) applies to explicit paths (issue #82).
+        llm_config = load_config(config_file)
+    else:
+        # No explicit path: strict project/home layer, fail-open legacy
+        # (issue #82) — exactly the pre-refactor ``load_default_config``
+        # contract, so a malformed project config still fails loud via the
+        # batch layer's pre-check.
+        llm_config = load_default_config(None)
+    if isinstance(config_raw, dict):
+        section_raw = config_raw.get(LLM_CONFIG_SECTION)
+    else:
+        section_raw = None
+    if isinstance(section_raw, dict):
+        # The section read itself is fail-open on every path (matching the
+        # pre-refactor explicit-path contract); on the layered path the
+        # strict ``load_default_config`` above already ran and wins on
+        # success.
+        parsed = _parse_llm_section(section_raw)
+        if parsed is not None:
+            llm_config = parsed
     # Issue #108, option B: an explicit run-level recognition-language
     # choice (CLI ``--language`` / presets ``RunOptions.language``),
-    # else the ``[meeting] language`` config key, else per-window
-    # detection (``None``). ``"auto"`` and other non-codes never pin.
+    # else the ``[meeting] language`` key of the same config file, else
+    # per-window detection (``None``). ``"auto"`` and other non-codes
+    # never pin — ``transcribe_file`` is the single coercion point.
     meeting_language: str | None
     if language is not None and language != "auto":
         meeting_language = language
     else:
-        configured = load_meeting_language(config_path)
+        if isinstance(config_raw, dict):
+            meeting_section = config_raw.get("meeting")
+        else:
+            meeting_section = None
+        configured = _parse_meeting_language(meeting_section)
         meeting_language = None if configured == "auto" else configured
     # M6 (issue #75): duration (decoded-audio, never ffprobe) and section
     # language ride on the run dict — format_md / the report read them.
     result: dict[str, Any] = {
         "duration_s": len(audio) / SAMPLE_RATE,
-        "language": _normalize_language(load_language(config_path)),
+        "language": _normalize_language(_parse_section_language(config_raw)),
     }
     logger.info(
         "LLM adjudication: %s", "configured" if llm_config is not None else "disabled"

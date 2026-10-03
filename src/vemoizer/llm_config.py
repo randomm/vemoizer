@@ -68,6 +68,9 @@ _KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
 _KNOWN_LLM_KEYS: frozenset[str] = frozenset(
     {"base_url", "model", "api_key_env", "timeout_seconds"}
 )
+#: Known ``[meeting]`` keys for strict validation (issue #108): the single
+#: ``language`` override — a typo (e.g. ``langugae``) is warned, not fatal.
+_KNOWN_MEETING_KEYS: frozenset[str] = frozenset({"language"})
 DEVNULL_SENTINEL: str = "os.devnull"
 
 
@@ -156,6 +159,8 @@ def _strict_load(path: Path) -> LLMConfig:
     if raw is None:
         raise ConfigError(f"config file not found or unreadable: {path}")
 
+    _validate_sections(raw, path)
+
     for key, value in raw.items():
         if key not in _KNOWN_TOP_LEVEL_KEYS:
             raise ConfigError(f"unknown top-level key or section {key!r} in {path}")
@@ -182,10 +187,6 @@ def _strict_load(path: Path) -> LLMConfig:
         # validated here: non-string items are filtered at read time.
         raise ConfigError(f"top-level 'people' must be a list in {path}")
 
-    for key in section:
-        if key not in _KNOWN_LLM_KEYS:
-            raise ConfigError(f"unknown key {LLM_CONFIG_SECTION}.{key} in {path}")
-
     config = _parse_llm_section(section)
     if config is None:
         raise ConfigError(
@@ -193,6 +194,61 @@ def _strict_load(path: Path) -> LLMConfig:
             f"(required: base_url, model, api_key_env, timeout_seconds>0)"
         )
     return config
+
+
+def _validate_sections(raw: dict[str, Any], path: Path) -> None:
+    """Validate table sections (``[llm]`` / ``[meeting]``) in *raw*.
+
+    ``[llm]`` is strict (a malformed section must not silently disable the
+    LLM); ``[meeting]`` is warned-only — its single ``language`` key is
+    cosmetic (a typo just falls back to auto-detect), so a strict reject
+    would trade a harmless typo for a failing run.
+    """
+    for key in raw:
+        value = raw[key]
+        if not isinstance(value, dict):
+            continue
+        known = _KNOWN_LLM_KEYS if key == LLM_CONFIG_SECTION else _KNOWN_MEETING_KEYS
+        for sub in value:
+            if sub not in known:
+                if key == LLM_CONFIG_SECTION:
+                    raise ConfigError(f"unknown key {key}.{sub} in {path}")
+                print(
+                    f"vemoizer: unknown key {key}.{sub} in {path} (ignored)",
+                    file=sys.stderr,
+                )
+
+
+def _parse_meeting_language(section: dict[str, Any] | None) -> str:
+    """The ``[meeting] language`` value of an already-parsed config.
+
+    Fail-open: ``None`` (no section), a non-string value, or any value
+    other than ``"fi"`` / ``"en"`` (case-insensitive) all yield
+    ``"auto"`` (per-window detection).
+    """
+    if not isinstance(section, dict):
+        return "auto"
+    value = section.get("language")
+    if not isinstance(value, str):
+        return "auto"
+    lowered = value.strip().lower()
+    if lowered in ("fi", "en", "auto"):
+        return lowered
+    return "auto"
+
+
+def _parse_section_language(raw: dict[str, Any] | None) -> str:
+    """The top-level ``language`` value of an already-parsed config.
+
+    Fail-open: an absent/non-string value yields ``"fi"``; only
+    ``"en"`` (case-insensitive) selects the English heading language.
+    """
+    if not isinstance(raw, dict):
+        return "fi"
+    value = raw.get("language")
+    if not isinstance(value, str):
+        return "fi"
+    return "en" if value.strip().lower() == "en" else "fi"
 
 
 def _legacy_search(legacy_paths: tuple[Path, ...] | None = None) -> LLMConfig | None:
@@ -208,6 +264,29 @@ def _legacy_search(legacy_paths: tuple[Path, ...] | None = None) -> LLMConfig | 
             print(LEGACY_DEPRECATION_NOTICE, file=sys.stderr)
         return config
     return None
+
+
+def _resolve_config_path(path: str | None) -> Path | None:
+    """The config file *path* designates, or ``None``.
+
+    Explicit path: as given. ``"os.devnull"`` sentinel: ``None`` (no
+    config). Omitted: the documented layered search (project walk-up →
+    home → legacy, issue #82) — the first EXISTING file wins, no per-key
+    merging. Single source of "which config file wins" for the
+    ``load_*`` readers.
+    """
+    if path is not None:
+        if path == DEVNULL_SENTINEL:
+            return None
+        return Path(path)
+
+    candidate = _find_nearest_vemoizer_config(Path.cwd())
+    if candidate is None:
+        home_candidate = Path.home() / ".vemoizer" / "config.toml"
+        if home_candidate.is_file():
+            return home_candidate
+        candidate = next((p for p in _LEGACY_CONFIG_PATHS if p.is_file()), None)
+    return candidate
 
 
 def _default_search(
@@ -251,20 +330,11 @@ def load_language(path: str | None = None) -> str:
     all yield ``"fi"`` — the language is cosmetic, so the read is
     fail-open, never an error.
     """
-    if path is not None and path != DEVNULL_SENTINEL:
-        raw = _read_toml(Path(path))
-    elif path is not None:
-        # "os.devnull" sentinel: no config at all → default.
-        return "fi"
-    else:
-        candidate = _find_nearest_vemoizer_config(Path.cwd())
-        raw = _read_toml(candidate) if candidate is not None else None
+    candidate = _resolve_config_path(path)
+    raw = _read_toml(candidate) if candidate is not None else None
     if not isinstance(raw, dict):
         return "fi"
-    value = raw.get("language")
-    if not isinstance(value, str):
-        return "fi"
-    return "en" if value.strip().lower() == "en" else "fi"
+    return _parse_section_language(raw)
 
 
 def load_meeting_language(path: str | None = None) -> str:
@@ -278,36 +348,11 @@ def load_meeting_language(path: str | None = None) -> str:
     unlike the top-level ``language`` key this one controls RECOGNITION,
     not the Markdown heading language.
     """
-    if path is not None and path != DEVNULL_SENTINEL:
-        raw = _read_toml(Path(path))
-    elif path is not None:
-        # "os.devnull" sentinel: no config at all → auto-detect.
-        return "auto"
-    else:
-        # Match the documented config search order (project walk-up →
-        # home → legacy, issue #82). The layered search is whole-file —
-        # the first EXISTING file wins, no per-key merging — so the
-        # [meeting] section is read only from the file that layer selects.
-        candidate = _find_nearest_vemoizer_config(Path.cwd())
-        if candidate is None or not candidate.is_file():
-            candidate = Path.home() / ".vemoizer" / "config.toml"
-        if candidate is None or not candidate.is_file():
-            candidate = next((p for p in _LEGACY_CONFIG_PATHS if p.is_file()), None)
-        raw = _read_toml(candidate) if candidate is not None else None
+    candidate = _resolve_config_path(path)
+    raw = _read_toml(candidate) if candidate is not None else None
     if not isinstance(raw, dict):
         return "auto"
-    section = raw.get("meeting")
-    if not isinstance(section, dict):
-        return "auto"
-    value = section.get("language")
-    if not isinstance(value, str):
-        return "auto"
-    lowered = value.strip().lower()
-    if lowered == "en":
-        return "en"
-    if lowered in ("fi", "auto"):
-        return lowered
-    return "auto"
+    return _parse_meeting_language(raw.get("meeting"))
 
 
 def load_default_config(path: str | None = None) -> LLMConfig | None:

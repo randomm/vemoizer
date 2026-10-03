@@ -41,7 +41,6 @@ from vemoizer.cli_support import (
 from vemoizer.eval_cli import register_eval
 from vemoizer.glossary_check import register_glossary
 from vemoizer.names_cli import register_names
-from vemoizer.presets import LANGUAGE_VALUES as _LANGUAGE_VALUES
 from vemoizer.render_cli import register_render
 
 app = typer.Typer(
@@ -372,13 +371,6 @@ def meeting(
     display = make_batch_display(quiet=quiet)
     speaker_count = _parse_speakers(speakers)
     lowered = language.strip().lower()
-    if lowered not in _LANGUAGE_VALUES:
-        known = ", ".join(_LANGUAGE_VALUES)
-        typer.echo(
-            f"error: unknown language {language!r} (known: {known})",
-            err=True,
-        )
-        raise typer.Exit(code=2)
     try:
         exit_code = run_preset(
             files,
@@ -394,6 +386,11 @@ def meeting(
             no_group=no_group,
             display=display,
         )
+    except ValueError as e:
+        # Unknown --language value (resolve_options validates against
+        # LANGUAGE_VALUES, issue #108): clean exit 2, never a traceback.
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(code=2) from None
     finally:
         if display is not None:
             display.close()
