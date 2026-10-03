@@ -42,13 +42,27 @@ were made. No endorsement is implied.
 - Number of clips: `28`
 - Duration window: `[3.5, 5.5]` seconds
 - Word-count window: `[8, 18]` words
-- Selection method: `random.Random(seed).sample(candidates, n)` over
-  candidates sorted by `(id, row_index)`.
+- Selection method: the committed 28 clips are selected by the script's
+  default `--ids` list (the authoritative clip ids are recorded below);
+  the seeded window draw (`random.Random(seed).sample` over candidates
+  sorted by `(id, row_index)`) is the documented original draw that
+  produced this set. Re-running the script with the default args
+  regenerates exactly the committed 28 clips, byte-identically.
 
-The same input parquet + the same parameters always produces the same
-set of clips (byte-identical WAVs), so the corpus is stable across
-re-runs. The parquet file is a one-time dev-time download (never a
-runtime dependency of `vemoizer`); the script does not fetch on its own.
+**Committed clip ids** (the authoritative selection, in `(id, take)`
+order; a take `b` is the second row of the same FLEURS `id` in
+`(id, row_index)` order):
+
+```
+24, 25, 34, 36, 36b, 204, 235, 238, 246, 252, 533, 596, 604, 630,
+656, 692, 711, 732, 748, 748b, 800, 991, 1039, 1046, 1096, 1290,
+1324, 1343
+```
+
+The same input parquet + the same id list always produces the same set
+of clips (byte-identical WAVs), so the corpus is stable across re-runs.
+The parquet file is a one-time dev-time download (never a runtime
+dependency of `vemoizer`); the script does not fetch on its own.
 
 **Note on the `fleurs_fi_<id>`, `fleurs_fi_<id>b`, ... stems:** the FLEURS
 parquet keys rows by utterance `id`, not by clip — several rows share an

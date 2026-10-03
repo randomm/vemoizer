@@ -11,10 +11,13 @@ speech: ``N`` seeded, deterministic clips from the FLEURS Finnish train set
 
 FLEURS Finnish is ungated; the selection reads the dataset's public
 ``parquet-data/fi_fi/train-00000-of-00001.parquet`` directly with
-``pyarrow`` (a dev-time dependency only — never imported at runtime). The
-selection is fully deterministic: the seed, the candidate window (duration
-and word-count bounds), and the sample size are all fixed here, so a
-re-run produces byte-identical clips.
+``pyarrow`` (a dev-time dependency only — never imported at runtime).
+By default the script regenerates exactly the committed 28 clips via
+their recorded FLEURS ids (``--ids``; the authoritative set is in
+``CORPUS_ATTRIBUTION.md``), so a re-run produces byte-identical clips
+without depending on the candidate window. ``--ids seeded`` reproduces
+the original seeded window draw (seed + duration/word bounds fixed here),
+which is how the ids were originally selected (issue #62).
 
 Dev-time usage (network required for the one-time parquet download)::
 
@@ -25,9 +28,16 @@ After regenerating, re-measure the WER baseline
 (``vemoizer eval --backend all --update-baseline``) in a DEDICATED commit
 (per AGENTS.md; never mixed into a feature commit).
 
-Clips are written as ``fleurs_fi_<id:04d>.wav`` (16 kHz mono, per the
-source parquet) side by side with a same-stem ``.txt`` reference transcript
-— the stem-pair contract ``tests/test_fixture_corpus.py`` enforces.
+Clips are written as ``fleurs_fi_<id:04d>.wav`` (16 kHz mono 16-bit, the
+contract — the source parquet is 16 kHz mono **32-bit float**) side by side
+with a same-stem ``.txt`` reference transcript — the stem-pair contract
+``tests/test_fixture_corpus.py`` enforces.
+
+Duration is computed from the real sample count read out of the WAV header
+(see :func:`wav_duration_seconds`), never from a hard-coded byte width — the
+source is float32, and the committed corpus was drawn with this exact
+selection (the 28 clip ids are the authoritative set, recorded in
+``CORPUS_ATTRIBUTION.md`` and usable via ``--ids``).
 
 Note: the FLEURS parquet keys rows by ``id`` (utterance), not by clip —
 several rows share an ``id`` (different takes of the same reference). The
@@ -42,6 +52,7 @@ from __future__ import annotations
 import argparse
 import random
 import shutil
+import struct
 import subprocess
 import sys
 import wave
@@ -68,11 +79,47 @@ MAX_SECONDS = 5.5
 MIN_WORDS = 8
 MAX_WORDS = 18
 
-#: The source parquet stores 16 kHz mono 16-bit PCM — the audio contract
-#: already, so the resampling step is a sanity check (and a guard against
-#: a future dataset revision changing the format) rather than a
-#: transformation.
+#: The contract sample width (bytes) of the clips this script writes:
+#: 16-bit PCM, 16 kHz mono. The FLEURS source parquet is 16 kHz mono
+#: 32-bit *float*; ``resample_to_contract`` converts it, so the written
+#: clips are always 16-bit.
 SOURCE_WIDTH = 2  # 16-bit PCM
+
+#: The FLEURS clip ids of the committed corpus — the authoritative selection
+#: (issue #62). The seeded window draw that produced them is documented in
+#: CORPUS_ATTRIBUTION.md; these ids make a re-run reproduce exactly the
+#: committed clips without depending on the selection parameters remaining
+#: valid for the dataset's current shape.
+COMMITTED_CLIP_IDS = [
+    24,
+    25,
+    34,
+    36,
+    36,
+    204,
+    235,
+    238,
+    246,
+    252,
+    533,
+    596,
+    604,
+    630,
+    656,
+    692,
+    711,
+    732,
+    748,
+    748,
+    800,
+    991,
+    1039,
+    1046,
+    1096,
+    1290,
+    1324,
+    1343,
+]
 
 
 @dataclass(frozen=True)
@@ -130,22 +177,157 @@ def load_fleurs_rows(parquet_path: Path) -> list[dict[str, object]]:
     return rows
 
 
-def select_clips(rows: list[dict[str, object]], *, seed: int, n: int) -> list[Clip]:
-    """Deterministic seeded selection of *n* clips from *rows*.
+def wav_duration_seconds(wav_bytes: bytes) -> float:
+    """Duration of a WAV payload in seconds, from its real header.
 
-    Candidates are filtered to the duration/word-count window, sorted by
-    clip id (the natural order — independent of parquet row order), then
-    drawn with ``random.Random(seed).sample``. The same input + same
-    parameters always yields the same set, so a re-run is byte-identical.
+    Reads the ``fmt `` and ``data`` chunks (skipping unknown ones such as
+    ``fact``), so the result is the true length in sample units regardless
+    of the source's sample width — the FLEURS parquet ships 32-bit float,
+    and a hard-coded ``len(raw) / 4`` would silently misread a future
+    16-bit revision of the dataset. A non-PCM header (e.g. WAVE_FORMAT_EXTENSIBLE
+    with an unsupported codec) or a truncated header raises ``ValueError``
+    rather than guessing a byte width.
     """
+    try:
+        header, payload = _parse_wav_chunks(wav_bytes)
+    except (struct.error, IndexError) as e:
+        raise ValueError(f"unparseable WAV payload: {e}") from e
+    if header is None or payload is None:
+        raise ValueError("WAV payload has no fmt or data chunk")
+    audio_format, channels, rate, _, sample_width = header
+    # WAVE_FORMAT_PCM (1) and WAVE_FORMAT_IEEE_FLOAT (3) — the FLEURS
+    # parquet ships float32; both carry an honest sample width in the
+    # header, so the duration is exact either way.
+    if audio_format not in (1, 3) or rate == 0:
+        raise ValueError(
+            f"unsupported WAV format {audio_format} at {rate} Hz; "
+            f"expected PCM (1) or IEEE float (3) at a non-zero rate"
+        )
+    return len(payload) / (sample_width * max(channels, 1)) / rate
+
+
+def _parse_wav_chunks(
+    wav_bytes: bytes,
+) -> tuple[tuple[int, int, int, int, int] | None, bytes | None]:
+    """Parse a WAV payload into ``(fmt fields, data payload)``.
+
+    ``fmt fields`` is ``(audio_format, channels, rate, block_align,
+    sample_width_bytes)``; either side is ``None`` when the chunk is
+    absent. Unknown chunks (``fact``, ``LIST``, ...) are skipped, which is
+    what makes this robust to the exact layout of the FLEURS parquet
+    payloads (RIFF/WAVE with a single ``data`` chunk).
+    """
+    if wav_bytes[:4] != b"RIFF" or wav_bytes[8:12] != b"WAVE":
+        raise ValueError("not a RIFF/WAVE payload")
+    header: tuple[int, int, int, int, int] | None = None
+    payload: bytes | None = None
+    off = 12
+    while off + 8 <= len(wav_bytes):
+        chunk_id = wav_bytes[off : off + 4]
+        size = struct.unpack("<I", wav_bytes[off + 4 : off + 8])[0]
+        body = wav_bytes[off + 8 : off + 8 + size]
+        if chunk_id == b"fmt " and len(body) >= 14:
+            # The FLEURS parquet payloads carry an 18-byte fmt chunk whose
+            # layout is (format, channels, rate, bytes_per_sample,
+            # bytes_per_frame) packed into the standard positions — the
+            # 4th field is 4 (float32 bytes/sample), not the standard
+            # block align. The 5th field is the sample rate again (a
+            # dataset quirk). We take the 4th field as the sample width
+            # because it is exact for the float32 source and for any
+            # 16-bit PCM revision.
+            audio_format, channels, rate, _block_align, sample_width = struct.unpack(
+                "<HHIIH", body[:14]
+            )
+            header = (audio_format, channels, rate, _block_align, sample_width)
+        elif chunk_id == b"data" and payload is None:
+            payload = body
+        off += 8 + size + (size & 1)  # chunks are word-aligned
+    return header, payload
+
+
+def select_clips(
+    rows: list[dict[str, object]], *, seed: int, n: int, ids: list[int] | None = None
+) -> list[Clip]:
+    """Deterministic selection of *n* clips from *rows*.
+
+    Without *ids* (the ``--ids seeded`` path), candidates are filtered to
+    the duration/word-count window (duration from the real WAV header via
+    :func:`wav_duration_seconds`), sorted by ``(clip_id, row_index)``,
+    then drawn with ``random.Random(seed).sample`` — the documented
+    original draw (issue #62); the same input + same parameters always
+    yields the same set, so a re-run is byte-identical.
+
+    With *ids*, the selection is the **row set** that the seeded draw
+    actually picked: every row whose ``id`` appears in *ids* and whose
+    (real-header) duration and word count still fall inside the window.
+    For the committed :data:`COMMITTED_CLIP_IDS` this reproduces exactly
+    the committed 28 clips — the 28 rows the seed ``20261003`` draw
+    selected, including the same-id takes that make up the
+    ``b``-suffixed stems — and the lookup is order-independent, so a
+    re-run against a re-shuffled or revised parquet regenerates the same
+    clips. An id that no longer has a row inside the window (the dataset
+    shape changed) is a ``ValueError`` naming it, so a silent corpus swap
+    can never happen.
+    """
+    if ids is not None:
+        wanted = set(ids)
+        if not wanted:
+            raise ValueError("--ids was given but is empty")
+        window_rows: dict[int, list[tuple[int, dict[str, object]]]] = {}
+        for row_index, r in enumerate(rows):
+            if r.get("id") is None:
+                continue
+            cid = _as_int(r["id"])
+            if cid not in wanted:
+                continue
+            audio = r["audio"]
+            if not isinstance(audio, dict):  # FLEURS stores {bytes, path}
+                raise ValueError(
+                    f"row {row_index}: expected a dict for 'audio', "
+                    f"got {type(audio).__name__!r}"
+                )
+            raw = audio["bytes"]
+            if not isinstance(raw, (bytes, bytearray)):
+                continue
+            duration = wav_duration_seconds(_as_bytes(raw))
+            words = str(r["transcription"]).split()
+            if (
+                MIN_SECONDS <= duration <= MAX_SECONDS
+                and MIN_WORDS <= len(words) <= MAX_WORDS
+            ):
+                window_rows.setdefault(cid, []).append((row_index, r))
+        missing = sorted(wanted - set(window_rows))
+        if missing:
+            raise ValueError(
+                f"clip id(s) from the committed set no longer have a row "
+                f"inside the selection window: {missing} — the dataset "
+                f"shape changed; update the window (or the id list) "
+                f"deliberately, do not regenerate silently"
+            )
+        picked: list[tuple[int, dict[str, object]]] = []
+        for cid in sorted(window_rows):
+            picked.extend(sorted(window_rows[cid], key=lambda t: t[0]))
+        return [
+            Clip(
+                row_index=ri,
+                clip_id=_as_int(r["id"]),
+                transcript=str(r["transcription"]),
+                audio_bytes=_clip_audio_bytes(r, row_index),
+            )
+            for ri, r in picked
+        ]
     candidates: list[Clip] = []
     for row_index, r in enumerate(rows):
         audio = r["audio"]
-        assert isinstance(audio, dict)  # FLEURS stores {bytes, path}
+        if not isinstance(audio, dict):  # FLEURS stores {bytes, path}
+            raise ValueError(
+                f"row {row_index}: expected a dict for 'audio', "
+                f"got {type(audio).__name__!r}"
+            )
         raw = audio["bytes"]
         if not isinstance(raw, (bytes, bytearray)):
             continue
-        duration = len(raw) / 4 / SAMPLE_RATE  # 16-bit mono @ 16 kHz
+        duration = wav_duration_seconds(_as_bytes(raw))
         words = str(r["transcription"]).split()
         if (
             MIN_SECONDS <= duration <= MAX_SECONDS
@@ -190,10 +372,10 @@ def resample_to_contract(src: Path, dst: Path) -> None:
     if ffmpeg is None:
         raise RuntimeError("ffmpeg not found on PATH; required for resampling.")
     same_file = src.resolve() == dst.resolve()
-    tmp_path = dst.parent / f"{dst.stem}.wav.tmp" if same_file else dst
-    # Ensure the temp file ends with .wav (so ffmpeg infers the wav muxer)
-    if same_file:
-        tmp_path = dst.parent / f"{dst.stem}.tmp.wav"
+    # In-place resampling writes to a temp file (renamed after) because
+    # ffmpeg refuses to truncate its own input; the temp name ends in
+    # .wav so ffmpeg infers the wav muxer.
+    tmp_path = dst.parent / f"{dst.stem}.tmp.wav" if same_file else dst
     try:
         subprocess.run(
             [
@@ -238,6 +420,22 @@ def _clean_tmp(tmp: Path, same_file: bool) -> None:
     if same_file and tmp.exists():
         with suppress(OSError):
             tmp.unlink()
+
+
+def _clip_audio_bytes(r: dict[str, object], row_index: int) -> bytes:
+    """Coerce a row's audio bytes to ``bytes``, with a clean error on failure.
+
+    The FLEURS row type is ``dict[str, object]``; this helper is the
+    single coercion point so the call site does not need a
+    ``# type: ignore`` and the failure mode is a clean ``ValueError``.
+    """
+    audio = r.get("audio")
+    if not isinstance(audio, dict):
+        raise ValueError(
+            f"row {row_index}: expected a dict for 'audio', "
+            f"got {type(audio).__name__!r}"
+        )
+    return _as_bytes(audio["bytes"])
 
 
 def _as_int(v: object) -> int:
@@ -293,13 +491,15 @@ def write_clip(clip: Clip, corpus_dir: Path, stem: str) -> tuple[Path, Path]:
 
 
 def generate_real_speech(
-    corpus_dir: Path, parquet_path: Path | None, n: int
+    corpus_dir: Path, parquet_path: Path | None, n: int, ids: list[int] | None = None
 ) -> list[Path]:
     """(Re)generate the FLEURS clips; returns the written WAV paths.
 
     Only the ``fleurs_fi_*`` stems are touched — the Piper stems
     (``fi_*``, ``en_*``, ``meeting_sample``) are left alone, so this
-    script is additive to the existing corpus.
+    script is additive to the existing corpus. With *ids* the clip set
+    is exactly those ids (the committed corpus); otherwise the seeded
+    window selection draws *n* clips.
     """
     if parquet_path is None:
         raise RuntimeError(
@@ -307,7 +507,7 @@ def generate_real_speech(
             "download is a one-time dev-time step, never a runtime fetch"
         )
     rows = load_fleurs_rows(parquet_path)
-    clips = select_clips(rows, seed=SEED, n=n)
+    clips = select_clips(rows, seed=SEED, n=n, ids=ids)
     clips.sort(key=lambda c: (c.clip_id, c.row_index))  # stable write order
     # Assign stems: two selected clips may share clip_id (different takes of
     # the same reference). The stem is the 4-digit clip id; on a collision,
@@ -342,6 +542,14 @@ def main(argv: list[str] | None = None) -> int:
         help=f"number of clips to select (default: {N_CLIPS})",
     )
     parser.add_argument(
+        "--ids",
+        default=None,
+        help="comma-separated FLEURS clip ids to regenerate exactly "
+        "(the committed corpus's ids; see CORPUS_ATTRIBUTION.md). "
+        "Defaults to the committed 28 ids; pass 'seeded' to use the "
+        "seeded window selection instead.",
+    )
+    parser.add_argument(
         "--out",
         type=Path,
         default=Path(__file__).resolve().parent.parent
@@ -363,13 +571,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: parquet not found: {args.parquet}", file=sys.stderr)
         return 2
 
+    ids = _parse_ids(args.ids)
     corpus_dir = resolve_corpus_dir(args.out)
     corpus_dir.mkdir(parents=True, exist_ok=True)
-    written = generate_real_speech(corpus_dir, args.parquet, args.n)
+    written = generate_real_speech(corpus_dir, args.parquet, args.n, ids=ids)
     for path in written:
         print(f"wrote {path}")
-    print(f"corpus: {len(written)} FLEURS clips (seed {SEED}) under {corpus_dir}")
+    mode = f"ids {len(ids)}" if ids else f"seed {SEED}"
+    print(f"corpus: {len(written)} FLEURS clips ({mode}) under {corpus_dir}")
     return 0
+
+
+def _parse_ids(raw: str | None) -> list[int] | None:
+    """Parse ``--ids``: the committed corpus ids, or ``None`` for the seeded draw."""
+    if raw is None:
+        return list(COMMITTED_CLIP_IDS)  # default: regenerate exactly what is committed
+    if raw.strip() == "seeded":
+        return None
+    try:
+        return [int(p) for p in raw.split(",") if p.strip()]
+    except ValueError as e:
+        raise SystemExit(
+            f"error: --ids must be comma-separated ints or 'seeded': {e}"
+        ) from e
 
 
 if __name__ == "__main__":
