@@ -82,4 +82,5 @@ def _transcribe_one(
         glossary_path=options.glossary_path,
         speakers=options.speakers,
         display=display,
+        language=None if options.language == "auto" else options.language,
     )

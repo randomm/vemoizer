@@ -56,13 +56,14 @@ def _write_valid(path: Path, base_url: str, model: str) -> Path:
 def _search_in(root: Path, *, chdir_to: Path | None = None):
     """Run the search with ``~`` = ``root/home`` and CWD = *chdir_to* (or
     ``root/proj``). The legacy probe is pinned to ``root/home`` so the dev
-    machine's live config cannot leak in.
+    machine's live config cannot leak in. Returns the ``LLMConfig`` (the
+    raw dict half of the ``_default_search`` tuple is dropped).
     """
     home = root / "home"
     home.mkdir(exist_ok=True)
     start = chdir_to if chdir_to is not None else root / "proj"
     start.mkdir(parents=True, exist_ok=True)
-    return _default_search(
+    cfg, _raw = _default_search(
         home=lambda: home,
         cwd=lambda: start,
         legacy_paths=(
@@ -70,6 +71,7 @@ def _search_in(root: Path, *, chdir_to: Path | None = None):
             home / ".vemoizer.toml",
         ),
     )
+    return cfg
 
 
 def _write_section(path: Path, section: str) -> Path:
@@ -171,17 +173,17 @@ class TestExplicitPath:
     def test_explicit_path_is_loaded(self, tmp_path: Path) -> None:
         f = tmp_path / "explicit.toml"
         f.write_text(_VALID_SECTION, encoding="utf-8")
-        cfg = load_default_config(str(f))
+        cfg, _ = load_default_config(str(f))
         assert cfg is not None
         assert cfg.model == "test-model"
 
     def test_os_devnull_short_circuits_the_search(self, tmp_path: Path) -> None:
         # A config exists in the tree — the sentinel must skip it entirely.
         _write_valid(tmp_path / "proj" / ".vemoizer" / "config.toml", "x", "proj-model")
-        assert load_default_config("os.devnull") is None
+        assert load_default_config("os.devnull") == (None, None)
 
     def test_missing_explicit_path_fails_open(self, tmp_path: Path) -> None:
-        assert load_default_config(str(tmp_path / "nope.toml")) is None
+        assert load_default_config(str(tmp_path / "nope.toml")) == (None, None)
 
 
 # ---------------------------------------------------------------------------
@@ -407,14 +409,18 @@ class TestExplicitPathContract:
     def test_explicit_unknown_key_fails_open_not_raises(self, tmp_path: Path) -> None:
         f = tmp_path / "explicit.toml"
         f.write_text(_VALID_SECTION + '\nextra = "oops"\n', encoding="utf-8")
-        cfg = load_default_config(str(f))
+        cfg, _ = load_default_config(str(f))
         assert cfg is not None
         assert cfg.model == "test-model"
 
     def test_explicit_bad_section_fails_open(self, tmp_path: Path) -> None:
         f = tmp_path / "explicit.toml"
         f.write_text("[llm]\nbase_url = ''\n", encoding="utf-8")
-        assert load_default_config(str(f)) is None
+        cfg, raw = load_default_config(str(f))
+        assert cfg is None
+        # The raw dict rides along: a valid file with an unparseable
+        # [llm] section still returns it for the other key reads.
+        assert isinstance(raw, dict)
 
     def test_load_config_direct_still_fail_open(self, tmp_path: Path) -> None:
         f = tmp_path / "bad.toml"
@@ -502,3 +508,96 @@ class TestLoadLanguage:
         )
         monkeypatch.chdir(nested)
         assert load_language(None) == "en"
+
+
+# ---------------------------------------------------------------------------
+# One config read per run (issue #108 fix pass 2)
+# ---------------------------------------------------------------------------
+
+
+class TestSingleReadPerRun:
+    """``load_default_config(None)`` must resolve the winning file, read the
+    TOML, and parse it exactly ONCE per run (issue #108 review: the
+    no-path branch previously resolved + read the same file twice, once via
+    ``_default_search`` and again via ``_resolve_config_path`` + ``_read_toml``).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self, tmp_path, monkeypatch):
+        """Point every config layer at an empty sandbox; legacy paths pinned.
+
+        The real ``~`` must not leak in: the project walk-up starts from an
+        empty dir (nothing under it), and the home + legacy layers are
+        monkeypatched to ``tmp_path/home``.
+        """
+        home = tmp_path / "home"
+        home.mkdir()
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.chdir(empty)
+        monkeypatch.setattr(Path, "home", lambda: home)
+        self.home = home
+        self.legacy = (
+            home / ".config" / "vemoizer" / "config.toml",
+            home / ".vemoizer.toml",
+        )
+        # The no-path legacy probe reads ``_LEGACY_CONFIG_PATHS`` through the
+        # ``llm_config`` module namespace; pin it to the sandbox so the dev
+        # machine's real ``~/.config/vemoizer/config.toml`` cannot leak in.
+        import vemoizer.llm_config as llm_config_module
+
+        monkeypatch.setattr(llm_config_module, "_LEGACY_CONFIG_PATHS", self.legacy)
+
+    def _counted_reads(self, monkeypatch):
+        """Wrap ``llm_config._read_toml`` with a call counter (real parse kept).
+
+        ``_strict_load`` (the no-path parser) and the raw-dict fetch in
+        ``load_default_config`` both look up ``_read_toml`` through the
+        ``llm_config`` module namespace, so patching the module attribute
+        intercepts every read regardless of which layer parses the file.
+        """
+        import vemoizer.llm_config as llm_config_module
+
+        calls = []
+        real_read = llm_config_module._read_toml
+
+        def counting_read(path):
+            calls.append(path)
+            return real_read(path)
+
+        monkeypatch.setattr(llm_config_module, "_read_toml", counting_read)
+        return calls
+
+    def test_layered_no_path_project_config_reads_exactly_once(
+        self, monkeypatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _write_valid(Path.cwd() / ".vemoizer" / "config.toml", "x", "proj")
+        calls = self._counted_reads(monkeypatch)
+        cfg, raw = load_default_config(None)
+        assert cfg is not None and cfg.model == "proj"
+        assert isinstance(raw, dict)
+        assert len(calls) == 1
+        assert LEGACY_DEPRECATION_NOTICE not in capsys.readouterr().err
+
+    def test_layered_no_path_home_config_reads_exactly_once(
+        self, monkeypatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _write_valid(self.home / ".vemoizer" / "config.toml", "x", "home-model")
+        calls = self._counted_reads(monkeypatch)
+        cfg, raw = load_default_config(None)
+        assert cfg is not None and cfg.model == "home-model"
+        assert isinstance(raw, dict)
+        assert len(calls) == 1
+        assert LEGACY_DEPRECATION_NOTICE not in capsys.readouterr().err
+
+    def test_layered_no_path_legacy_config_reads_exactly_once_and_notices_once(
+        self, monkeypatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _write_valid(self.legacy[0], "x", "legacy-model")
+        calls = self._counted_reads(monkeypatch)
+        cfg, raw = load_default_config(None)
+        assert cfg is not None and cfg.model == "legacy-model"
+        assert isinstance(raw, dict)
+        assert len(calls) == 1
+        err = capsys.readouterr().err
+        assert err.count(LEGACY_DEPRECATION_NOTICE) == 1

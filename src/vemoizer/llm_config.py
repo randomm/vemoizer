@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import typer
+
 LLM_CONFIG_SECTION: str = "llm"
 
 
@@ -62,10 +64,15 @@ LEGACY_DEPRECATION_NOTICE: str = (
 #: Known top-level and [llm] keys for strict validation. ``people`` is a
 #: top-level list (issue #93) that ``llm`` itself ignores; items that are
 #: not strings are filtered at read time, not validated here.
-_KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset({LLM_CONFIG_SECTION, "people"})
+_KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
+    {LLM_CONFIG_SECTION, "people", "meeting"}
+)
 _KNOWN_LLM_KEYS: frozenset[str] = frozenset(
     {"base_url", "model", "api_key_env", "timeout_seconds"}
 )
+#: Known ``[meeting]`` keys for strict validation (issue #108): the single
+#: ``language`` override — a typo (e.g. ``langugae``) is warned, not fatal.
+_KNOWN_MEETING_KEYS: frozenset[str] = frozenset({"language"})
 DEVNULL_SENTINEL: str = "os.devnull"
 
 
@@ -98,20 +105,6 @@ def _read_toml(path: Path) -> dict[str, Any] | None:
     if isinstance(raw, dict):
         return raw
     return None
-
-
-def _load_legacy_file(path: Path) -> tuple[LLMConfig | None, Path | None]:
-    """Parse a legacy config file (fail-open); returns (config, used_path)."""
-    raw = _read_toml(path)
-    if raw is None:
-        return None, path
-    section = raw.get(LLM_CONFIG_SECTION)
-    if not isinstance(section, dict):
-        return None, path
-    config = _parse_llm_section(section)
-    if config is None:
-        return None, path
-    return config, path
 
 
 def _parse_llm_section(section: dict[str, Any]) -> LLMConfig | None:
@@ -148,19 +141,27 @@ def _parse_llm_section(section: dict[str, Any]) -> LLMConfig | None:
     )
 
 
-def _strict_load(path: Path) -> LLMConfig:
-    """Load *path* under strict rules; raise :class:`ConfigError` on violation."""
+def _strict_load_raw(path: Path) -> tuple[LLMConfig, dict[str, Any]]:
+    """Strict load that returns ``(config, raw)`` from a single read.
+
+    Raises :class:`ConfigError` on any violation, exactly as
+    :func:`_strict_load` does — the only difference is that the already
+    parsed raw dict rides along, so the caller never re-reads the file
+    (issue #108 review).
+    """
     raw = _read_toml(path)
     if raw is None:
         raise ConfigError(f"config file not found or unreadable: {path}")
+
+    _validate_sections(raw, path)
 
     for key, value in raw.items():
         if key not in _KNOWN_TOP_LEVEL_KEYS:
             raise ConfigError(f"unknown top-level key or section {key!r} in {path}")
         if isinstance(value, dict):
-            # Only ``[llm]`` is a table; ``people`` must be a top-level
-            # list (issue #93), not a table.
-            if key != LLM_CONFIG_SECTION:
+            # ``[llm]`` and ``[meeting]`` (issue #108) are tables; ``people``
+            # must be a top-level list (issue #93), not a table.
+            if key not in (LLM_CONFIG_SECTION, "meeting"):
                 raise ConfigError(
                     f"top-level key {key!r} must not be a table in {path}; "
                     "top-level 'people' must be a list"
@@ -180,41 +181,151 @@ def _strict_load(path: Path) -> LLMConfig:
         # validated here: non-string items are filtered at read time.
         raise ConfigError(f"top-level 'people' must be a list in {path}")
 
-    for key in section:
-        if key not in _KNOWN_LLM_KEYS:
-            raise ConfigError(f"unknown key {LLM_CONFIG_SECTION}.{key} in {path}")
-
     config = _parse_llm_section(section)
     if config is None:
         raise ConfigError(
             f"malformed {LLM_CONFIG_SECTION!r} section in {path} "
             f"(required: base_url, model, api_key_env, timeout_seconds>0)"
         )
+    return config, raw
+
+
+def _strict_load(path: Path) -> LLMConfig:
+    """Load *path* under strict rules; raise :class:`ConfigError` on violation."""
+    config, _raw = _strict_load_raw(path)
     return config
 
 
-def _legacy_search(legacy_paths: tuple[Path, ...] | None = None) -> LLMConfig | None:
-    """Probe legacy paths (fail-open); notice only when ``~/.config`` is used."""
-    if legacy_paths is None:
-        legacy_paths = _LEGACY_CONFIG_PATHS
+def _validate_sections(raw: dict[str, Any], path: Path) -> None:
+    """Validate table sections (``[llm]`` / ``[meeting]``) in *raw*.
+
+    ``[llm]`` is strict (a malformed section must not silently disable the
+    LLM); ``[meeting]`` is warned-only — its single ``language`` key is
+    cosmetic (a typo just falls back to auto-detect), so a strict reject
+    would trade a harmless typo for a failing run. Only these two sections
+    are tables: every other dict value keeps the pre-existing strict
+    "must not be a table" check in ``_strict_load``.
+    """
+    for key in raw:
+        value = raw[key]
+        if not isinstance(value, dict):
+            continue
+        if key == LLM_CONFIG_SECTION:
+            known = _KNOWN_LLM_KEYS
+        elif key == "meeting":
+            known = _KNOWN_MEETING_KEYS
+        else:
+            continue
+        for sub in value:
+            if sub not in known:
+                if key == LLM_CONFIG_SECTION:
+                    raise ConfigError(f"unknown key {key}.{sub} in {path}")
+                typer.echo(
+                    f"vemoizer: unknown key {key}.{sub} in {path} (ignored)",
+                    err=True,
+                )
+
+
+def _parse_meeting_language(section: dict[str, Any] | None) -> str:
+    """The ``[meeting] language`` value of an already-parsed config.
+
+    Fail-open: ``None`` (no section), a non-string value, or any value
+    other than ``"fi"`` / ``"en"`` (case-insensitive) all yield
+    ``"auto"`` (per-window detection).
+    """
+    if not isinstance(section, dict):
+        return "auto"
+    value = section.get("language")
+    if not isinstance(value, str):
+        return "auto"
+    lowered = value.strip().lower()
+    if lowered in ("fi", "en", "auto"):
+        return lowered
+    return "auto"
+
+
+def _parse_section_language(raw: dict[str, Any] | None) -> str:
+    """The top-level ``language`` value of an already-parsed config.
+
+    Fail-open: an absent/non-string value yields ``"fi"``; only
+    ``"en"`` (case-insensitive) selects the English heading language.
+    """
+    if not isinstance(raw, dict):
+        return "fi"
+    value = raw.get("language")
+    if not isinstance(value, str):
+        return "fi"
+    return "en" if value.strip().lower() == "en" else "fi"
+
+
+def _legacy_search_with_raw(
+    legacy_paths: tuple[Path, ...],
+) -> tuple[LLMConfig | None, dict[str, Any] | None]:
+    """Probe legacy paths (fail-open) and return ``(config, raw)``.
+
+    The legacy layer stays fail-open (a malformed or section-less file is
+    skipped); the deprecation notice is printed at most once per run, and
+    only when the ``~/.config`` path actually wins. The winning file is read
+    exactly once here — the caller never re-reads it (issue #108 review).
+    """
     deprecated_first = legacy_paths[0]
     for candidate in legacy_paths:
-        config, used = _load_legacy_file(candidate)
+        raw = _read_toml(candidate)
+        if raw is None:
+            continue
+        section = raw.get(LLM_CONFIG_SECTION)
+        if not isinstance(section, dict):
+            continue
+        config = _parse_llm_section(section)
         if config is None:
             continue
-        if used == deprecated_first:
+        if candidate == deprecated_first:
             print(LEGACY_DEPRECATION_NOTICE, file=sys.stderr)
-        return config
-    return None
+        return config, raw
+    return None, None
+
+
+def _resolve_config_path(path: str | None) -> Path | None:
+    """The config file *path* designates, or ``None``.
+
+    Explicit path: as given. ``"os.devnull"`` sentinel: ``None`` (no
+    config). Omitted: the documented layered search (project walk-up →
+    home → legacy, issue #82) — the first EXISTING file wins, no per-key
+    merging.
+
+    Used by :func:`load_language` (explicit-path and devnull handling
+    included). The layered search in :func:`_default_search` resolves
+    its own layers because it must interleave strict parsing with the
+    search, not after it.
+    """
+    if path is not None:
+        if path == DEVNULL_SENTINEL:
+            return None
+        return Path(path)
+
+    candidate = _find_nearest_vemoizer_config(Path.cwd())
+    if candidate is None:
+        home_candidate = Path.home() / ".vemoizer" / "config.toml"
+        if home_candidate.is_file():
+            return home_candidate
+        candidate = next((p for p in _LEGACY_CONFIG_PATHS if p.is_file()), None)
+    return candidate
 
 
 def _default_search(
     home: Callable[[], Path] | None = None,
     cwd: Callable[[], Path] | None = None,
     legacy_paths: tuple[Path, ...] | None = None,
-) -> LLMConfig | None:
+) -> tuple[LLMConfig | None, dict[str, Any] | None]:
     """Run the layered search (project walk-up → home → legacy); injectable
-    hooks for tests only."""
+    hooks for tests only.
+
+    Returns ``(llm_config, raw)`` — the parsed ``[llm]`` section and the
+    raw dict of the single config file that won the search, so the caller
+    gets both from exactly one read per run (issue #108 review). The legacy
+    fail-open layer reads once per legacy candidate it probes (at most the
+    two legacy paths), never the winning file twice.
+    """
     if home is None:
         home = Path.home
     if cwd is None:
@@ -226,13 +337,13 @@ def _default_search(
     # up from CWD wins over the home layer (issue #82 precedence).
     project_config = _find_nearest_vemoizer_config(cwd())
     if project_config is not None:
-        return _strict_load(project_config)
+        return _strict_load_raw(project_config)
 
     home_config = home() / ".vemoizer" / "config.toml"
     if home_config.is_file():
-        return _strict_load(home_config)
+        return _strict_load_raw(home_config)
 
-    return _legacy_search(legacy_paths)
+    return _legacy_search_with_raw(legacy_paths)
 
 
 def load_language(path: str | None = None) -> str:
@@ -249,34 +360,46 @@ def load_language(path: str | None = None) -> str:
     all yield ``"fi"`` — the language is cosmetic, so the read is
     fail-open, never an error.
     """
-    if path is not None and path != DEVNULL_SENTINEL:
-        raw = _read_toml(Path(path))
-    elif path is not None:
-        # "os.devnull" sentinel: no config at all → default.
-        return "fi"
-    else:
-        candidate = _find_nearest_vemoizer_config(Path.cwd())
-        raw = _read_toml(candidate) if candidate is not None else None
+    candidate = _resolve_config_path(path)
+    raw = _read_toml(candidate) if candidate is not None else None
     if not isinstance(raw, dict):
         return "fi"
-    value = raw.get("language")
-    if not isinstance(value, str):
-        return "fi"
-    return "en" if value.strip().lower() == "en" else "fi"
+    return _parse_section_language(raw)
 
 
-def load_default_config(path: str | None = None) -> LLMConfig | None:
-    """Load LLM config from *path* or the layered search.
+def load_default_config(
+    path: str | None = None,
+) -> tuple[LLMConfig | None, dict[str, Any] | None]:
+    """Load LLM config from *path* or the layered search, one read.
 
-    Explicit path short-circuit: ``"os.devnull"`` or a missing path →
-    ``None``; a real path loads under legacy fail-open rules. With no
-    path, the search runs: nearest ``./.vemoizer`` (walk up from CWD) →
-    ``~/.vemoizer`` → legacy (fail-open, deprecation notice on
-    ``~/.config`` only).
+    Returns ``(llm_config, raw)``: the parsed ``[llm]`` section (``None``
+    when absent or malformed) and the already-parsed config file dict the
+    caller can read other keys from (``[meeting]``, top-level
+    ``language``) without re-parsing the file (issue #108 review).
+
+    Contracts: an explicit path stays fail-open — ``"os.devnull"`` or a
+    missing/malformed file → ``(None, None)`` (issue #82). An omitted path
+    runs the layered search (project walk-up → home → legacy, issue #82):
+    the strict project/home layer fails loud on a malformed file (a
+    ``ConfigError`` the batch pre-check turns into a clean error), and the
+    legacy layer is fail-open with the deprecation notice on
+    ``~/.config`` only.
     """
     if path is not None:
         if path == DEVNULL_SENTINEL:
-            return None
-        return load_config(path)
+            return None, None
+        raw = _read_toml(Path(path))
+        if raw is None:
+            return None, None
+        section_raw = raw.get(LLM_CONFIG_SECTION)
+        return (
+            _parse_llm_section(section_raw) if isinstance(section_raw, dict) else None,
+            raw,
+        )
 
+    # The strict project/home layer is fail-LOUD by contract (issue #82);
+    # the batch-layer pre-check (_resolve_llm_config) turns the ConfigError
+    # into a clean error before transcribe_file ever runs. Each call reads
+    # the winning file once (issue #108 review); a run makes one call in
+    # the batch pre-check and one in transcribe_file (pre-existing on main).
     return _default_search()

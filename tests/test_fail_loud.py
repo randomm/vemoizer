@@ -217,7 +217,9 @@ def test_meeting_fallback_appends_exactly_one_warning(tmp_path, monkeypatch) -> 
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     monkeypatch.setattr(
-        pipeline, "decode_meeting", lambda audio, slices, initial_prompt=None: None
+        pipeline,
+        "decode_meeting",
+        lambda audio, slices, initial_prompt=None, **kwargs: None,
     )
     _patch_decoders(
         monkeypatch,
@@ -243,7 +245,9 @@ def test_meeting_fallback_total_failure_is_error_not_warning(
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     monkeypatch.setattr(
-        pipeline, "decode_meeting", lambda audio, slices, initial_prompt=None: None
+        pipeline,
+        "decode_meeting",
+        lambda audio, slices, initial_prompt=None, **kwargs: None,
     )
     _patch_decoders(monkeypatch, None, None, latched_a=True)
     result = transcribe_file(
@@ -271,7 +275,7 @@ def test_successful_meeting_decode_appends_no_warning(tmp_path, monkeypatch) -> 
 
 
 def _patch_meeting_success(monkeypatch) -> None:
-    def fake_decode_meeting(audio, slices, initial_prompt=None):
+    def fake_decode_meeting(audio, slices, initial_prompt=None, **kwargs):
         return {
             "text": "hei maailma",
             "words": [{"word": "hei", "start": 0.0, "end": 0.4}],

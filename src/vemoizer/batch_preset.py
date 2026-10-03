@@ -186,6 +186,7 @@ def run_preset(
     repair: bool | None = None,
     diarize: bool | None = None,
     speakers: SpeakerCount | None = None,
+    language: str | None = None,
     quiet: bool = False,
     yes: bool = False,
     no_group: bool = False,
@@ -243,6 +244,7 @@ def run_preset(
             "repair": repair,
             "diarize": diarize,
             "speakers": speakers,
+            "language": language,
         },
     )
 

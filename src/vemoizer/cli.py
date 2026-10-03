@@ -341,6 +341,16 @@ def meeting(
             "part markers). Mutually exclusive with --yes."
         ),
     ),
+    language: str = typer.Option(  # noqa: B008
+        "auto",
+        "--language",
+        help=(
+            "Recognition language for the whisper decode: auto (detect "
+            "per window, the default), fi, or en (issue #108). "
+            'A [meeting] language = "fi"|"en" key in the config file '
+            "pins the same choice for meeting (and memo) runs."
+        ),
+    ),
 ) -> None:
     """Transcribe a meeting: whisper decode, diarization, repair, .md+.json."""
     _warn_on_battery()
@@ -360,6 +370,7 @@ def meeting(
     # below; --quiet suppresses the live progress line too.
     display = make_batch_display(quiet=quiet)
     speaker_count = _parse_speakers(speakers)
+    lowered = language.strip().lower()
     try:
         exit_code = run_preset(
             files,
@@ -369,11 +380,17 @@ def meeting(
             repair=repair,
             diarize=False if no_diarize else None,
             speakers=speaker_count,
+            language=lowered,
             quiet=quiet,
             yes=yes,
             no_group=no_group,
             display=display,
         )
+    except ValueError as e:
+        # Unknown --language value (resolve_options validates against
+        # LANGUAGE_VALUES, issue #108): clean exit 2, never a traceback.
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(code=2) from None
     finally:
         if display is not None:
             display.close()
@@ -444,6 +461,12 @@ def memo(
             quiet=quiet,
             display=display,
         )
+    except ValueError as e:
+        # Unknown [meeting] language value (resolve_options validates
+        # against LANGUAGE_VALUES, issue #108): clean exit 2, never a
+        # traceback — the same contract the meeting command enforces.
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(code=2) from None
     finally:
         if display is not None:
             display.close()

@@ -68,7 +68,7 @@ class WhisperTranscriber:
 
     def __init__(
         self,
-        language: str | None = "fi",
+        language: str | None = None,
         initial_prompt: str | None = None,
     ) -> None:
         self.model: Any = None
@@ -76,6 +76,13 @@ class WhisperTranscriber:
         self._mlx_whisper: Any = None
         self._load_failed = False
         self._load_once = threading.Lock()
+        # ``language=None`` (the default) lets Whisper detect the language
+        # per window (invariant #3: language is a property of a span, not
+        # of a file — a hard-coded ``"fi"`` pin here forced Finnish on
+        # every window of every meeting, issue #108). A run-level
+        # override (``decode_meeting(language="fi")`` / the
+        # ``meeting --language`` flag, issue #108) still pins a language
+        # explicitly when the user wants it.
         self._language = language
         # Seeds every decoding window with the user's vocabulary — the fix
         # for garbled proper nouns ("FLAG-sit" for Flagship-hanke).
@@ -347,6 +354,7 @@ def decode_meeting(
     slices: list[tuple[int, np.ndarray]],
     initial_prompt: str | None = None,
     display: ProgressDisplay | None = None,
+    language: str | None = None,
 ) -> dict[str, Any] | None:
     """Per-window Whisper decode A for the meeting profile (fail-open).
 
@@ -361,10 +369,18 @@ def decode_meeting(
     display's decode task in file-level minutes. When None or the display
     is disabled (non-TTY), the shim is a pass-through and the decode result
     is identical.
+
+    ``language`` (issue #108) is a run-level recognition-language
+    override: ``None`` (the default) leaves per-window language detection
+    on — Whisper detects per window, matching invariant #3 (language is a
+    property of a span, not of a file). A non-None value (e.g. ``"fi"``)
+    pins every window to that language.
     """
     transcriber: WhisperTranscriber | None = None
     try:
-        transcriber = WhisperTranscriber(initial_prompt=initial_prompt)
+        transcriber = WhisperTranscriber(
+            language=language, initial_prompt=initial_prompt
+        )
         # Widen from the TranscriptionResult TypedDict: the slice records are
         # a pipeline-internal extension, not part of the transcriber contract.
         result: dict[str, Any] = dict(transcriber.transcribe(audio, display=display))

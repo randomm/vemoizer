@@ -27,6 +27,13 @@ runner = CliRunner()
 # -- flag forwarding and preset defaults ---------------------------------
 
 
+def _write_config(root: Path, sub: str, marker: str) -> Path:
+    path = root / sub / "config.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_VALID_CONFIG.format(h=root.name, m=marker), encoding="utf-8")
+    return path
+
+
 def test_meeting_help_lists_flags() -> None:
     result = runner.invoke(app, ["meeting", "--help"])
     assert result.exit_code == 0
@@ -381,13 +388,6 @@ _VALID_CONFIG = (
 )
 
 
-def _write_config(root: Path, sub: str, marker: str) -> Path:
-    path = root / sub / "config.toml"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_VALID_CONFIG.format(h=root.name, m=marker), encoding="utf-8")
-    return path
-
-
 def _invoke_preset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -410,7 +410,7 @@ def _invoke_preset(
 
     def fake_load_default_config(path=None):
         seen["config_path"] = path
-        return None
+        return None, None
 
     def fake_transcribe(path, **kwargs):
         seen.update(kwargs)
@@ -431,7 +431,7 @@ def _isolated_search(home: Path, cwd: Path) -> LLMConfig | None:
     """
     from vemoizer.llm_config import _default_search
 
-    return _default_search(
+    cfg, _raw = _default_search(
         home=lambda: home,
         cwd=lambda: cwd,
         legacy_paths=(
@@ -439,6 +439,7 @@ def _isolated_search(home: Path, cwd: Path) -> LLMConfig | None:
             home / ".vemoizer.toml",
         ),
     )
+    return cfg
 
 
 def test_meeting_home_config_reaches_pipeline_without_config_flag(
@@ -550,7 +551,7 @@ def _legacy_notice_case(tmp_path: Path, newer_layer_wins: bool):
     _write_config(home, ".config/vemoizer", "legacy-model")
     if newer_layer_wins:
         _write_config(home, ".vemoizer", "new-model")
-    return llm_module._default_search(
+    cfg, _raw = llm_module._default_search(
         home=lambda: home,
         cwd=lambda: tmp_path / "clean",
         legacy_paths=(
@@ -558,6 +559,7 @@ def _legacy_notice_case(tmp_path: Path, newer_layer_wins: bool):
             home / ".vemoizer.toml",
         ),
     )
+    return cfg
 
 
 def test_preset_legacy_config_used_prints_deprecation_notice(

@@ -37,7 +37,12 @@ from .glossary import (
     load_glossary,
 )
 from .ingest import IngestError, ingest_audio
-from .llm import LLMClient, LLMConfig, load_default_config, load_language
+from .llm import LLMClient, LLMConfig
+from .llm_config import (
+    _parse_meeting_language,
+    _parse_section_language,
+    load_default_config,
+)
 from .llm_tail import apply_llm_tail
 from .notes import generate_notes  # noqa: F401
 from .parakeet_transcriber import ParakeetTranscriber
@@ -225,6 +230,7 @@ def transcribe_file(
     glossary_path: str | None = None,
     speakers: SpeakerCount | None = None,
     display: ProgressDisplay | None = None,
+    language: str | None = None,
 ) -> dict:
     """Run the full consensus pipeline over one audio file.
 
@@ -241,6 +247,11 @@ def transcribe_file(
             the profile is ``meeting``, it is passed to ``decode_meeting``
             so the mlx-whisper tqdm shim drives the display's decode task.
             ``None`` (the default) keeps every existing call site unchanged.
+        language: Optional run-level recognition-language override for the
+            meeting decode (issue #108): one of ``"fi"`` / ``"en"`` pins
+            every decode window; ``None`` (the default) or ``"auto"``
+            leaves per-window detection on. Ignored by the dictation
+            profile.
 
     Returns:
         ``{"text": str, "segments": list[dict]}`` — the full transcript
@@ -285,12 +296,34 @@ def transcribe_file(
         format_duration(time.monotonic() - ingest_start),
     )
 
-    llm_config = load_default_config(config_path)
+    # ``load_default_config`` (each call reads the winning file once,
+    # issue #108 review) resolves the file under the correct contract for
+    # *config_path* (an explicit path stays fail-open per issue #82; an
+    # omitted path runs the strict project/home layer, fail-open legacy, so
+    # a malformed project config still fails loud via the batch layer's
+    # pre-check) and its parsed raw dict feeds the ``[meeting]``
+    # recognition-language override and the cosmetic section language below.
+    llm_config, config_raw = load_default_config(config_path)
+    # Issue #108, option B: an explicit run-level recognition-language
+    # choice (CLI ``--language`` / presets ``RunOptions.language``),
+    # else the ``[meeting] language`` key of the same config file, else
+    # per-window detection (``None``). ``"auto"`` and other non-codes
+    # never pin — ``transcribe_file`` is the single coercion point.
+    meeting_language: str | None
+    if language is not None and language != "auto":
+        meeting_language = language
+    else:
+        if isinstance(config_raw, dict):
+            meeting_section = config_raw.get("meeting")
+        else:
+            meeting_section = None
+        configured = _parse_meeting_language(meeting_section)
+        meeting_language = None if configured == "auto" else configured
     # M6 (issue #75): duration (decoded-audio, never ffprobe) and section
     # language ride on the run dict — format_md / the report read them.
     result: dict[str, Any] = {
         "duration_s": len(audio) / SAMPLE_RATE,
-        "language": _normalize_language(load_language(config_path)),
+        "language": _normalize_language(_parse_section_language(config_raw)),
     }
     logger.info(
         "LLM adjudication: %s", "configured" if llm_config is not None else "disabled"
@@ -306,7 +339,10 @@ def transcribe_file(
     glossary = load_glossary(glossary_path)
     corrections = load_corrections(glossary_path)
     if profile == "meeting":
-        kwargs: dict[str, Any] = {"initial_prompt": glossary_prompt(glossary)}
+        kwargs: dict[str, Any] = {
+            "initial_prompt": glossary_prompt(glossary),
+            "language": meeting_language,
+        }
         if display is not None:
             kwargs["display"] = display
         result_a = decode_meeting(audio, slices, **kwargs)

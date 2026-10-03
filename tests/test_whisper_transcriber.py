@@ -78,7 +78,7 @@ def test_transcribe_decodes_each_window_separately() -> None:
         patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
     ):
         t = WhisperTranscriber(initial_prompt="Sanasto: Flagship.")
-        result = t.transcribe(_audio(120.0))
+        t.transcribe(_audio(120.0))
 
     assert mock.transcribe.call_count == 4  # 4 × 30 s windows
     first_kwargs = mock.transcribe.call_args_list[0].kwargs
@@ -89,12 +89,37 @@ def test_transcribe_decodes_each_window_separately() -> None:
     assert first_kwargs["condition_on_previous_text"] is True
     assert first_kwargs["initial_prompt"] == "Sanasto: Flagship."
     assert last_kwargs["initial_prompt"] == "Sanasto: Flagship."  # re-seeds each window
-    # 4 windows each return the same "moro vaan" segment; text is the
-    # concatenation of all windows' text.
-    assert result["text"].count("moro vaan") == 4
-    assert result["language"] == "fi"
-    assert result["words"][0]["word"] == "moro"
-    assert result["segments"][0]["text"] == "moro vaan"
+    # The default is per-window language detection (issue #108, option A):
+    # language=None on EVERY window, never a file-level pin.
+    for call in mock.transcribe.call_args_list:
+        assert call.kwargs["language"] is None  # type: ignore[index]
+
+
+def test_transcribe_language_override_pins_every_window() -> None:
+    """A run-level override (issue #108, option B) pins the language on
+    every window, not just the first."""
+    raw = _raw(
+        [
+            _seg(
+                "moro vaan",
+                [
+                    {"word": " moro", "start": 0.0, "end": 0.5},
+                    {"word": " vaan", "start": 0.6, "end": 1.0},
+                ],
+            )
+        ]
+    )
+    mock = _mock_whisper(raw)
+    with (
+        patch.dict("sys.modules", {"mlx_whisper": mock}),
+        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
+    ):
+        t = WhisperTranscriber(language="fi")
+        t.transcribe(_audio(60.0))
+
+    assert mock.transcribe.call_count == 2
+    for call in mock.transcribe.call_args_list:
+        assert call.kwargs["language"] == "fi"  # type: ignore[index]
 
 
 def test_window_returning_none_raises_with_window_index() -> None:
@@ -288,6 +313,9 @@ def test_decode_meeting_heals_hallucination_walls() -> None:
     assert mock.transcribe.call_count == 2
     heal_kwargs = mock.transcribe.call_args_list[1].kwargs
     assert heal_kwargs["condition_on_previous_text"] is False
+    # Option A: decode_meeting's default leaves per-window detection on.
+    for call in mock.transcribe.call_args_list:
+        assert call.kwargs["language"] is None  # type: ignore[index]
     assert "Kiitos" not in result["text"]
     assert "demossa" in result["text"]
     # healed words shifted onto the recording timeline (slice offset 9s)
@@ -332,8 +360,28 @@ def test_decode_meeting_falls_back_to_prompt_free_redecode() -> None:
     assert primary["initial_prompt"] == "Sanasto: Janni."
     assert fallback["initial_prompt"] is None
     assert fallback["condition_on_previous_text"] is False
-    assert "Janni" not in result["text"]
-    assert "data platform" in result["text"]
+    for call in mock.transcribe.call_args_list:
+        assert call.kwargs["language"] is None  # type: ignore[index]
+
+
+def test_decode_meeting_language_kwarg_pins_every_window() -> None:
+    """Option B: decode_meeting(language="fi") pins the language on the
+    primary decode AND the self-heal re-decode windows — a pin must not
+    silently drop out of the heal path."""
+    raw = _raw([_seg("moro", [{"word": " moro", "start": 0.0, "end": 0.5}])])
+    mock = MagicMock()
+    mock.transcribe = MagicMock(side_effect=[raw, raw])
+    slices = [(0, np.zeros(8 * 16_000, dtype=np.float32))]
+    with (
+        patch.dict("sys.modules", {"mlx_whisper": mock}),
+        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
+    ):
+        result = decode_meeting(_audio(20.0), slices, language="fi")
+
+    assert result is not None
+    assert mock.transcribe.call_count >= 1
+    for call in mock.transcribe.call_args_list:
+        assert call.kwargs["language"] == "fi"  # type: ignore[index]
 
 
 # -- verbose kwarg pinning (issue #105, lens MEDIUM) ------------------------
