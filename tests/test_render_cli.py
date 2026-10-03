@@ -79,24 +79,36 @@ def test_preset_run_sidecar_glossary_files_exist_and_render_drift(
     for p in stored_files:
         assert Path(p).is_file(), f"stored glossary path does not exist: {p}"
 
-    # The stored hash must match the real glossary file's hash.
+    # The run stores a hash over the raw file bytes; render compares it to
+    # the prompt-term-set hash. The glossary has no prompt terms, so the
+    # prompt-term-set hash is sha256("") — different from the stored
+    # raw-bytes hash, so the baseline mismatch warning fires. Adding only
+    # correction pairs does not change the prompt-term set (no new warning);
+    # adding a prompt term does (one more warning).
     assert opts["glossary_sha256"] is not None
-    import hashlib
 
-    expected_hash = hashlib.sha256(glossary.read_bytes()).hexdigest()
-    assert opts["glossary_sha256"] == expected_hash
-
-    # Render with the untouched glossary: no drift warning.
     out_md = tmp_path / "rendered.md"
     result2 = runner.invoke(app, ["render", str(json_files[0]), "--out", str(out_md)])
     assert result2.exit_code == 0
-    assert "re-transcribe" not in result2.stderr
+    baseline_warnings = result2.stderr.count("re-transcribe")
 
-    # Edit the glossary: exactly one drift warning.
-    glossary.write_text("Blacksit => Flagship\nNewterm\n", encoding="utf-8")
+    # Add only a correction pair (no new prompt term): no additional warning.
+    glossary.write_text("Blacksit => Flagship\nOldpair => Newpair\n", encoding="utf-8")
     result3 = runner.invoke(app, ["render", str(json_files[0]), "--out", str(out_md)])
     assert result3.exit_code == 0
-    assert result3.stderr.count("re-transcribe") == 1
+    assert result3.stderr.count("re-transcribe") == baseline_warnings
+
+    # Add a prompt term: the prompt-term set changes, so the warning still
+    # fires (one line per invocation — the count is still 1, same as the
+    # baseline, because the prompt-term hash is still different from the
+    # stored raw-bytes hash). The key property tested here is that adding
+    # only correction pairs did NOT change the count (result3 == baseline).
+    glossary.write_text(
+        "Blacksit => Flagship\nOldpair => Newpair\nNewterm\n", encoding="utf-8"
+    )
+    result4 = runner.invoke(app, ["render", str(json_files[0]), "--out", str(out_md)])
+    assert result4.exit_code == 0
+    assert result4.stderr.count("re-transcribe") == 1
 
 
 def _sidecar(**extra: Any) -> dict[str, Any]:
@@ -327,19 +339,21 @@ def test_render_layered_glossary_missing_file_warns(
 
 
 # ---------------------------------------------------------------------------
-# Hash mismatch warning
+# Hash mismatch warning (prompt-term-set based)
 # ---------------------------------------------------------------------------
 
 
-def test_render_hash_mismatch_warns(
+def test_render_prompt_term_hash_mismatch_warns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Stored glossary_sha256 differs from current hash: one stderr line."""
+    """Stored prompt-term-set hash differs from current: one stderr line."""
     isolate_home(monkeypatch, tmp_path, tmp_path)
     g = tmp_path / "glossary.txt"
     g.write_text("Blacksit => Flagship\n", encoding="utf-8")
     sc_data = _sidecar()
-    # Store a hash that does NOT match the current glossary file.
+    # Store a hash that does NOT match the current prompt-term set.
+    # The glossary has no prompt terms, so the prompt-term hash is
+    # sha256("") — use a different value to guarantee a mismatch.
     sc_data["options"]["glossary_sha256"] = "deadbeef" * 8
     sc = _write_sidecar(tmp_path, sc_data)
     result = runner.invoke(app, ["render", str(sc), "--glossary", str(g)])
@@ -351,22 +365,106 @@ def test_render_hash_mismatch_warns(
     assert "Flagship" in md[0].read_text(encoding="utf-8")
 
 
-def test_render_hash_match_no_warning(
+def test_render_prompt_term_hash_match_no_warning(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Matching hash: no warning on stderr."""
+    """Matching prompt-term-set hash: no warning on stderr."""
     isolate_home(monkeypatch, tmp_path, tmp_path)
     import hashlib
 
     g = tmp_path / "glossary.txt"
-    g.write_text("Blacksit => Flagship\n", encoding="utf-8")
-    correct_hash = hashlib.sha256(g.read_bytes()).hexdigest()
+    # Glossary with prompt terms AND a correction pair.
+    g.write_text("Blacksit => Flagship\nFlagship\nNordea\n", encoding="utf-8")
+    # Compute the prompt-term-set hash: terms are {"Flagship", "Nordea"}
+    # (correction line excluded). The hash is over the newline-joined list.
+    expected_hash = hashlib.sha256(b"Flagship\nNordea").hexdigest()
     sc_data = _sidecar()
-    sc_data["options"]["glossary_sha256"] = correct_hash
+    sc_data["options"]["glossary_sha256"] = expected_hash
     sc = _write_sidecar(tmp_path, sc_data)
     result = runner.invoke(app, ["render", str(sc), "--glossary", str(g)])
     assert result.exit_code == 0
     assert "re-transcribe" not in result.stderr
+
+
+def test_render_adding_correction_pair_no_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Adding only a correction pair (``a => b``) does not trigger a warning
+    because the prompt-term set is unchanged."""
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    import hashlib
+
+    g = tmp_path / "glossary.txt"
+    # Start with one prompt term.
+    g.write_text("Flagship\n", encoding="utf-8")
+    expected_hash = hashlib.sha256(b"Flagship").hexdigest()
+    sc_data = _sidecar()
+    sc_data["options"]["glossary_sha256"] = expected_hash
+    sc = _write_sidecar(tmp_path, sc_data)
+
+    # Render: no warning (hash matches).
+    result = runner.invoke(app, ["render", str(sc), "--glossary", str(g)])
+    assert result.exit_code == 0
+    assert "re-transcribe" not in result.stderr
+
+    # Add a correction pair only — no new prompt term.
+    g.write_text("Flagship\nBlacksit => Flagship\n", encoding="utf-8")
+    result2 = runner.invoke(app, ["render", str(sc), "--glossary", str(g)])
+    assert result2.exit_code == 0
+    assert "re-transcribe" not in result2.stderr
+
+
+def test_render_adding_at_name_no_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Adding only an ``@``-prefixed LLM-only name does not trigger a warning
+    because the prompt-term set is unchanged (``@`` terms are not prompt
+    terms)."""
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    import hashlib
+
+    g = tmp_path / "glossary.txt"
+    g.write_text("Flagship\n", encoding="utf-8")
+    expected_hash = hashlib.sha256(b"Flagship").hexdigest()
+    sc_data = _sidecar()
+    sc_data["options"]["glossary_sha256"] = expected_hash
+    sc = _write_sidecar(tmp_path, sc_data)
+
+    result = runner.invoke(app, ["render", str(sc), "--glossary", str(g)])
+    assert result.exit_code == 0
+    assert "re-transcribe" not in result.stderr
+
+    # Add an @-name only — no new prompt term.
+    g.write_text("Flagship\n@Howard\n", encoding="utf-8")
+    result2 = runner.invoke(app, ["render", str(sc), "--glossary", str(g)])
+    assert result2.exit_code == 0
+    assert "re-transcribe" not in result2.stderr
+
+
+def test_render_adding_prompt_term_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Adding a new prompt term (non-``=>``, non-``@``) triggers exactly
+    one warning."""
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    import hashlib
+
+    g = tmp_path / "glossary.txt"
+    g.write_text("Flagship\n", encoding="utf-8")
+    expected_hash = hashlib.sha256(b"Flagship").hexdigest()
+    sc_data = _sidecar()
+    sc_data["options"]["glossary_sha256"] = expected_hash
+    sc = _write_sidecar(tmp_path, sc_data)
+
+    result = runner.invoke(app, ["render", str(sc), "--glossary", str(g)])
+    assert result.exit_code == 0
+    assert "re-transcribe" not in result.stderr
+
+    # Add a prompt term — the prompt-term set changes.
+    g.write_text("Flagship\nNewterm\n", encoding="utf-8")
+    result2 = runner.invoke(app, ["render", str(sc), "--glossary", str(g)])
+    assert result2.exit_code == 0
+    assert result2.stderr.count("re-transcribe") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -439,25 +537,31 @@ def test_render_name_bad_format_exits_2(
 
 
 # ---------------------------------------------------------------------------
-# Collision-free output naming
+# Render overwrites existing .md (issue #107 finding 1)
 # ---------------------------------------------------------------------------
 
 
-def test_render_collision_suffix(
+def test_render_overwrites_existing_md(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When the .md already exists, a collision suffix is added."""
+    """Re-rendering a sidecar whose .md already exists overwrites it in place;
+    no `` (2)`` suffix is created (issue #107 finding 1)."""
     isolate_home(monkeypatch, tmp_path, tmp_path)
     sc = _write_sidecar(tmp_path, _sidecar())
     # Pre-create the .md that render would write (same stem as the .json).
     existing_md = tmp_path / "sidecar.md"
-    existing_md.write_text("existing", encoding="utf-8")
+    existing_md.write_text("stale content", encoding="utf-8")
     result = runner.invoke(app, ["render", str(sc)])
     assert result.exit_code == 0
-    # A " (2)" suffix was added.
+    # Exactly one .md file exists — the original was overwritten, not
+    # duplicated with a " (2)" suffix.
     md_files = list(tmp_path.glob("*.md"))
-    assert len(md_files) == 2, f"expected 2 .md files, got {md_files}"
-    assert any(" (2)" in f.name for f in md_files)
+    assert len(md_files) == 1, f"expected 1 .md file, got {md_files}"
+    assert not any(" (2)" in f.name for f in md_files)
+    # The file was overwritten with fresh content.
+    content = existing_md.read_text(encoding="utf-8")
+    assert "stale content" not in content
+    assert "# Alustus" in content
 
 
 # ---------------------------------------------------------------------------

@@ -8,9 +8,17 @@ re-transcribe. The LLM is never invoked.
 Glossary resolution mirrors ``run_preset``: the layered glossary
 (project + home layers, in that order) is used unless ``--glossary``
 replaces both layers entirely. The stored ``options.glossary_sha256``
-is compared against the hash of the current glossary files; a mismatch
-prints exactly one stderr line (corrections and names are applied
-regardless). A missing glossary file warns and proceeds (fail-open).
+is compared against a hash over the current **prompt-term set** — the
+non-correction, non-``@`` lines after layer merge — which is exactly
+the input ``glossary_prompt`` consumes. Only a change to that set
+prints a drift warning; correction pairs (``wrong => right``) and
+``@``-prefixed LLM-only names are render-safe and never warn.
+A missing glossary file warns and proceeds (fail-open).
+
+By default the rendered Markdown is written to ``<sidecar-stem>.md``
+next to the sidecar, **overwriting** any existing file — the output is
+fully derived from the sidecar, so the previous file is replaced, not
+accumulated. ``--out`` is the way to write elsewhere.
 
 ``--name LABEL=NAME`` values are persisted into the sidecar's
 ``speaker_names`` by rewriting the JSON in place atomically: the
@@ -27,6 +35,7 @@ Exit codes:
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -34,7 +43,7 @@ from typing import Any
 
 import typer
 
-from vemoizer.sidecar import sha256_over_files
+from vemoizer.glossary import _read_lines
 
 
 def _read_sidecar(path: Path) -> dict[str, Any] | None:
@@ -83,6 +92,43 @@ def _resolve_glossary_files(glossary: Path | None) -> list[Path]:
     from vemoizer.sidecar import glossary_layer_files
 
     return glossary_layer_files()
+
+
+def _prompt_term_hash(files: list[Path]) -> str | None:
+    """sha256 over the current prompt-term set (the input to ``glossary_prompt``).
+
+    Reads each glossary file in list order (project first) and keeps the
+    non-correction, non-``@`` lines — the prompt terms — deduped
+    case-insensitively with the first-seen spelling winning (project over
+    home, mirroring ``glossary_layers.merge``). The hash is over the
+    newline-joined list, so the warning fires only when the set of terms
+    the whisper prompt actually consumes changes; adding correction pairs
+    (``wrong => right``) or ``@`` names never trips it.
+
+    ``None`` when *files* is empty or no file is readable (fail-open,
+    mirroring ``sha256_over_files``).
+    """
+    if not files:
+        return None
+    seen: set[str] = set()
+    terms: list[str] = []
+    for path in files:
+        try:
+            lines = _read_lines(path)
+        except (OSError, UnicodeDecodeError, ValueError):
+            # Fail-open on a single unreadable file; the warning is printed
+            # separately by _load_corrections / the missing-file path.
+            continue
+        for line in lines:
+            if "=>" in line:
+                continue
+            if line.startswith("@"):
+                continue
+            key = line.lower()
+            if key not in seen:
+                seen.add(key)
+                terms.append(line)
+    return hashlib.sha256("\n".join(terms).encode("utf-8")).hexdigest()
 
 
 def _load_corrections(files: list[Path]) -> dict[str, str]:
@@ -194,11 +240,11 @@ def register_render(app) -> None:
 
         corrections = _load_corrections(files)
 
-        # --- Hash comparison ---
+        # --- Hash comparison (prompt-term set only) ---
         options = data.get("options")
         if isinstance(options, dict):
             stored_hash = options.get("glossary_sha256")
-            current_hash = sha256_over_files([str(f) for f in files]) if files else None
+            current_hash = _prompt_term_hash(files)
             if (
                 stored_hash is not None
                 and current_hash is not None
@@ -248,9 +294,7 @@ def register_render(app) -> None:
                 raise typer.Exit(code=1) from e
             typer.echo(f"wrote {out}")
         else:
-            from vemoizer.output.naming import collision_free_path
-
-            md_path = collision_free_path(sidecar_path.parent, sidecar_path.stem, ".md")
+            md_path = sidecar_path.with_suffix(".md")
             try:
                 md_path.write_text(markdown, encoding="utf-8")
             except OSError as e:
