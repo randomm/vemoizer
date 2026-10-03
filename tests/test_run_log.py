@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import stat
 from collections.abc import Iterator
 from pathlib import Path
@@ -89,6 +90,49 @@ class TestLogFile:
         assert log.exists()
         assert _mode(log.parent) == 0o700
         assert _mode(log) == 0o600
+
+    def test_file_created_with_0600_mode_at_open_time(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """Creation-time mode: patch ``os.open`` to record the mode arg
+        (assert 0o600 under umask 0)."""
+        recorded_modes: list[int] = []
+        original_open = os.open
+
+        def spy_open(path: str | bytes | Path, flags: int, mode: int = 0o777) -> int:
+            if "memo.log" in str(path):
+                recorded_modes.append(mode)
+            return original_open(path, flags, mode)
+
+        monkeypatch.setattr(os, "open", spy_open)
+        old_umask = os.umask(0)  # permissive umask: creation-time mode must win
+        try:
+            with file_log("memo", base_dir=tmp_path, verbose=False, quiet=True):
+                pass
+        finally:
+            os.umask(old_umask)
+
+        assert recorded_modes == [0o600], (
+            f"os.open was called with mode {recorded_modes}, expected [0o600]"
+        )
+        log = _logs_dir(tmp_path) / "memo.log"
+        assert _mode(log) == 0o600
+
+    def test_rerun_truncates_wider_preexisting_file_to_0600(self, tmp_path: Path):
+        """A pre-existing wider-mode (0644) log must be truncated on re-run
+        and end at 0600 (O_CREAT ignores mode on an existing file; fchmod
+        fixes it)."""
+        log = _logs_dir(tmp_path) / "memo.log"
+        _logs_dir(tmp_path).mkdir(parents=True)
+        log.write_text("old", encoding="utf-8")
+        log.chmod(0o644)
+        assert _mode(log) == 0o644
+        with file_log("memo", base_dir=tmp_path, verbose=False, quiet=True):
+            logging.getLogger("vemoizer.run_log_test").info("second run")
+        assert _mode(log) == 0o600
+        content = log.read_text(encoding="utf-8")
+        assert "second run" in content
+        assert "old" not in content
 
     def test_nfc_stem_used_verbatim(self, tmp_path: Path) -> None:
         with file_log("caf\u00e9", base_dir=tmp_path, verbose=False, quiet=True):

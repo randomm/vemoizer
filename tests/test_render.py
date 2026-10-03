@@ -10,6 +10,7 @@ holds iff the sidecar's paragraphs/notes/part_markers are faithful.
 from __future__ import annotations
 
 import sys
+from typing import cast
 
 from vemoizer import render
 from vemoizer.output.markdown import format_md
@@ -359,8 +360,11 @@ def test_render_sidecar_with_string_entry_in_paragraphs_does_not_crash() -> None
     non-dict entries.
     """
     sidecar = _sidecar()
-    sidecar["paragraphs"].append("corrupted-string-entry")  # type: ignore[valid-type]
-    sidecar["paragraphs"].append(None)  # type: ignore[valid-type]
+    paragraphs: list[dict | str | None] = cast(
+        "list[dict | str | None]", sidecar["paragraphs"]
+    )
+    paragraphs.append("corrupted-string-entry")
+    paragraphs.append(None)
 
     md = render_markdown(sidecar, corrections=_corrections(), speaker_names={})
     # The valid dict entries still render with corrections applied.
