@@ -413,6 +413,74 @@ def test_prompt_term_hash_equals_run_seam_derivation(tmp_path: Path) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Symlinked PARENT directory (issue #107, fix pass 4, LENS MEDIUM #2)
+# ---------------------------------------------------------------------------
+
+
+def test_render_default_out_through_symlinked_parent_dir_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sidecar's PARENT directory is a symlink to a real directory and
+    the .md does not exist yet. ``os.replace`` must NOT replace the
+    directory symlink itself: Rename resolves intermediate symlinks, so
+    the file lands inside the real directory, the directory symlink
+    survives, the file gets the new-target policy mode (0644), and no
+    temp file is left behind."""
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    real = tmp_path / "realdir"
+    real.mkdir()
+    link = tmp_path / "linkdir"  # a symlink to a directory, not a file
+    link.symlink_to(real)
+    assert link.is_symlink()
+
+    sc = _write_sidecar(real, _sidecar())  # sidecar inside the real dir
+
+    result = runner.invoke(app, ["render", str(sc)])
+    assert result.exit_code == 0, result.stderr
+
+    # The directory symlink must still be a symlink (not replaced by a dir).
+    assert link.is_symlink(), "directory symlink was replaced by os.replace"
+    md = real / "sidecar.md"
+    assert md.is_file() and not md.is_symlink()
+    assert "# Alustus" in md.read_text(encoding="utf-8")
+    # New target: the umask default policy mode (0644), not 0600.
+    assert _imode(md) == 0o644
+    # No temp file left in the real directory.
+    assert len(list(real.glob("*.tmp-*"))) == 0
+
+
+def test_render_out_flag_through_symlinked_parent_dir_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same symlinked-parent safety for an explicit ``--out`` path whose
+    PARENT component is a symlink to a real directory."""
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    real = tmp_path / "realdir"
+    real.mkdir()
+    link = tmp_path / "linkdir"
+    link.symlink_to(real)
+    assert link.is_symlink()
+
+    sc = _write_sidecar(tmp_path, _sidecar())
+    out = link / "out.md"  # goes through the symlinked parent
+
+    result = runner.invoke(app, ["render", str(sc), "--out", str(out)])
+    assert result.exit_code == 0, result.stderr
+
+    assert link.is_symlink(), "directory symlink was replaced by os.replace"
+    target = real / "out.md"
+    assert target.is_file() and not target.is_symlink()
+    assert "# Alustus" in target.read_text(encoding="utf-8")
+    assert _imode(target) == 0o644
+    assert len(list(real.glob("*.tmp-*"))) == 0
+
+
+# ---------------------------------------------------------------------------
+# Prompt-term-set hash: render's derivation vs the run's seam (lens medium)
+# ---------------------------------------------------------------------------
+
+
 def test_prompt_term_set_hash_skips_non_regular_paths(tmp_path: Path) -> None:
     """A non-regular path (a directory) in the file list is skipped
     before any read attempt, so a special file cannot block or crash
