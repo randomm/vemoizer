@@ -29,8 +29,15 @@ from pathlib import Path
 
 import typer
 
-from vemoizer.battery import on_battery
-from vemoizer.diarization import SpeakerCount
+from vemoizer.cli_support import (
+    parse_speakers as _parse_speakers,
+)
+from vemoizer.cli_support import (
+    run_log_configure as _run_log_configure,
+)
+from vemoizer.cli_support import (
+    warn_on_battery as _warn_on_battery,
+)
 from vemoizer.eval_cli import register_eval
 from vemoizer.glossary_check import register_glossary
 from vemoizer.names_cli import register_names
@@ -65,34 +72,6 @@ def doctor() -> None:
         raise typer.Exit(code=1)
 
 
-def _run_log_configure(*, verbose: bool, quiet: bool, config_path: str | None) -> None:
-    """Set the per-invocation run-log context (issue #111, M4c).
-    Resolves the LLM config fail-open to recover ``api_key_env`` (scrubbed by
-    the ``run_log`` redaction formatter); a config error is the seam's job.
-    """
-    from vemoizer.run_log import configure
-
-    api_key_env: str | None = None
-    try:
-        from vemoizer.batch import _resolve_llm_config
-
-        cfg = _resolve_llm_config(config_path)
-        if cfg is not None:
-            api_key_env = cfg.api_key_env
-    except Exception:  # noqa: BLE001 - fail-open: config errors are the seam's job
-        pass
-    configure(verbose=verbose, quiet=quiet, llm_api_key_env=api_key_env)
-
-
-def _warn_on_battery() -> None:
-    """Emit a battery warning to stderr if running on battery power."""
-    if on_battery():
-        typer.echo(
-            "warning: running on battery power — transcription may take a while",
-            err=True,
-        )
-
-
 @models_app.command("pull")
 def models_pull() -> None:
     """Pre-download and revision-pin all models, then report cache sizes."""
@@ -103,25 +82,6 @@ def models_pull() -> None:
     typer.echo(render_pull_report(results, sizes))
     if any(r.error is not None for r in results):
         raise typer.Exit(code=1)
-
-
-def _parse_speakers(value: str | None) -> SpeakerCount | None:
-    """``--speakers`` as an exact count ("4") or bounds ("3-5").
-
-    Validated before any transcription, like --format: a typo must fail in
-    milliseconds, not after minutes of decoding.
-    """
-    if value is None:
-        return None
-    lo, sep, hi = value.partition("-")
-    try:
-        bounds = (int(lo), int(hi)) if sep else (int(lo), int(lo))
-    except ValueError:
-        bounds = (0, 0)
-    if bounds[0] < 1 or bounds[1] < bounds[0]:
-        typer.echo(f"error: --speakers expects N or MIN-MAX (got {value!r})", err=True)
-        raise typer.Exit(code=2)
-    return bounds if sep else bounds[0]
 
 
 @app.command()
