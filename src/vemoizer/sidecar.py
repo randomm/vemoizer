@@ -118,6 +118,21 @@ def build_sidecar(
 
     result.setdefault("speaker_names", {})
 
+    # M6: persist duration_s and glossary_source onto the sidecar so a
+    # sidecar → render → md round-trip reproduces the Kesto / Sanasto
+    # header lines (issue #107, finding 2). Both are already on the run
+    # dict: duration_s from pipeline.py (decoded-audio seconds), and
+    # glossary_source stashed by the preset seam before this call. They
+    # are present-only — a missing duration (ffmpeg fail-open) or an
+    # absent glossary leaves the key out, exactly like the source[]
+    # per-part duration_s.
+    _dur = result.get("duration_s")
+    if _dur is not None:
+        result["duration_s"] = _dur
+    _gsrc = result.get("glossary_source")
+    if _gsrc:
+        result["glossary_source"] = _gsrc
+
     result.pop("_source_durations", None)
     return result
 

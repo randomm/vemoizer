@@ -200,6 +200,14 @@ def format_json(transcript: dict[str, Any]) -> str:
     sn = transcript.get("speaker_names")
     if isinstance(sn, dict) and sn:
         out["speaker_names"] = sn
+    # M6 (issue #107): header keys persisted by build_sidecar so a
+    # sidecar → render → md round-trip reproduces the Kesto / Sanasto
+    # lines. Present-only: absent on expert transcribe JSON and old
+    # sidecars (no golden-fixture regeneration).
+    if transcript.get("duration_s") is not None:
+        out["duration_s"] = transcript["duration_s"]
+    if transcript.get("glossary_source"):
+        out["glossary_source"] = transcript["glossary_source"]
     return json.dumps(out, ensure_ascii=False, indent=2) + "\n"
 
 

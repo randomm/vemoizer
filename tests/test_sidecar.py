@@ -537,3 +537,106 @@ def test_glossary_layer_files_project_parent_walkup(
     files = glossary_layer_files()
     assert len(files) == 1
     assert files[0] == tmp_path / ".vemoizer" / "glossary.txt"
+
+
+# ---------------------------------------------------------------------------
+# build_sidecar — header persistence (issue #107, finding 2)
+# ---------------------------------------------------------------------------
+
+
+def test_build_sidecar_persists_duration_s(tmp_path: Path) -> None:
+    """A result with duration_s (from pipeline.py) keeps it in the sidecar."""
+    result: dict[str, Any] = {
+        "text": "hei",
+        "segments": [],
+        "source_path": str(tmp_path / "a.m4a"),
+        "duration_s": 9.15,
+        "_source_durations": [9.15],
+    }
+    build_sidecar(result, command="meeting", glossary_files=None)
+    assert result["duration_s"] == 9.15
+    assert "_source_durations" not in result
+
+
+def test_build_sidecar_omits_duration_s_when_absent(tmp_path: Path) -> None:
+    """A result without duration_s (ffmpeg fail-open) has no duration_s key."""
+    result: dict[str, Any] = {
+        "text": "hei",
+        "segments": [],
+        "source_path": str(tmp_path / "a.m4a"),
+    }
+    build_sidecar(result, command="meeting", glossary_files=None)
+    assert "duration_s" not in result
+
+
+def test_build_sidecar_persists_glossary_source(tmp_path: Path) -> None:
+    """A result with glossary_source (stashed by the preset seam) keeps it."""
+    gfile = tmp_path / "glossary.txt"
+    gfile.write_text("Blacksit => Flagship\n", encoding="utf-8")
+    result: dict[str, Any] = {
+        "text": "hei",
+        "segments": [],
+        "source_path": str(tmp_path / "a.m4a"),
+        "duration_s": 10.0,
+        "glossary_source": f"{gfile} (1 terms)",
+        "_source_durations": [10.0],
+    }
+    build_sidecar(result, command="meeting", glossary_files=[str(gfile)])
+    assert result["glossary_source"] == f"{gfile} (1 terms)"
+
+
+def test_build_sidecar_omits_glossary_source_when_absent(tmp_path: Path) -> None:
+    """A result without glossary_source (no glossary) has no such key."""
+    result: dict[str, Any] = {
+        "text": "hei",
+        "segments": [],
+        "source_path": str(tmp_path / "a.m4a"),
+        "duration_s": 5.0,
+        "_source_durations": [5.0],
+    }
+    build_sidecar(result, command="meeting", glossary_files=None)
+    assert "glossary_source" not in result
+
+
+def test_sidecar_round_trip_md_includes_header_lines() -> None:
+    """A direct md render equals a sidecar → render → md render (issue #107, finding 2).
+
+    The sidecar carries duration_s and glossary_source; the rendered md
+    must include the Kesto and Sanasto header lines.
+    """
+    from vemoizer.output.markdown import format_md
+    from vemoizer.render import render_markdown
+
+    run_result: dict[str, Any] = {
+        "text": "Puhuttiin Blacksit-hankkeesta.",
+        "duration_s": 9.15,
+        "glossary_source": "/path/to/.vemoizer/glossary.txt (1 terms)",
+        "paragraphs": [
+            {
+                "start": 0.0,
+                "end": 5.0,
+                "text": "Puhuttiin Blacksit-hankkeesta.",
+                "speaker": "SPEAKER_1",
+            },
+        ],
+        "notes": {"title": "Alustus"},
+    }
+    sidecar = build_sidecar(dict(run_result), command="meeting", glossary_files=None)
+
+    # The sidecar carries both header keys.
+    assert sidecar["duration_s"] == 9.15
+    assert sidecar["glossary_source"] == "/path/to/.vemoizer/glossary.txt (1 terms)"
+
+    # Direct md render (what the original run wrote).
+    run_md = format_md(run_result)
+
+    # Sidecar → render → md render.
+    render_md = render_markdown(sidecar, corrections={}, speaker_names={})
+
+    # Both header lines present in both renders.
+    for md in (run_md, render_md):
+        assert "Kesto: [00:00:09]" in md
+        assert "Sanasto: /path/to/.vemoizer/glossary.txt (1 terms)" in md
+
+    # Round-trip identity.
+    assert render_md == run_md
