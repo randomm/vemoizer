@@ -431,7 +431,7 @@ def _isolated_search(home: Path, cwd: Path) -> LLMConfig | None:
     """
     from vemoizer.llm_config import _default_search
 
-    return _default_search(
+    cfg, _raw = _default_search(
         home=lambda: home,
         cwd=lambda: cwd,
         legacy_paths=(
@@ -439,6 +439,7 @@ def _isolated_search(home: Path, cwd: Path) -> LLMConfig | None:
             home / ".vemoizer.toml",
         ),
     )
+    return cfg
 
 
 def test_meeting_home_config_reaches_pipeline_without_config_flag(
@@ -550,7 +551,7 @@ def _legacy_notice_case(tmp_path: Path, newer_layer_wins: bool):
     _write_config(home, ".config/vemoizer", "legacy-model")
     if newer_layer_wins:
         _write_config(home, ".vemoizer", "new-model")
-    return llm_module._default_search(
+    cfg, _raw = llm_module._default_search(
         home=lambda: home,
         cwd=lambda: tmp_path / "clean",
         legacy_paths=(
@@ -558,6 +559,7 @@ def _legacy_notice_case(tmp_path: Path, newer_layer_wins: bool):
             home / ".vemoizer.toml",
         ),
     )
+    return cfg
 
 
 def test_preset_legacy_config_used_prints_deprecation_notice(

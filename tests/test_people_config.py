@@ -105,12 +105,15 @@ def _project_config(tmp_path: Path) -> Path:
 
 
 def _search_people_config(tmp_path: Path):
-    """Run ``llm_config._default_search`` against an isolated fake HOME / CWD."""
+    """Run ``llm_config._default_search`` against an isolated fake HOME / CWD.
+
+    Returns just the ``LLMConfig`` half of the ``_default_search`` tuple.
+    """
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     proj = tmp_path / "proj"
     proj.mkdir(exist_ok=True)
-    return _default_search(
+    cfg, _raw = _default_search(
         home=lambda: home,
         cwd=lambda: proj,
         legacy_paths=(
@@ -118,6 +121,7 @@ def _search_people_config(tmp_path: Path):
             home / ".vemoizer.toml",
         ),
     )
+    return cfg
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +150,7 @@ class TestStrictLoadPeople:
         )
         home = tmp_path / "home"
         home.mkdir()
-        cfg = _default_search(
+        cfg, _raw = _default_search(
             home=lambda: home,
             cwd=lambda: proj,
             legacy_paths=(home / ".config" / "vemoizer" / "config.toml",),
@@ -380,7 +384,7 @@ class TestRoundTrip:
         # The written config still passes strict load (the next meeting run).
         home = tmp_path / "home"
         home.mkdir(exist_ok=True)
-        cfg = _default_search(
+        cfg, _raw = _default_search(
             home=lambda: home,
             cwd=lambda: tmp_path,
             legacy_paths=(home / ".config" / "vemoizer" / "config.toml",),

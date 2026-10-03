@@ -155,8 +155,14 @@ def _parse_llm_section(section: dict[str, Any]) -> LLMConfig | None:
     )
 
 
-def _strict_load(path: Path) -> LLMConfig:
-    """Load *path* under strict rules; raise :class:`ConfigError` on violation."""
+def _strict_load_raw(path: Path) -> tuple[LLMConfig, dict[str, Any]]:
+    """Strict load that returns ``(config, raw)`` from a single read.
+
+    Raises :class:`ConfigError` on any violation, exactly as
+    :func:`_strict_load` does — the only difference is that the already
+    parsed raw dict rides along, so the caller never re-reads the file
+    (issue #108 review).
+    """
     raw = _read_toml(path)
     if raw is None:
         raise ConfigError(f"config file not found or unreadable: {path}")
@@ -195,6 +201,12 @@ def _strict_load(path: Path) -> LLMConfig:
             f"malformed {LLM_CONFIG_SECTION!r} section in {path} "
             f"(required: base_url, model, api_key_env, timeout_seconds>0)"
         )
+    return config, raw
+
+
+def _strict_load(path: Path) -> LLMConfig:
+    """Load *path* under strict rules; raise :class:`ConfigError` on violation."""
+    config, _raw = _strict_load_raw(path)
     return config
 
 
@@ -275,6 +287,33 @@ def _legacy_search(legacy_paths: tuple[Path, ...] | None = None) -> LLMConfig | 
     return None
 
 
+def _legacy_search_with_raw(
+    legacy_paths: tuple[Path, ...],
+) -> tuple[LLMConfig | None, dict[str, Any] | None]:
+    """Like :func:`_legacy_search` but returns ``(config, raw)``.
+
+    The legacy layer stays fail-open (a malformed or section-less file is
+    skipped); the deprecation notice is printed at most once per run, and
+    only when the ``~/.config`` path actually wins. The winning file is read
+    exactly once here — the caller never re-reads it (issue #108 review).
+    """
+    deprecated_first = legacy_paths[0]
+    for candidate in legacy_paths:
+        raw = _read_toml(candidate)
+        if raw is None:
+            continue
+        section = raw.get(LLM_CONFIG_SECTION)
+        if not isinstance(section, dict):
+            continue
+        config = _parse_llm_section(section)
+        if config is None:
+            continue
+        if candidate == deprecated_first:
+            print(LEGACY_DEPRECATION_NOTICE, file=sys.stderr)
+        return config, raw
+    return None, None
+
+
 def _resolve_config_path(path: str | None) -> Path | None:
     """The config file *path* designates, or ``None``.
 
@@ -302,9 +341,16 @@ def _default_search(
     home: Callable[[], Path] | None = None,
     cwd: Callable[[], Path] | None = None,
     legacy_paths: tuple[Path, ...] | None = None,
-) -> LLMConfig | None:
+) -> tuple[LLMConfig | None, dict[str, Any] | None]:
     """Run the layered search (project walk-up → home → legacy); injectable
-    hooks for tests only."""
+    hooks for tests only.
+
+    Returns ``(llm_config, raw)`` — the parsed ``[llm]`` section and the
+    raw dict of the single config file that won the search, so the caller
+    gets both from exactly one read per run (issue #108 review). The legacy
+    fail-open layer reads once per legacy candidate it probes (at most the
+    two legacy paths), never the winning file twice.
+    """
     if home is None:
         home = Path.home
     if cwd is None:
@@ -316,13 +362,13 @@ def _default_search(
     # up from CWD wins over the home layer (issue #82 precedence).
     project_config = _find_nearest_vemoizer_config(cwd())
     if project_config is not None:
-        return _strict_load(project_config)
+        return _strict_load_raw(project_config)
 
     home_config = home() / ".vemoizer" / "config.toml"
     if home_config.is_file():
-        return _strict_load(home_config)
+        return _strict_load_raw(home_config)
 
-    return _legacy_search(legacy_paths)
+    return _legacy_search_with_raw(legacy_paths)
 
 
 def load_language(path: str | None = None) -> str:
@@ -376,14 +422,8 @@ def load_default_config(
             raw,
         )
 
-    try:
-        config = _default_search()
-    except ConfigError:
-        # The strict project/home layer is fail-LOUD by contract; the
-        # batch-layer pre-check (_resolve_llm_config) turns the ConfigError
-        # into a clean error before transcribe_file ever runs.
-        raise
-    if config is None:
-        return None, None
-    candidate = _resolve_config_path(None)
-    return config, _read_toml(candidate) if candidate is not None else None
+    # The strict project/home layer is fail-LOUD by contract (issue #82);
+    # the batch-layer pre-check (_resolve_llm_config) turns the ConfigError
+    # into a clean error before transcribe_file ever runs. One config file is
+    # read and parsed once per run (issue #108 review).
+    return _default_search()

@@ -76,7 +76,7 @@ def _config_load() -> tuple[LLMConfig | None, str | None]:
     from .llm_config import ConfigError, _default_search
 
     try:
-        config = _default_search()
+        config, _ = _default_search()
     except ConfigError as e:
         return None, str(e)
     return config, None

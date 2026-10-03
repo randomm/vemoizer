@@ -120,7 +120,7 @@ def _resolve_llm_config(config_path: str | None) -> LLMConfig | None:
 
     if config_path is not None:
         return load_config(config_path)
-    return _default_search()
+    return _default_search()[0]
 
 
 # The expert transcribe loop now lives in transcribe_loop.py (the 500-line
