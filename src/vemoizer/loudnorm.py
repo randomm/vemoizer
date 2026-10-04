@@ -248,6 +248,21 @@ def decode_argv(p: Path, preprocess: str | None) -> list[str]:
     return _decode_args(("-af", loudnorm_pass2_filter(measurement))) + [str(p)]
 
 
+def measurement_for(path: Path) -> LoudnormMeasurement | None:
+    """The loudnorm measurement for *path*, memoized (fail open).
+
+    Memoized in an in-process cache keyed by ``(resolved path, size,
+    mtime)``: a group run measures the same file several times (per-part
+    offsets, the group's own decode, the sidecar durations), and pass 1
+    is a full-file pass — an unchanged file is measured once, a changed
+    or deleted file is re-measured. A FAILED measurement is cached too
+    (``None``): a file that just failed is not re-measured (or
+    re-warned) on every call, and the warning is emitted by the caller
+    that finds ``None`` — once per call site, as before.
+    """
+    return _measurement_for(path)
+
+
 def _measurement_for(path: Path) -> LoudnormMeasurement | None:
     """The loudnorm measurement for *path*, memoized (fail open).
 

@@ -63,7 +63,7 @@ def _decode_edge_window(
 
     extra: tuple[str, ...] = ()
     if preprocess == "loudnorm":
-        measurement = _loudnorm._measure_loudnorm(path)
+        measurement = _loudnorm.measurement_for(path)
         if measurement is not None:
             extra = ("-af", _loudnorm.loudnorm_pass2_filter(measurement))
         else:
