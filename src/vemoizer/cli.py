@@ -41,6 +41,7 @@ from vemoizer.cli_support import (
 from vemoizer.eval_cli import register_eval
 from vemoizer.glossary_check import register_glossary
 from vemoizer.names_cli import register_names
+from vemoizer.output.formatters import OUTPUT_FORMATS
 from vemoizer.render_cli import register_render
 
 app = typer.Typer(
@@ -93,8 +94,8 @@ def transcribe(
     ),
     format: str = typer.Option(  # noqa: B008
         "all",
-        help="Output format: txt, json, srt, vtt, or a comma-separated subset. "
-        "Default: all four formats.",
+        help=f"Output format: {' or '.join(OUTPUT_FORMATS)}, or a comma-separated "
+        f"subset. Default: all {len(OUTPUT_FORMATS)} formats.",
     ),
     quiet: bool = typer.Option(  # noqa: B008
         False,
@@ -189,7 +190,7 @@ def transcribe(
     )
 
     from vemoizer.batch import transcribe_batch
-    from vemoizer.output.formatters import FORMAT_EXTENSIONS, OUTPUT_FORMATS
+    from vemoizer.output.formatters import FORMAT_EXTENSIONS
     from vemoizer.progress_wiring import make_batch_display
 
     # M4b (issue #105): one display per CLI invocation, constructed before

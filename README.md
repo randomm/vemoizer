@@ -36,10 +36,10 @@ surrounding context.
 Every stage **fails open**: no LLM key, no re-decode model, no diarization
 token — you still get a complete transcript.
 
-A 64-minute memo processes in ~8 minutes on an M-series Mac, including the
-consensus stages. Each transcribed file also writes a full per-file log to
-`./.vemoizer/logs/<name>.log` (regardless of `-v`), with HuggingFace tokens
-and LLM API keys redacted.
+Wall-clock time scales with memo length and Mac model; the consensus
+stages make it slower than a single decode. Each transcribed file also
+writes a full per-file log to `./.vemoizer/logs/<name>.log` (regardless of
+`-v`), with HuggingFace tokens and LLM API keys redacted.
 
 ## Install as a tool
 
@@ -63,7 +63,10 @@ uv run vemoizer models pull     # pre-download the revision-pinned models
 Requirements: macOS on Apple Silicon, Python ≥ 3.11, `ffmpeg` on PATH.
 
 **LLM (optional).** Adjudication and the Markdown notes use any
-OpenAI-compatible endpoint, configured in `~/.config/vemoizer/config.toml`:
+OpenAI-compatible endpoint. The config file is searched in order: the
+nearest `./.vemoizer/config.toml` (walked up from the current directory),
+then `~/.vemoizer/config.toml`; the legacy `~/.config/vemoizer/config.toml`
+still works with a deprecation notice:
 
 ```toml
 [llm]
@@ -99,19 +102,15 @@ See `docs/pipeline-spec.md` → "Fully-offline LLM" for the full spec.
 weights: accept the license on HuggingFace and provide an access token
 before first use. Attribution is printed whenever the stage runs.
 
-An interactive `vemoizer meeting` run asks one final question at the end —
-`Name the speakers now? [y/N]` — and, on yes, names the speakers via
-`vemoizer names` on each recorded meeting.
-
 ## Commands
 
-| Task | Command |
-|---|---|
-| Transcribe | `uv run vemoizer transcribe memo.m4a` |
-| Pick formats | `uv run vemoizer transcribe memo.m4a --format txt,md` |
-| Speaker labels | `uv run vemoizer transcribe memo.m4a --diarize` |
-| WER regression gate | `uv run vemoizer eval --backend all --check` |
-| Pre-download models | `uv run vemoizer models pull` |
+`meeting` and `memo` are the recommended entry points: they write dated
+`YYYY-MM-DD <title>` outputs (`.md` + `.json`). `transcribe` is the expert
+flag surface (stem-named outputs, per-file format selection).
+
+To name speakers after a run: `vemoizer names <x.json>` (interactive) or
+`vemoizer render --name LABEL=NAME <x.json>`; put default names in the
+`people = [ ... ]` list of the config file.
 
 ## Accuracy is measured, not asserted
 
