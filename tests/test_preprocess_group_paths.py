@@ -27,10 +27,12 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
+from _cli_helpers import ffmpeg_has_loudnorm
 
 from vemoizer import loudnorm as ln
 
 HAS_FFMPEG = shutil.which("ffmpeg") is not None
+HAS_LOUDNORM = HAS_FFMPEG and ffmpeg_has_loudnorm()
 
 
 def _make_m4a_lavfi(path: Path, seconds: float = 25.0) -> Path:
@@ -112,6 +114,14 @@ class _SpiedSubprocess:
 
 
 @pytest.fixture(autouse=True)
+def _chdir_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test runs inside ``tmp_path`` so the group-path output writes
+    (``part_a.md``/``.txt``/... in CWD) land in the pytest tmp dir, never
+    the repo/worktree root (issue #135 fix pass 4)."""
+    monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(autouse=True)
 def _clean_cache():
     ln._MEASURE_CACHE.clear()
     yield
@@ -163,11 +173,6 @@ def _make_group_files(tmp_path: Path) -> list[Path]:
     ]
 
 
-def _chdir_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Chdir into tmp_path so preset output writes go there, not the CWD."""
-    monkeypatch.chdir(tmp_path)
-
-
 def _assert_all_filtered(
     recs: dict[str, list[list[str]]],
     label: str,
@@ -204,6 +209,8 @@ def test_run_batch_group_path_loudnorm(
     carries the loudnorm filter; pass 1 runs exactly once per part file."""
     if not HAS_FFMPEG:
         pytest.skip("ffmpeg not available")
+    if not HAS_LOUDNORM:
+        pytest.skip("ffmpeg loudnorm filter not available")
 
     from vemoizer import batch
     from vemoizer import ingest as ing
@@ -320,10 +327,18 @@ def test_run_batch_non_vacuity_keyword_dropped(
     ``preprocess=`` keyword before ``decode_boundaries`` (the lens's
     suspected bug), the edge-window argv loses the loudnorm filter.
 
-    This proves the ``test_run_batch_group_path_loudnorm`` assertion is
-    not vacuous: it would catch the bug."""
+    This simulates the dropped keyword by wrapping
+    ``vemoizer.grouping.decode_boundaries`` (the name ``run_batch`` looks
+    up via its deferred ``from .grouping import decode_boundaries``) so
+    the keyword never reaches the boundary decode; the same call site
+    with the keyword intact (``test_run_batch_group_path_loudnorm``) is
+    the unpatched control that shows the filter present. Together the
+    pair proves the filter's presence on the edge-window argv depends on
+    the keyword reaching ``decode_boundaries``."""
     if not HAS_FFMPEG:
         pytest.skip("ffmpeg not available")
+    if not HAS_LOUDNORM:
+        pytest.skip("ffmpeg loudnorm filter not available")
 
     from vemoizer import batch
     from vemoizer import grouping as grouping_mod
@@ -350,12 +365,16 @@ def test_run_batch_non_vacuity_keyword_dropped(
     )
     opts = replace(opts, preprocess="loudnorm")
 
-    # Simulate the lens bug: the call site drops the preprocess keyword.
+    # Simulate the dropped keyword: a wrapper that drops the `preprocess`
+    # keyword before forwarding to the real decode_boundaries.
     orig_db = grouping_mod.decode_boundaries
 
-    def db_drop(files_, tfn=None, **kw):
-        kw.pop("preprocess", None)
-        return orig_db(files_, tfn, **kw)
+    def db_drop(files_, tfn, *, preprocess=None):
+        # preprocess is deliberately accepted and ignored here: with the
+        # call site intact, run_batch forwards preprocess='loudnorm' and
+        # the wrapper silently drops it, mimicking a call site that never
+        # passed the keyword.
+        return orig_db(files_, tfn)
 
     with (
         patch.object(ing.subprocess, "run", spied.run),
@@ -368,8 +387,10 @@ def test_run_batch_non_vacuity_keyword_dropped(
             "_transcribe_guarded",
             lambda target, options, desc, display=None: _fake_transcribe_file()(target),
         ),
+        # Patch the name run_batch actually looks up (the deferred
+        # ``from .grouping import decode_boundaries`` at the call site);
+        # patching ``batch.decode_boundaries`` alone is inert.
         patch.object(grouping_mod, "decode_boundaries", db_drop),
-        patch.object(batch, "decode_boundaries", db_drop),
     ):
         rc = batch.run_batch(list(files), opts, yes=True, print_fn=lambda s: None)
 
@@ -378,7 +399,8 @@ def test_run_batch_non_vacuity_keyword_dropped(
     edge = recs.get("EDGE", [])
     assert len(edge) >= 2, f"expected >= 2 edge windows, got {len(edge)}"
 
-    # The edge windows must NOT carry the filter (the keyword was dropped).
+    # The edge windows must NOT carry the filter (the keyword was dropped
+    # before it reached the boundary decode).
     for argv in edge:
         assert not _has_loudnorm(argv), (
             "NON-VACUITY FAILED: edge window still carries the loudnorm "
@@ -400,7 +422,6 @@ def test_run_preset_meeting_group_path_loudnorm(
     from vemoizer.batch_preset import run_preset
 
     files = _make_group_files(tmp_path)
-    _chdir_tmp(tmp_path, monkeypatch)
     recs: dict[str, list[list[str]]] = {}
 
     real_run = ing.subprocess.run
@@ -455,7 +476,6 @@ def test_run_preset_meeting_group_path_no_flag(
     from vemoizer.batch_preset import run_preset
 
     files = _make_group_files(tmp_path)
-    _chdir_tmp(tmp_path, monkeypatch)
     recs: dict[str, list[list[str]]] = {}
 
     real_run = ing.subprocess.run

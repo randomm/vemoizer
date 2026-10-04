@@ -8,12 +8,38 @@ stays a pure test-suite configuration file.
 from __future__ import annotations
 
 import logging
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 
 import vemoizer.llm_config as llm_module
 import vemoizer.pipeline as pipeline_module
+
+
+def ffmpeg_has_loudnorm() -> bool:
+    """True when ``ffmpeg`` is on PATH AND the build has the ``loudnorm``
+    filter (the only loudnorm-asserting test modules need both).
+
+    The ffmpeg build check is a one-shot subprocess probe: an ffmpeg build
+    that lacks the filter (rare, but possible in CI images) makes the
+    loudnorm measurement fail open, so loudnorm-asserting tests must
+    skip — not fail — when the filter is missing. Single definition
+    shared by every loudnorm test module (issue #135, fix pass 4).
+    """
+    if shutil.which("ffmpeg") is None:
+        return False
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-filters"],
+            capture_output=True,
+            check=False,
+            timeout=10.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return b"loudnorm" in proc.stdout
 
 
 def touch_files(names: list[str], tmp_path: Path) -> list[Path]:
