@@ -23,6 +23,16 @@ selected from the **FLEURS** dataset:
 - Config: `fi_fi` (Finnish, Finland)
 - Split: `train` (the `parquet-data/fi_fi/train-00000-of-00001.parquet`
   file)
+- Revision: the committed clips were drawn from dataset commit
+  `70bb2e84b976b7e960aa89f1c648e09c59f894dd` (the `main` tip as of
+  2026-10-03, the commit that converted the dataset to parquet). The
+  parquet file's content identity is pinned here by SHA-256:
+  `1fe57ed16edcf35014fd8b3fb6ed85b1a45b9478251fca44c2ae9acee07185c9`
+  (1,988,967,430 bytes; 2,704 rows, 1,463 unique ids). The script's
+  `FLEURS_URL` resolves the `main` branch; a re-run should verify the
+  downloaded file's SHA-256 against this value before regenerating —
+  the selection window makes the clip set sensitive to the dataset's
+  shape, not just to the ids.
 - Licence: **CC-BY-4.0** (Creative Commons Attribution 4.0 International)
   — <https://creativecommons.org/licenses/by/4.0/>
 
@@ -43,10 +53,14 @@ were made. No endorsement is implied.
 - Duration window: `[3.5, 5.5]` seconds
 - Word-count window: `[8, 18]` words
 - Selection method: the committed 28 clips are selected by the script's
-  default `--ids` list (the authoritative clip ids are recorded below);
-  the seeded window draw (`random.Random(seed).sample` over candidates
-  sorted by `(id, row_index)`) is the documented original draw that
-  produced this set. Re-running the script with the default args
+  default `--ids` list (the authoritative clip ids are recorded below),
+  with the duration/word window applied on the ids path as well — FLEURS
+  rows repeat an `id` across speakers, and the window is how the wanted
+  take is picked among them; per recorded id the in-window take count must
+  equal the recorded take count (ids 36 and 748 have two takes, all others
+  one). The seeded window draw (`random.Random(seed).sample` over
+  candidates sorted by `(id, row_index)`) is the documented original draw
+  that produced this set. Re-running the script with the default args
   regenerates exactly the committed 28 clips, byte-identically.
 
 **Committed clip ids** (the authoritative selection, in `(id, take)`
@@ -59,10 +73,11 @@ order; a take `b` is the second row of the same FLEURS `id` in
 1324, 1343
 ```
 
-The same input parquet + the same id list always produces the same set
-of clips (byte-identical WAVs), so the corpus is stable across re-runs.
-The parquet file is a one-time dev-time download (never a runtime
-dependency of `vemoizer`); the script does not fetch on its own.
+The same input parquet + the same id list + the same window always
+produces the same set of clips (byte-identical WAVs), so the corpus is
+stable across re-runs. The parquet file is a one-time dev-time download
+(never a runtime dependency of `vemoizer`); the script does not fetch on
+its own.
 
 **Note on the `fleurs_fi_<id>`, `fleurs_fi_<id>b`, ... stems:** the FLEURS
 parquet keys rows by utterance `id`, not by clip — several rows share an

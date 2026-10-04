@@ -14,10 +14,15 @@ FLEURS Finnish is ungated; the selection reads the dataset's public
 ``pyarrow`` (a dev-time dependency only — never imported at runtime).
 By default the script regenerates exactly the committed 28 clips via
 their recorded FLEURS ids (``--ids``; the authoritative set is in
-``CORPUS_ATTRIBUTION.md``), so a re-run produces byte-identical clips
-without depending on the candidate window. ``--ids seeded`` reproduces
-the original seeded window draw (seed + duration/word bounds fixed here),
-which is how the ids were originally selected (issue #62).
+``CORPUS_ATTRIBUTION.md``). ``--ids seeded`` reproduces the original seeded
+window draw (seed + duration/word bounds fixed here), which is how the ids
+were originally selected (issue #62).
+
+On **both** paths the duration/word window is part of the selection:
+FLEURS rows repeat an ``id`` across speakers, and the window picks the
+wanted take(s) among them (on the ``--ids`` path the in-window take count
+per id is checked against the recorded take count and must match, so a
+drift can never re-letter a stem).
 
 Dev-time usage (network required for the one-time parquet download)::
 
@@ -56,7 +61,6 @@ import struct
 import subprocess
 import sys
 import wave
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -269,22 +273,27 @@ def select_clips(
     original draw (issue #62); the same input + same parameters always
     yields the same set, so a re-run is byte-identical.
 
-    With *ids*, the recorded id list is **authoritative**: the duration/
-    word window is **not** applied, because the recorded ids already encode
-    the exact selection.  Instead, each id's **count** in the list (duplicates
-    = number of takes) is checked against the number of rows that share that
-    id in the dataset.  An id whose row count differs from the recorded take
-    count is a ``ValueError`` naming the id, so a silent corpus swap (e.g.
-    a dataset reshuffle that dropped a take or inserted a new same-id row)
-    can never produce a stem letter that differs from the one recorded in
-    ``CORPUS_ATTRIBUTION.md``.
+    With *ids* (the default ``--ids`` path, the recorded corpus ids), the
+    recorded id list is **authoritative** but the duration/word window IS
+    still applied: FLEURS rows repeat an ``id`` across speakers (different
+    takes of the same reference), and the window is exactly how the wanted
+    take is picked among them. For each recorded id, the number of
+    in-window rows must equal the id's recorded take count (ids 36 and 748
+    have two takes; all others one); fewer or more in-window rows is a
+    ``ValueError`` naming the id, the recorded take count and the in-window
+    count, so a silent corpus swap (a same-id take drifting out of the
+    window, or a new same-id row entering it) can never re-letter a stem
+    relative to ``CORPUS_ATTRIBUTION.md``. The result is sorted by
+    ``(clip_id, row_index)``, so takes within an id come out in stable
+    parquet-row order (``0036`` then ``0036b``).
     """
     if ids is not None:
         if not ids:
             raise ValueError("--ids was given but is empty")
-        expected_counts: dict[int, int] = dict(Counter(ids))
-        # Collect all rows for each recorded id (window not applied).
-        id_rows: dict[int, list[tuple[int, dict[str, object]]]] = {}
+        expected_counts: dict[int, int] = {}
+        for cid in ids:
+            expected_counts[cid] = expected_counts.get(cid, 0) + 1
+        window_rows: dict[int, list[tuple[int, dict[str, object]]]] = {}
         for row_index, r in enumerate(rows):
             if r.get("id") is None:
                 continue
@@ -300,22 +309,30 @@ def select_clips(
             raw = audio["bytes"]
             if not isinstance(raw, (bytes, bytearray)):
                 continue
-            # Audio must parse (raises ValueError on a corrupt row); this is
-            # the only sanity check — the window is deliberately not applied.
-            wav_duration_seconds(_as_bytes(raw))
-            id_rows.setdefault(cid, []).append((row_index, r))
-        # Verify row count per id matches the recorded take count.
+            duration = wav_duration_seconds(_as_bytes(raw))
+            words = str(r["transcription"]).split()
+            if not (
+                MIN_SECONDS <= duration <= MAX_SECONDS
+                and MIN_WORDS <= len(words) <= MAX_WORDS
+            ):
+                continue  # this take is outside the window; a same-id take
+                # inside the window still stands in its place
+            window_rows.setdefault(cid, []).append((row_index, r))
+        # Verify the in-window row count per id matches the recorded take
+        # count: the window is the stem-selection, so a drift here (fewer or
+        # more takes than recorded) would re-letter the stems relative to
+        # CORPUS_ATTRIBUTION.md — refuse instead of guessing.
         for cid, expected in sorted(expected_counts.items()):
-            actual = len(id_rows.get(cid, []))
+            actual = len(window_rows.get(cid, []))
             if actual != expected:
                 raise ValueError(
                     f"clip id {cid}: recorded {expected} take(s) but found "
-                    f"{actual} row(s) in the parquet — the dataset shape "
-                    f"changed; do not regenerate silently"
+                    f"{actual} in-window row(s) in the parquet — the window "
+                    f"selection changed; do not regenerate silently"
                 )
         picked: list[tuple[int, dict[str, object]]] = []
-        for cid in sorted(id_rows):
-            picked.extend(sorted(id_rows[cid], key=lambda t: t[0]))
+        for cid in sorted(window_rows):
+            picked.extend(sorted(window_rows[cid], key=lambda t: t[0]))
         return [
             Clip(
                 row_index=ri,

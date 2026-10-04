@@ -136,89 +136,128 @@ class TestWavDurationSeconds:
 
 
 class TestSelectClipsIdsPath:
-    """``select_clips`` with *ids* — the recorded-id (authoritative) path.
+    """``select_clips`` with *ids* — the recorded-id path (issue #62).
 
-    Bug scenario (issue #62, LENS MEDIUM): the recorded ``--ids`` list is the
-    authoritative selection.  If a committed same-id take ever falls outside
-    the duration/word window, the OLD code would silently apply the window
-    filter and re-letter the stems, assigning them to different rows than
-    ``CORPUS_ATTRIBUTION.md`` records.  The fix: on the ``--ids`` path, do
-    NOT apply the window; instead require that each id's number of rows in
-    the dataset matches the number of times it appears in the id list.
+    FLEURS rows repeat an ``id`` across speakers (different takes of the
+    same reference), and the duration/word WINDOW is exactly how the wanted
+    take is picked among them — the window applies on the ``--ids`` path
+    too. After window-filtering, each id's in-window row count must equal
+    its recorded take count (duplicates in the id list); a drift is a
+    ``ValueError`` naming the id, the recorded take count and the in-window
+    count, so a same-id take drifting out of the window (or a new same-id
+    row entering it) can never re-letter a stem relative to
+    ``CORPUS_ATTRIBUTION.md``.
     """
 
-    def test_duplicate_id_out_of_window_take_does_not_shift_stems(self) -> None:
-        """Reproduction: id 36 has two takes; the first is outside the window.
+    def test_ids_path_window_picks_the_wanted_take(self) -> None:
+        """Only the in-window take of a repeated id is selected (no error).
 
-        Under the OLD code, the window filter excluded row 1, so only one
-        36-take row survived, and the second take (in-window) got stem
-        ``fleurs_fi_0036`` instead of ``fleurs_fi_0036b``.  Under the fixed
-        code, both takes are preserved regardless of the window, and the
-        recorded take count (2) matches, so no ``ValueError`` is raised.
+        FLEURS id 24 has three rows across speakers; only one is in the
+        duration/word window. The ids path must select exactly that one —
+        the window is the take-selection, not a filter that raises.
         """
         rows = [
-            _make_fleurs_row(36, 1.0, 10),  # take 1: outside window (too short)
-            _make_fleurs_row(36, 4.0, 10),  # take 2: in window
-            _make_fleurs_row(748, 4.0, 10),  # take 1: in window
-            _make_fleurs_row(748, 1.0, 10),  # take 2: outside window (too short)
+            _make_fleurs_row(24, 2.0, 10),  # take 1: outside window (too short)
+            _make_fleurs_row(24, 4.0, 10),  # take 2: in window  <- the wanted one
+            _make_fleurs_row(24, 7.0, 10),  # take 3: outside window (too long)
         ]
-        ids = [36, 36, 748, 748]  # 2 takes each
-        clips = gen.select_clips(rows, seed=gen.SEED, n=28, ids=ids)
-        # All 4 rows must be selected (window not applied on the ids path).
-        assert len(clips) == 4
-        # Verify stem assignment: 36 has 2 takes → "0036" and "0036b".
-        by_id: dict[int, list[int]] = {}
-        for c in clips:
-            by_id.setdefault(c.clip_id, []).append(c.row_index)
-        assert by_id[36] == [0, 1]  # both rows, in order
-        assert by_id[748] == [2, 3]
+        clips = gen.select_clips(rows, seed=gen.SEED, n=28, ids=[24])
+        assert len(clips) == 1
+        assert clips[0].row_index == 1
 
-    def test_ids_path_no_window_filter_applied(self) -> None:
-        """A row outside the window is still selected when its id is recorded.
+    def test_ids_path_two_in_window_takes_select_stable_order(self) -> None:
+        """An id recorded twice with two in-window takes: 0036 then 0036b.
 
-        The OLD code applied the window filter on the ids path, which would
-        have silently excluded the out-of-window take and then raised a
-        ``ValueError`` (missing take).  The fixed code skips the window
-        entirely and selects all rows for the recorded ids.
+        Both takes of id 36 fall in the window (as in the real corpus: the
+        two takes of 36 and the two of 748 are the only multi-take ids).
+        Selection is in (clip_id, row_index) order, so the stems come out
+        0036 (first row) then 0036b (second row) — no re-lettering.
         """
         rows = [
-            _make_fleurs_row(100, 1.0, 10),  # in-window, not a recorded take
-            _make_fleurs_row(200, 4.0, 10),  # recorded, in window
-            _make_fleurs_row(200, 2.0, 10),  # recorded, outside window (too short)
+            _make_fleurs_row(36, 4.0, 10),  # take 1: in window -> 0036
+            _make_fleurs_row(36, 4.5, 10),  # take 2: in window -> 0036b
         ]
-        ids = [200, 200]  # 2 takes of id 200
-        clips = gen.select_clips(rows, seed=gen.SEED, n=28, ids=ids)
-        # Both recorded takes are selected (window not applied).
+        clips = gen.select_clips(rows, seed=gen.SEED, n=28, ids=[36, 36])
         assert len(clips) == 2
-        assert all(c.clip_id == 200 for c in clips)
+        assert [c.row_index for c in clips] == [0, 1]
+        assert all(c.clip_id == 36 for c in clips)
 
-    def test_ids_path_missing_take_raises_value_error(self) -> None:
-        """If the dataset has fewer rows for an id than recorded, raise ValueError.
+    def test_ids_path_recorded_twice_one_out_of_window_take_ok(self) -> None:
+        """Of three same-id rows, two in-window: the recorded-two id is fine.
 
-        This is the guard that prevents a silent corpus swap when a same-id
-        take is dropped from a revised parquet.
+        Mimics the real id 36 (3 rows in the parquet, 2 in the window): the
+        out-of-window take is ignored, the two in-window ones are selected
+        in row order, no error.
         """
         rows = [
-            _make_fleurs_row(300, 4.0, 10),  # only one row for id 300
+            _make_fleurs_row(36, 1.0, 10),  # out of window (too short)
+            _make_fleurs_row(36, 4.0, 10),  # in window -> 0036
+            _make_fleurs_row(36, 5.0, 10),  # in window -> 0036b
         ]
-        ids = [300, 300]  # records 2 takes, but only 1 row exists
-        with pytest.raises(ValueError, match="clip id 300"):
-            gen.select_clips(rows, seed=gen.SEED, n=28, ids=ids)
+        clips = gen.select_clips(rows, seed=gen.SEED, n=28, ids=[36, 36])
+        assert len(clips) == 2
+        assert [c.row_index for c in clips] == [1, 2]
 
-    def test_ids_path_extra_row_raises_value_error(self) -> None:
-        """If the dataset has more rows for an id than recorded, raise ValueError.
+    def test_ids_path_zero_in_window_rows_raises(self) -> None:
+        """A recorded id with no in-window rows is a clear error."""
+        rows = [
+            _make_fleurs_row(300, 1.0, 10),  # out of window (too short)
+            _make_fleurs_row(300, 9.0, 10),  # out of window (too long)
+        ]
+        with pytest.raises(
+            ValueError,
+            match=r"clip id 300: recorded 1 take\(s\) but found 0 in-window row\(s\)",
+        ):
+            gen.select_clips(rows, seed=gen.SEED, n=28, ids=[300])
 
-        Guards against a dataset that inserted a new same-id row, which would
-        shift the stem letters relative to the committed attribution.
+    def test_ids_path_extra_in_window_row_raises(self) -> None:
+        """A recorded-once id with two in-window rows is a clear error.
+
+        A new same-id row entering the window would re-letter the stem; the
+        guard refuses instead of guessing.
         """
         rows = [
             _make_fleurs_row(400, 4.0, 10),
-            _make_fleurs_row(400, 4.5, 10),
-            _make_fleurs_row(400, 5.0, 10),  # extra row not in the recorded list
+            _make_fleurs_row(400, 4.5, 10),  # extra in-window row
         ]
-        ids = [400, 400]  # records 2 takes, but 3 rows exist
-        with pytest.raises(ValueError, match="clip id 400"):
-            gen.select_clips(rows, seed=gen.SEED, n=28, ids=ids)
+        with pytest.raises(
+            ValueError,
+            match=r"clip id 400: recorded 1 take\(s\) but found 2 in-window row\(s\)",
+        ):
+            gen.select_clips(rows, seed=gen.SEED, n=28, ids=[400])
+
+    def test_ids_path_take_order_deterministic(self) -> None:
+        """Selection order is deterministic: (clip_id, row_index), not file order.
+
+        Rows are shuffled relative to row_index; the result must still come
+        out sorted by (clip_id, row_index) so stems 0036 / 0036b / 0748 /
+        0748b land on the recorded takes (matching the committed corpus).
+        """
+        rows = [
+            _make_fleurs_row(748, 4.5, 10),  # row 0: id 748 take 2
+            _make_fleurs_row(36, 4.0, 10),  # row 1: id 36 take 1
+            _make_fleurs_row(24, 4.0, 10),  # row 2: id 24 (in window)
+            _make_fleurs_row(36, 4.5, 10),  # row 3: id 36 take 2
+            _make_fleurs_row(748, 4.0, 10),  # row 4: id 748 take 1
+        ]
+        clips = gen.select_clips(rows, seed=gen.SEED, n=28, ids=[24, 36, 36, 748, 748])
+        assert [(c.clip_id, c.row_index) for c in clips] == [
+            (24, 2),
+            (36, 1),
+            (36, 3),
+            (748, 0),
+            (748, 4),
+        ]
+
+    def test_ids_path_out_of_window_extra_row_does_not_raise(self) -> None:
+        """An extra same-id row OUTSIDE the window is ignored (the window picks)."""
+        rows = [
+            _make_fleurs_row(500, 4.0, 10),  # in window -> selected
+            _make_fleurs_row(500, 1.0, 10),  # out of window -> ignored
+        ]
+        clips = gen.select_clips(rows, seed=gen.SEED, n=28, ids=[500])
+        assert len(clips) == 1
+        assert clips[0].row_index == 0
 
     def test_ids_path_unparseable_audio_raises(self) -> None:
         """A recorded id whose audio fails to parse raises a clear error."""
@@ -229,9 +268,22 @@ class TestSelectClipsIdsPath:
             "audio": {"bytes": b"NOTAWAVFILE000000000000", "path": "bad"},
         }
         rows = [good_row, bad_row]
-        ids = [500, 500]
         with pytest.raises(ValueError, match="unparseable WAV payload"):
-            gen.select_clips(rows, seed=gen.SEED, n=28, ids=ids)
+            gen.select_clips(rows, seed=gen.SEED, n=28, ids=[500])
+
+    def test_ids_path_empty_ids_raises(self) -> None:
+        with pytest.raises(ValueError, match="--ids was given but is empty"):
+            gen.select_clips([], seed=gen.SEED, n=28, ids=[])
+
+    def test_ids_path_word_window_also_applies(self) -> None:
+        """The word-count half of the window also gates take selection."""
+        rows = [
+            _make_fleurs_row(600, 4.0, 3),  # in duration window, too few words
+            _make_fleurs_row(600, 4.0, 10),  # fully in window -> selected
+        ]
+        clips = gen.select_clips(rows, seed=gen.SEED, n=28, ids=[600])
+        assert len(clips) == 1
+        assert clips[0].row_index == 1
 
 
 class TestResolveCorpusDir:
