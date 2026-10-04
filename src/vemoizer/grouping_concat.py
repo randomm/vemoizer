@@ -32,9 +32,7 @@ logger = logging.getLogger(__name__)
 PART_OFFSETS_TOTAL_TIMEOUT = 900.0
 
 
-def concat_groups(
-    group: Sequence[Path | str], *, preprocess: str | None = None
-) -> Path:
+def concat_groups(group: Sequence[Path | str]) -> Path:
     """Join *group* into one temp .m4a with the ffmpeg concat demuxer.
 
     ``-c copy`` (no re-encode). The concat demuxer needs every part to

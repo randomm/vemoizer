@@ -304,7 +304,9 @@ def run_batch(
                     label = group[0].name
                 else:
                     try:
-                        merged = concat_groups(group, preprocess=options.preprocess)
+                        # The loudnorm filter is applied at the later
+                        # decode (the demuxer stream-copies), not here.
+                        merged = concat_groups(group)
                     except GroupingError as e:
                         # Fail this group, continue with the rest (the
                         # _check_result pattern): the remaining groups are
