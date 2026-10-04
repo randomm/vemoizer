@@ -11,61 +11,30 @@ expected tuple, then asserts that _FFMPEG_AUDIO_ARGS equals it.
 
 from __future__ import annotations
 
-import subprocess
-from pathlib import Path
-
 import pytest
 
 
 def _get_main_ffmpeg_audio_args() -> tuple[str, ...]:
-    """Read the _FFMPEG_AUDIO_ARGS tuple from the main branch."""
-    # Extract the tuple from the main branch's ingest.py
-    try:
-        result = subprocess.run(
-            ["git", "show", "main:src/vemoizer/ingest.py"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        source = result.stdout
-    except subprocess.CalledProcessError:
-        # If we can't read main, use the hardcoded expected value
-        return (
-            "-nostdin",
-            "-v",
-            "error",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-c:a",
-            "pcm_f32le",
-            "-f",
-            "f32le",
-            "-",
-        )
+    """The _FFMPEG_AUDIO_ARGS tuple from the main branch (hardcoded).
 
-    # Find the tuple definition
-    start = source.find("_FFMPEG_AUDIO_ARGS = (")
-    if start == -1:
-        raise AssertionError("Could not find _FFMPEG_AUDIO_ARGS in main")
-    start = source.index("(", start)
-    depth = 0
-    for i in range(start, len(source)):
-        if source[i] == "(":
-            depth += 1
-        elif source[i] == ")":
-            depth -= 1
-            if depth == 0:
-                end = i + 1
-                break
-    else:
-        raise AssertionError("Could not find end of _FFMPEG_AUDIO_ARGS tuple")
-
-    tuple_text = source[start:end]
-    # Parse the tuple (it's a simple tuple of strings)
-    exec(f"_tuple = {tuple_text}")
-    return _tuple  # type: ignore[name-defined]
+    The spec says: use `git show main:src/vemoizer/ingest.py` to read it
+    and hardcode the expected tuple in the test. The tuple has been
+    stable since the original implementation, so we hardcode it here.
+    """
+    return (
+        "-nostdin",
+        "-v",
+        "error",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_f32le",
+        "-f",
+        "f32le",
+        "-",
+    )
 
 
 def test_ffmpeg_audio_args_byte_identical_to_main() -> None:
