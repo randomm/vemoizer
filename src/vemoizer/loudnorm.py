@@ -86,7 +86,11 @@ class LoudnormMeasurement:
 
 
 def loudnorm_pass1_filter() -> str:
-    """The loudnorm filter string for pass 1 (measurement, JSON on stderr)."""
+    """The loudnorm filter string for pass 1 (measurement, JSON on stderr).
+
+    ``print_format=json`` (equivalent to ``print_format=1``; ``json`` is
+    used for clarity — the issue text mentions both forms).
+    """
     return (
         f"loudnorm=I={LOUDNORM_I}:TP={LOUDNORM_TP}:LRA={LOUDNORM_LRA}:print_format=json"
     )
