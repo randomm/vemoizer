@@ -28,6 +28,7 @@ import typer
 
 from vemoizer.eval_harness import (
     AGGREGATE_KEY,
+    agreement_on_wrong,
     compare_to_baseline,
     corpus_fingerprint,
     run_eval,
@@ -160,6 +161,12 @@ def register_eval(app) -> None:
             help="Let the consensus backend adjudicate with the configured LLM "
             "(default: LLM off so eval stays local and deterministic).",
         ),
+        agreement: bool = typer.Option(
+            False,
+            "--agreement",
+            help="Emit the informational agreement-on-wrong metric "
+            "(two decoders agree AND the shared text is wrong; issue #62).",
+        ),
     ) -> None:
         """Score decode backends over the fixture corpus (WER)."""
         if not corpus.is_dir():
@@ -177,6 +184,13 @@ def register_eval(app) -> None:
             raise typer.Exit(code=2)
 
         measured: dict[str, dict[str, float]] = {}
+        if agreement:
+            references: dict[str, str] = {}
+            per_backend_hyps: dict[str, dict[str, str]] = {}
+            _collect_references(corpus, references)
+        else:
+            references = {}
+            per_backend_hyps = {}
         for name in names:
             transcribe = BACKENDS[name]
             if name == "consensus" and llm:
@@ -184,6 +198,8 @@ def register_eval(app) -> None:
             hyps: dict[str, str] = {}
             results = run_eval(corpus, transcribe, hyps)
             measured[name] = results
+            if agreement:
+                per_backend_hyps[name] = hyps
             typer.echo(f"[{name}]")
             for sample, value in results.items():
                 if sample == AGGREGATE_KEY:
@@ -191,6 +207,9 @@ def register_eval(app) -> None:
                 typer.echo(f"{sample}\t{value:.4f}")
             typer.echo(f"{AGGREGATE_KEY}\t{results[AGGREGATE_KEY]:.4f}")
             _emit_meeting_term_hits(corpus, transcribe, hyps)
+
+        if agreement:
+            _emit_agreement_on_wrong(references, per_backend_hyps)
 
         fingerprint = corpus_fingerprint(corpus)
         if update_baseline:
@@ -229,6 +248,60 @@ def _emit_meeting_term_hits(
     for sample in samples:
         typer.echo(f"[term-hit/{sample}]\t{meeting[sample]['term_hit']:.4f}")
     typer.echo(f"[term-hit/{AGGREGATE_KEY}]\t{meeting[AGGREGATE_KEY]['term_hit']:.4f}")
+
+
+def _collect_references(corpus: Path, references: dict[str, str]) -> None:
+    """Fill *references* with the per-sample reference transcripts (stem -> text).
+
+    Reads each ``<stem>.txt`` in *corpus*; a missing or unreadable file is
+    skipped (the sample simply won't be scored by the agreement metric).
+    """
+    for wav in sorted(corpus.glob("*.wav")):
+        txt = wav.with_suffix(".txt")
+        if txt.is_file():
+            references[wav.stem] = txt.read_text(encoding="utf-8")
+
+
+def _emit_agreement_on_wrong(
+    references: dict[str, str],
+    per_backend_hyps: dict[str, dict[str, str]],
+) -> None:
+    """Emit the informational ``agreement_on_wrong`` metric (issue #62).
+
+    A sample is "agreement on a wrong answer" when two independent decoders
+    produce similar text for the same audio AND both hypotheses are wrong
+    against the reference — the limit of a two-way consensus pipeline
+    (the pipeline ships decode A, the LLM never adjudicates, and the WER
+    aggregate inherits the shared error). The number is informational: it
+    is reported, never gated (invariant #2, the WER gate stays the only
+    regression gate), and it is only meaningful when at least two
+    *independent* backends were scored (a single-backend run has no second
+    decoder to compare against, so nothing is emitted).
+
+    The pair is pinned by name — ``parakeet`` and ``canary`` — rather than
+    "the first two independent backends in dict order", so a future
+    re-ordering of :data:`BACKENDS` or the addition of a new independent
+    backend cannot silently change which pair is scored. If either
+    ``parakeet`` or ``canary`` is missing from *per_backend_hyps* the
+    metric is skipped with a clear note.
+
+    The pairing and counting logic lives in the harness's
+    :func:`vemoizer.eval_harness.agreement_on_wrong`; this function only
+    selects the independent backends and prints the result.
+    """
+    a_name, b_name = "parakeet", "canary"
+    if a_name not in per_backend_hyps or b_name not in per_backend_hyps:
+        missing = [n for n in (a_name, b_name) if n not in per_backend_hyps]
+        typer.echo(
+            f"note: skipping agreement_on_wrong — missing backend(s): "
+            f"{', '.join(missing)}",
+            err=True,
+        )
+        return
+    value = agreement_on_wrong(
+        references, per_backend_hyps[a_name], per_backend_hyps[b_name]
+    )
+    typer.echo(f"[agreement_on_wrong]\t{value:.4f}")
 
 
 def _write_baseline(

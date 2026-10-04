@@ -173,3 +173,205 @@ def test_eval_check_without_baseline_file_fails_actionably(
 def test_eval_missing_corpus_exits_one(tmp_path) -> None:
     result = runner.invoke(app, ["eval", "--corpus", str(tmp_path / "nope")])
     assert result.exit_code == 1
+
+
+def test_eval_agreement_emits_metric_when_two_backends_scored(
+    tmp_path, monkeypatch
+) -> None:
+    """--agreement emits the informational metric when 2+ backends are scored.
+
+    The backends return *different* hypotheses per backend so that pairing
+    the wrong two backends would change the printed value (the adversarial
+    reviewer's non-vacuity requirement). Here parakeet says the right
+    thing for "one" and the wrong thing for "two"; canary says the wrong
+    thing for "one" and the right thing for "two". The consensus backend
+    says the right thing for both (it is excluded from the pair).
+
+    parakeet x canary pair:
+      "one": parakeet="moro maailma" (correct), canary="x y z" (wrong)
+             -> not both wrong -> False
+      "two": parakeet="väärä teksti" (wrong), canary="toinen testi" (correct)
+             -> not both wrong -> False
+    So 0/2 = 0.0.
+    """
+    corpus = _corpus(tmp_path)
+    parakeet_hyps = {"one": "moro maailma", "two": "väärä teksti"}
+    canary_hyps = {"one": "x y z", "two": "toinen testi"}
+    consensus_hyps = {"one": "moro maailma", "two": "toinen testi"}
+
+    def _make(name: str, hyps: dict[str, str]):
+        def _transcribe(wav: Path) -> str:
+            return hyps.get(wav.stem, "")
+
+        return _transcribe
+
+    monkeypatch.setattr(
+        eval_cli,
+        "BACKENDS",
+        {
+            "parakeet": _make("parakeet", parakeet_hyps),
+            "canary": _make("canary", canary_hyps),
+            "consensus": _make("consensus", consensus_hyps),
+        },
+    )
+    result = runner.invoke(
+        app,
+        ["eval", "--corpus", str(corpus), "--backend", "all", "--agreement"],
+    )
+    assert result.exit_code == 0
+    assert "[agreement_on_wrong]" in result.stdout
+    # Neither sample is "both wrong" (one hypothesis is always correct).
+    assert "[agreement_on_wrong]\t0.0000" in result.stdout
+
+
+def test_eval_agreement_pin_by_name_uses_parakeet_canary(tmp_path, monkeypatch) -> None:
+    """The pair is pinned by name (parakeet + canary), not by dict order.
+
+    If the code picked "the first two independent backends by dict order"
+    and the dict were re-ordered, the pair would change. This test verifies
+    that the parakeet × canary pair is used specifically by making the
+    consensus backend return a hypothesis that would change the result if
+    it were paired instead.
+
+    parakeet: "one"->"x y z" (wrong), "two"->"toinen testi" (correct)
+    canary:   "one"->"x y z" (wrong), "two"->"toinen testi" (correct)
+    consensus:"one"->"moro maailma" (correct), "two"->"väärä teksti" (wrong)
+
+    parakeet x canary: "one" both wrong -> True; "two" both correct -> False. 1/2 = 0.5.
+    parakeet x consensus: "one" parakeet wrong, consensus correct -> False;
+                          "two" parakeet correct, consensus wrong -> False. 0/2 = 0.0.
+    canary x consensus: same as parakeet x consensus -> 0.0.
+    """
+    corpus = _corpus(tmp_path)
+    parakeet_hyps = {"one": "x y z", "two": "toinen testi"}
+    canary_hyps = {"one": "x y z", "two": "toinen testi"}
+    consensus_hyps = {"one": "moro maailma", "two": "väärä teksti"}
+
+    def _make(name: str, hyps: dict[str, str]):
+        def _transcribe(wav: Path) -> str:
+            return hyps.get(wav.stem, "")
+
+        return _transcribe
+
+    monkeypatch.setattr(
+        eval_cli,
+        "BACKENDS",
+        {
+            "parakeet": _make("parakeet", parakeet_hyps),
+            "canary": _make("canary", canary_hyps),
+            "consensus": _make("consensus", consensus_hyps),
+        },
+    )
+    result = runner.invoke(
+        app,
+        ["eval", "--corpus", str(corpus), "--backend", "all", "--agreement"],
+    )
+    assert result.exit_code == 0
+    # The pinned pair is parakeet x canary: "one" both say "x y z" (wrong),
+    # "two" both say "toinen testi" (correct) -> 1/2 = 0.5.
+    # If the code had paired parakeet x consensus (or canary x consensus),
+    # the result would be 0.0 (neither sample has both hypotheses wrong).
+    assert "[agreement_on_wrong]\t0.5000" in result.stdout
+
+
+def test_eval_agreement_not_emitted_for_single_backend(tmp_path, monkeypatch) -> None:
+    """--agreement with a single backend produces no agreement line.
+
+    The test asserts the skip-note text (not just the absence of the
+    metric) so that a future change that prints the metric anyway — or
+    changes the skip note — is caught here rather than silently passing.
+    """
+    corpus = _corpus(tmp_path)
+    _patch_backends(monkeypatch, {"one": "moro maailma", "two": "toinen testi"})
+    result = runner.invoke(
+        app,
+        ["eval", "--corpus", str(corpus), "--backend", "parakeet", "--agreement"],
+    )
+    assert result.exit_code == 0
+    assert "[agreement_on_wrong]" not in result.stdout
+    # The skip note is printed to stderr, naming the missing backend.
+    assert "skipping agreement_on_wrong" in result.stderr
+    assert "canary" in result.stderr
+
+
+def test_eval_agreement_emitted_when_both_backends_present(
+    tmp_path, monkeypatch
+) -> None:
+    """--agreement with exactly parakeet + canary (no consensus) prints the metric.
+
+    This is the non-vacant single-pair case: both pinned backends are
+    present, so the skip-note path is not taken and the metric is computed
+    and printed. The existing test
+    ``test_eval_agreement_emits_metric_when_two_backends_scored`` covers
+    the three-backend case (consensus excluded); this test isolates the
+    two-backend case to make clear the metric fires when *both* pinned
+    names are in ``per_backend_hyps``.
+    """
+    corpus = _corpus(tmp_path)
+    parakeet_hyps = {"one": "moro maailma", "two": "väärä teksti"}
+    canary_hyps = {"one": "x y z", "two": "toinen testi"}
+
+    def _make(name: str, hyps: dict[str, str]):
+        def _transcribe(wav: Path) -> str:
+            return hyps.get(wav.stem, "")
+
+        return _transcribe
+
+    monkeypatch.setattr(
+        eval_cli,
+        "BACKENDS",
+        {
+            "parakeet": _make("parakeet", parakeet_hyps),
+            "canary": _make("canary", canary_hyps),
+        },
+    )
+    result = runner.invoke(
+        app,
+        ["eval", "--corpus", str(corpus), "--backend", "all", "--agreement"],
+    )
+    assert result.exit_code == 0
+    # Both pinned backends are present, so the metric is printed (no skip note).
+    assert "[agreement_on_wrong]" in result.stdout
+    # Neither sample has both hypotheses wrong -> 0.0.
+    assert "[agreement_on_wrong]\t0.0000" in result.stdout
+    # No skip note in stderr.
+    assert "skipping agreement_on_wrong" not in result.stderr
+
+
+def test_eval_agreement_does_not_affect_wer_gate(tmp_path, monkeypatch) -> None:
+    """The agreement metric is informational: --check behaviour is unchanged."""
+    corpus = _corpus(tmp_path)
+    baseline_path = tmp_path / "wer_baseline.json"
+    _patch_backends(monkeypatch, {"one": "moro maailma", "two": "toinen testi"})
+    assert (
+        runner.invoke(
+            app,
+            [
+                "eval",
+                "--corpus",
+                str(corpus),
+                "--backend",
+                "all",
+                "--baseline",
+                str(baseline_path),
+                "--update-baseline",
+            ],
+        ).exit_code
+        == 0
+    )
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "--corpus",
+            str(corpus),
+            "--backend",
+            "all",
+            "--agreement",
+            "--baseline",
+            str(baseline_path),
+            "--check",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "baseline check passed" in result.stdout

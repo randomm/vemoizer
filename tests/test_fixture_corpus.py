@@ -35,6 +35,12 @@ MIN_SECONDS = 1.0
 #: set to cover both without special-casing the stem.
 MAX_SECONDS = 30.0
 
+#: File extensions that are part of the corpus contract.
+#: ``.md`` is allowed for the CC-BY-4.0 attribution file that the FLEURS
+#: real-speech clips require (see ``CORPUS_ATTRIBUTION.md``); it is not
+#: stem-paired with a WAV and is not scored by the eval harness.
+ALLOWED_SUFFIXES = {".wav", ".txt", ".terms", ".md"}
+
 
 def _read_headers(fixture: Path) -> wave.Wave_read:
     return wave.open(str(fixture), "rb")
@@ -93,7 +99,8 @@ def test_every_transcript_is_nonempty() -> None:
 
 
 def test_no_stray_files_in_corpus_dir() -> None:
-    """Only ``.wav`` and ``.txt`` (stem-paired) files belong in the corpus."""
+    """Only ``.wav``, ``.txt`` (stem-paired), ``.terms``, and the attribution
+    ``.md`` belong in the corpus."""
     stray: list[str] = []
     wavs = {p.stem for p in CORPUS_DIR.glob("*.wav")}
     txts = {p.stem for p in CORPUS_DIR.glob("*.txt")}
@@ -101,12 +108,14 @@ def test_no_stray_files_in_corpus_dir() -> None:
         if not p.is_file():
             stray.append(p.name)
             continue
-        if p.suffix not in {".wav", ".txt", ".terms"}:
+        if p.suffix not in ALLOWED_SUFFIXES:
             stray.append(p.name)
         elif p.suffix == ".wav" and p.stem not in txts:
             stray.append(f"{p.name} (no same-stem .txt)")
         elif p.suffix in {".txt", ".terms"} and p.stem not in wavs:
             stray.append(f"{p.name} (no same-stem .wav)")
+        elif p.suffix == ".md" and p.name != "CORPUS_ATTRIBUTION.md":
+            stray.append(f"{p.name} (only CORPUS_ATTRIBUTION.md may be .md)")
     assert not stray, f"stray or mismatched files in corpus: {stray}"
 
 
