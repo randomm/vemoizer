@@ -26,13 +26,15 @@ selected from the **FLEURS** dataset:
 - Revision: the committed clips were drawn from dataset commit
   `70bb2e84b976b7e960aa89f1c648e09c59f894dd` (the `main` tip as of
   2026-10-03, the commit that converted the dataset to parquet). The
-  parquet file's content identity is pinned here by SHA-256:
-  `1fe57ed16edcf35014fd8b3fb6ed85b1a45b9478251fca44c2ae9acee07185c9`
+  parquet file's content identity is pinned by SHA-256; the value recorded
+  below is the same constant as `FLEURS_PARQUET_SHA256` in
+  `scripts/gen_real_speech_corpus.py` (that constant is the single source of
+  truth — this file points to it). `1fe57ed16edcf35014fd8b3fb6ed85b1a45b9478251fca44c2ae9acee07185c9`
   (1,988,967,430 bytes; 2,704 rows, 1,463 unique ids). The script's
-  `FLEURS_URL` resolves the `main` branch; a re-run should verify the
-  downloaded file's SHA-256 against this value before regenerating —
-  the selection window makes the clip set sensitive to the dataset's
-  shape, not just to the ids.
+  `FLEURS_URL` is pinned to this commit (not `main`) and its
+  `verify_parquet_digest` verifies the downloaded file's SHA-256 against this
+  value before regenerating — the selection window makes the clip set
+  sensitive to the dataset's shape, not just to the ids.
 - Licence: **CC-BY-4.0** (Creative Commons Attribution 4.0 International)
   — <https://creativecommons.org/licenses/by/4.0/>
 

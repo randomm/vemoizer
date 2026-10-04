@@ -7,6 +7,7 @@ network.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import struct
 import sys
@@ -49,8 +50,12 @@ def _make_wav(chunks: list[tuple[bytes, bytes]]) -> bytes:
 
 
 def _fmt32(rate: int = 16000) -> bytes:
-    """Standard 16-byte fmt chunk: IEEE float (3), mono, *rate*, 32-bit."""
+    """FLEURS-style 18-byte fmt chunk: IEEE float (3), mono, *rate*, 32-bit."""
     return struct.pack("<HHIIHH", 3, 1, rate, 64, 4, 32)
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 def _make_fleurs_row(cid: int, duration_s: float, n_words: int) -> dict[str, object]:
@@ -284,6 +289,125 @@ class TestSelectClipsIdsPath:
         clips = gen.select_clips(rows, seed=gen.SEED, n=28, ids=[600])
         assert len(clips) == 1
         assert clips[0].row_index == 1
+
+
+class TestVerifyParquetDigest:
+    """``verify_parquet_digest`` — the parquet reproducibility guard (#62).
+
+    The script previously resolved the dataset's ``main`` branch and never
+    verified the parquet it regenerated from. The digest is checked *before*
+    selection/write, so a drifted revision is caught before any clip is
+    touched. The check is pure (no ``pyarrow`` import) so it runs before the
+    parquet is loaded.
+    """
+
+    def test_matching_digest_passes(self, tmp_path: Path) -> None:
+        p = tmp_path / "pq.parquet"
+        p.write_bytes(b"arbitrary parquet bytes")
+        expected = _sha256(b"arbitrary parquet bytes")
+        assert gen.verify_parquet_digest(p, expected) == expected
+
+    def test_mismatch_raises_clear_error(self, tmp_path: Path) -> None:
+        p = tmp_path / "pq.parquet"
+        p.write_bytes(b"the real bytes")
+        wrong = "0" * 64
+        with pytest.raises(
+            ValueError, match=r"parquet SHA-256 mismatch: expected 0{64}"
+        ):
+            gen.verify_parquet_digest(p, wrong)
+
+    def test_mismatch_error_names_actual_digest(self, tmp_path: Path) -> None:
+        p = tmp_path / "pq.parquet"
+        p.write_bytes(b"the real bytes")
+        with pytest.raises(ValueError, match=_sha256(b"the real bytes")):
+            gen.verify_parquet_digest(p, "0" * 64)
+
+    def test_default_expected_is_recorded_constant(self, tmp_path: Path) -> None:
+        """The default expected digest is the constant the attribution records."""
+        p = tmp_path / "pq.parquet"
+        p.write_bytes(b"x" * 100)
+        # The default (no arg) compares against FLEURS_PARQUET_SHA256, which
+        # the mismatch error names.
+        with pytest.raises(ValueError, match=r"expected 1fe57ed1"):
+            gen.verify_parquet_digest(p)
+
+    def test_explicit_override_digest_passes(self, tmp_path: Path) -> None:
+        """An explicit --expected-sha256 override lets a newer revision through."""
+        p = tmp_path / "pq.parquet"
+        p.write_bytes(b"newer revision bytes")
+        actual = _sha256(b"newer revision bytes")
+        assert gen.verify_parquet_digest(p, actual) == actual
+        # ...and the same file against the recorded digest still fails.
+        with pytest.raises(ValueError, match=r"parquet SHA-256 mismatch"):
+            gen.verify_parquet_digest(p, gen.FLEURS_PARQUET_SHA256)
+
+    def test_digest_check_is_pure_no_pyarrow_needed(self, tmp_path: Path) -> None:
+        """The digest check runs before pyarrow; a non-parquet byte file works."""
+        p = tmp_path / "not_really.parquet"  # plain bytes, not a parquet file
+        p.write_bytes(b"not a real parquet file")
+        digest = _sha256(b"not a real parquet file")
+        assert gen.verify_parquet_digest(p, digest) is not None
+
+
+class TestGenerateRealSpeechParquetGate:
+    """The digest gate runs inside ``generate_real_speech`` before any write.
+
+    A mismatching parquet must raise *before* any clip file is written — this
+    holds even when the parquet cannot be read by pyarrow, because the digest
+    check precedes the load (no pyarrow needed for the check). The override
+    and the skip flag are the two deliberate escape hatches.
+    """
+
+    def test_mismatching_digest_raises_before_any_file_written(
+        self, tmp_path: Path
+    ) -> None:
+        out_dir = tmp_path / "corpus"
+        out_dir.mkdir()
+        pq = tmp_path / "pq.parquet"
+        pq.write_bytes(b"a corrupted or drifted parquet")
+        wrong = "0" * 64
+        with pytest.raises(ValueError, match=r"parquet SHA-256 mismatch"):
+            gen.generate_real_speech(out_dir, pq, 28, ids=[24], expected_sha256=wrong)
+        # No clip was written: the digest check fired before load/write.
+        assert list(out_dir.glob("fleurs_fi_*")) == []
+        assert list(out_dir.iterdir()) == []
+
+    def test_skip_parquet_check_bypasses_the_gate(self, tmp_path: Path) -> None:
+        out_dir = tmp_path / "corpus"
+        out_dir.mkdir()
+        pq = tmp_path / "pq.parquet"
+        pq.write_bytes(b"a corrupted parquet")  # digest would fail
+        # Skipping the check gets past the gate; the load then fails (it needs
+        # pyarrow + a real parquet) — the point is the gate itself is bypassed,
+        # i.e. no digest ValueError is raised.
+        try:
+            gen.generate_real_speech(out_dir, pq, 28, ids=[24], skip_parquet_check=True)
+        except ValueError as e:
+            # If a ValueError leaks it must NOT be the digest gate.
+            assert "SHA-256 mismatch" not in str(e)
+
+
+class TestAsInt:
+    """``_as_int`` coercion, including the bool guard (bool is an int subclass)."""
+
+    def test_int_passthrough(self) -> None:
+        assert gen._as_int(42) == 42
+
+    def test_bool_raises(self) -> None:
+        with pytest.raises(ValueError, match=r"cannot coerce bool to int"):
+            gen._as_int(True)
+        with pytest.raises(ValueError, match=r"cannot coerce bool to int"):
+            gen._as_int(False)
+
+    def test_str_coerces(self) -> None:
+        assert gen._as_int("17") == 17
+
+    def test_bytes_coerces(self) -> None:
+        assert gen._as_int(b"18") == 18
+
+    def test_float_rejected(self) -> None:
+        with pytest.raises(ValueError, match=r"cannot coerce float to int"):
+            gen._as_int(1.5)
 
 
 class TestResolveCorpusDir:
