@@ -18,21 +18,23 @@ import pytest
 _SCRIPT = (
     Path(__file__).resolve().parent.parent / "scripts" / "gen_real_speech_corpus.py"
 )
+_SOURCE = Path(__file__).resolve().parent.parent / "scripts" / "fleurs_source.py"
 
 
-def _load_script():
-    spec = importlib.util.spec_from_file_location("gen_real_speech_corpus", _SCRIPT)
+def _load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
     if spec is None:
-        raise RuntimeError(f"could not load {_SCRIPT}")
+        raise RuntimeError(f"could not load {path}")
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["gen_real_speech_corpus"] = mod
+    sys.modules[name] = mod
     assert spec.loader is not None
     spec.loader.exec_module(mod)
     return mod
 
 
-gen = _load_script()
-wav_duration_seconds = gen.wav_duration_seconds
+fs = _load_module("fleurs_source", _SOURCE)
+gen = _load_module("gen_real_speech_corpus", _SCRIPT)
+wav_duration_seconds = fs.wav_duration_seconds
 
 
 def _make_wav(chunks: list[tuple[bytes, bytes]]) -> bytes:
@@ -166,7 +168,7 @@ class TestSelectClipsIdsPath:
             _make_fleurs_row(24, 4.0, 10),  # take 2: in window  <- the wanted one
             _make_fleurs_row(24, 7.0, 10),  # take 3: outside window (too long)
         ]
-        clips = gen.select_clips(rows, seed=gen.SEED, n=28, ids=[24])
+        clips = fs.select_clips(rows, seed=fs.SEED, n=28, ids=[24])
         assert len(clips) == 1
         assert clips[0].row_index == 1
 
@@ -182,7 +184,7 @@ class TestSelectClipsIdsPath:
             _make_fleurs_row(36, 4.0, 10),  # take 1: in window -> 0036
             _make_fleurs_row(36, 4.5, 10),  # take 2: in window -> 0036b
         ]
-        clips = gen.select_clips(rows, seed=gen.SEED, n=28, ids=[36, 36])
+        clips = fs.select_clips(rows, seed=fs.SEED, n=28, ids=[36, 36])
         assert len(clips) == 2
         assert [c.row_index for c in clips] == [0, 1]
         assert all(c.clip_id == 36 for c in clips)
@@ -199,7 +201,7 @@ class TestSelectClipsIdsPath:
             _make_fleurs_row(36, 4.0, 10),  # in window -> 0036
             _make_fleurs_row(36, 5.0, 10),  # in window -> 0036b
         ]
-        clips = gen.select_clips(rows, seed=gen.SEED, n=28, ids=[36, 36])
+        clips = fs.select_clips(rows, seed=fs.SEED, n=28, ids=[36, 36])
         assert len(clips) == 2
         assert [c.row_index for c in clips] == [1, 2]
 
@@ -213,7 +215,7 @@ class TestSelectClipsIdsPath:
             ValueError,
             match=r"clip id 300: recorded 1 take\(s\) but found 0 in-window row\(s\)",
         ):
-            gen.select_clips(rows, seed=gen.SEED, n=28, ids=[300])
+            fs.select_clips(rows, seed=fs.SEED, n=28, ids=[300])
 
     def test_ids_path_extra_in_window_row_raises(self) -> None:
         """A recorded-once id with two in-window rows is a clear error.
@@ -229,7 +231,7 @@ class TestSelectClipsIdsPath:
             ValueError,
             match=r"clip id 400: recorded 1 take\(s\) but found 2 in-window row\(s\)",
         ):
-            gen.select_clips(rows, seed=gen.SEED, n=28, ids=[400])
+            fs.select_clips(rows, seed=fs.SEED, n=28, ids=[400])
 
     def test_ids_path_take_order_deterministic(self) -> None:
         """Selection order is deterministic: (clip_id, row_index), not file order.
@@ -245,7 +247,7 @@ class TestSelectClipsIdsPath:
             _make_fleurs_row(36, 4.5, 10),  # row 3: id 36 take 2
             _make_fleurs_row(748, 4.0, 10),  # row 4: id 748 take 1
         ]
-        clips = gen.select_clips(rows, seed=gen.SEED, n=28, ids=[24, 36, 36, 748, 748])
+        clips = fs.select_clips(rows, seed=fs.SEED, n=28, ids=[24, 36, 36, 748, 748])
         assert [(c.clip_id, c.row_index) for c in clips] == [
             (24, 2),
             (36, 1),
@@ -260,7 +262,7 @@ class TestSelectClipsIdsPath:
             _make_fleurs_row(500, 4.0, 10),  # in window -> selected
             _make_fleurs_row(500, 1.0, 10),  # out of window -> ignored
         ]
-        clips = gen.select_clips(rows, seed=gen.SEED, n=28, ids=[500])
+        clips = fs.select_clips(rows, seed=fs.SEED, n=28, ids=[500])
         assert len(clips) == 1
         assert clips[0].row_index == 0
 
@@ -274,11 +276,11 @@ class TestSelectClipsIdsPath:
         }
         rows = [good_row, bad_row]
         with pytest.raises(ValueError, match="unparseable WAV payload"):
-            gen.select_clips(rows, seed=gen.SEED, n=28, ids=[500])
+            fs.select_clips(rows, seed=fs.SEED, n=28, ids=[500])
 
     def test_ids_path_empty_ids_raises(self) -> None:
         with pytest.raises(ValueError, match="--ids was given but is empty"):
-            gen.select_clips([], seed=gen.SEED, n=28, ids=[])
+            fs.select_clips([], seed=fs.SEED, n=28, ids=[])
 
     def test_ids_path_word_window_also_applies(self) -> None:
         """The word-count half of the window also gates take selection."""
@@ -286,7 +288,7 @@ class TestSelectClipsIdsPath:
             _make_fleurs_row(600, 4.0, 3),  # in duration window, too few words
             _make_fleurs_row(600, 4.0, 10),  # fully in window -> selected
         ]
-        clips = gen.select_clips(rows, seed=gen.SEED, n=28, ids=[600])
+        clips = fs.select_clips(rows, seed=fs.SEED, n=28, ids=[600])
         assert len(clips) == 1
         assert clips[0].row_index == 1
 
@@ -305,7 +307,7 @@ class TestVerifyParquetDigest:
         p = tmp_path / "pq.parquet"
         p.write_bytes(b"arbitrary parquet bytes")
         expected = _sha256(b"arbitrary parquet bytes")
-        assert gen.verify_parquet_digest(p, expected) == expected
+        assert fs.verify_parquet_digest(p, expected) == expected
 
     def test_mismatch_raises_clear_error(self, tmp_path: Path) -> None:
         p = tmp_path / "pq.parquet"
@@ -314,13 +316,13 @@ class TestVerifyParquetDigest:
         with pytest.raises(
             ValueError, match=r"parquet SHA-256 mismatch: expected 0{64}"
         ):
-            gen.verify_parquet_digest(p, wrong)
+            fs.verify_parquet_digest(p, wrong)
 
     def test_mismatch_error_names_actual_digest(self, tmp_path: Path) -> None:
         p = tmp_path / "pq.parquet"
         p.write_bytes(b"the real bytes")
         with pytest.raises(ValueError, match=_sha256(b"the real bytes")):
-            gen.verify_parquet_digest(p, "0" * 64)
+            fs.verify_parquet_digest(p, "0" * 64)
 
     def test_default_expected_is_recorded_constant(self, tmp_path: Path) -> None:
         """The default expected digest is the constant the attribution records."""
@@ -329,24 +331,24 @@ class TestVerifyParquetDigest:
         # The default (no arg) compares against FLEURS_PARQUET_SHA256, which
         # the mismatch error names.
         with pytest.raises(ValueError, match=r"expected 1fe57ed1"):
-            gen.verify_parquet_digest(p)
+            fs.verify_parquet_digest(p)
 
     def test_explicit_override_digest_passes(self, tmp_path: Path) -> None:
         """An explicit --expected-sha256 override lets a newer revision through."""
         p = tmp_path / "pq.parquet"
         p.write_bytes(b"newer revision bytes")
         actual = _sha256(b"newer revision bytes")
-        assert gen.verify_parquet_digest(p, actual) == actual
+        assert fs.verify_parquet_digest(p, actual) == actual
         # ...and the same file against the recorded digest still fails.
         with pytest.raises(ValueError, match=r"parquet SHA-256 mismatch"):
-            gen.verify_parquet_digest(p, gen.FLEURS_PARQUET_SHA256)
+            fs.verify_parquet_digest(p, gen.FLEURS_PARQUET_SHA256)
 
     def test_digest_check_is_pure_no_pyarrow_needed(self, tmp_path: Path) -> None:
         """The digest check runs before pyarrow; a non-parquet byte file works."""
         p = tmp_path / "not_really.parquet"  # plain bytes, not a parquet file
         p.write_bytes(b"not a real parquet file")
         digest = _sha256(b"not a real parquet file")
-        assert gen.verify_parquet_digest(p, digest) is not None
+        assert fs.verify_parquet_digest(p, digest) is not None
 
 
 class TestGenerateRealSpeechParquetGate:
@@ -391,23 +393,23 @@ class TestAsInt:
     """``_as_int`` coercion, including the bool guard (bool is an int subclass)."""
 
     def test_int_passthrough(self) -> None:
-        assert gen._as_int(42) == 42
+        assert fs._as_int(42) == 42
 
     def test_bool_raises(self) -> None:
         with pytest.raises(ValueError, match=r"cannot coerce bool to int"):
-            gen._as_int(True)
+            fs._as_int(True)
         with pytest.raises(ValueError, match=r"cannot coerce bool to int"):
-            gen._as_int(False)
+            fs._as_int(False)
 
     def test_str_coerces(self) -> None:
-        assert gen._as_int("17") == 17
+        assert fs._as_int("17") == 17
 
     def test_bytes_coerces(self) -> None:
-        assert gen._as_int(b"18") == 18
+        assert fs._as_int(b"18") == 18
 
     def test_float_rejected(self) -> None:
         with pytest.raises(ValueError, match=r"cannot coerce float to int"):
-            gen._as_int(1.5)
+            fs._as_int(1.5)
 
 
 class TestResolveCorpusDir:
