@@ -68,7 +68,8 @@ human to listen to and a normalised clip would misrepresent the real level.
 When the flag is absent the decode argv is literally unchanged (a test pins
 equality with today's argv constants). The effect on accuracy is unmeasured;
 the flag is intended for by-ear verification on private far-field memos, not
-a claim of improvement.
+a claim of improvement. The two-pass design adds a measurement pass (about a
+minute per hour of audio) before the decode.
 
 ## Stages
 

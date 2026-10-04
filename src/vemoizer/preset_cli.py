@@ -109,7 +109,8 @@ def register_presets(app: typer.Typer) -> None:
             help=(
                 "Audio preprocessing (opt-in): loudnorm (two-pass loudnorm "
                 "normalization for far-field recordings; default: off, the "
-                "plain decode). Case-insensitive, like --language."
+                "plain decode). Case-insensitive, like --language. Adds a "
+                "measurement pass (about a minute per hour of audio)."
             ),
         ),
     ) -> None:
@@ -209,7 +210,8 @@ def register_presets(app: typer.Typer) -> None:
             help=(
                 "Audio preprocessing (opt-in): loudnorm (two-pass loudnorm "
                 "normalization for far-field recordings; default: off, the "
-                "plain decode). Case-insensitive, like --language."
+                "plain decode). Case-insensitive, like --language. Adds a "
+                "measurement pass (about a minute per hour of audio)."
             ),
         ),
     ) -> None:

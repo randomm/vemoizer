@@ -73,7 +73,8 @@ def doctor(
             "Preprocessing to check: loudnorm (checks the ffmpeg loudnorm "
             "filter; informational only — the preflight gate is the "
             "enforcement point). Omitted: no extra checks (the no-flag "
-            "path does not require the loudnorm filter)."
+            "path does not require the loudnorm filter). Adds a "
+            "measurement pass (about a minute per hour of audio)."
         ),
     ),
 ) -> None:
@@ -192,7 +193,8 @@ def transcribe(
         help=(
             "Audio preprocessing (opt-in): loudnorm (two-pass loudnorm "
             "normalization for far-field recordings; default: off, the "
-            "plain decode). Case-insensitive, like --language."
+            "plain decode). Case-insensitive, like --language. Adds a "
+            "measurement pass (about a minute per hour of audio)."
         ),
     ),
 ) -> None:
