@@ -271,9 +271,10 @@ def _measurement_for(path: Path) -> LoudnormMeasurement | None:
     offsets, the group's own decode, the sidecar durations), and pass 1
     is a full-file pass — an unchanged file is measured once, a changed
     or deleted file is re-measured. A FAILED measurement is cached too
-    (``None``): a file that just failed is not re-measured (or
-    re-warned) on every call, and the warning is emitted by the caller
-    that finds ``None`` — once per call site, as before.
+    (``None``): a file that just failed is not re-measured on every
+    call, and the warning is emitted HERE (on a cache MISS that returns
+    ``None``) — exactly once per file per cache entry, not once per
+    call site.
     """
     try:
         st = path.stat()
@@ -287,6 +288,16 @@ def _measurement_for(path: Path) -> LoudnormMeasurement | None:
     if key in _MEASURE_CACHE:
         return None  # a cached failure (``None``)
     m = _measure_loudnorm(path)
+    if m is None:
+        # ONE warning per file per cache entry (file name only, no full
+        # path): the measurement failed, and this is the first call
+        # since the file changed (the cache was either empty or the key
+        # changed).
+        logger.warning(
+            "loudnorm: measurement failed for %s; falling back to the "
+            "plain unprocessed decode (fail-open)",
+            path.name,
+        )
     if len(_MEASURE_CACHE) >= _MEASURE_CACHE_MAX:
         _MEASURE_CACHE.pop(next(iter(_MEASURE_CACHE)))
     _MEASURE_CACHE[key] = m
@@ -390,13 +401,9 @@ def preprocess_audio(
     if preprocess == "loudnorm":
         measurement = _measurement_for(p)
         if measurement is None:
-            # Fail open: ONE warning, file name only (no transcript or
-            # path content), then the plain unprocessed decode.
-            logger.warning(
-                "loudnorm: measurement failed for %s; running the plain "
-                "unprocessed decode (fail-open)",
-                p.name,
-            )
+            # Fail open: the measurement failed (the warning was already
+            # logged by _measurement_for on the cache MISS), run the
+            # plain unprocessed decode.
             return ingest_audio(p)
         return _decode_pass2(p, measurement)
 
