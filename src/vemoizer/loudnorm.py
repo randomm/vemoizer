@@ -27,6 +27,14 @@ Fail open: if pass 1 fails, its JSON is missing/malformed, or a measured
 value is ``-inf``/NaN/absurd (silent input), log ONE warning (file name
 only, no transcript or path content) and run the plain unprocessed
 decode — never abort the run, never emit an unbounded gain.
+
+The measurement itself is memoized per file (``_measurement_for``):
+the pass-1 decode is a full-file pass, and a group run measures it
+several times (``part_offsets`` per part, the group's own decode, the
+sidecar durations). The key is ``(resolved path, size, mtime)`` — an
+unchanged file is measured once, a changed or deleted file is
+re-measured, and a FAILED measurement is cached too (``None``, one
+warning, no re-measurement of a file that just failed).
 """
 
 from __future__ import annotations
@@ -60,6 +68,16 @@ LOUDNORM_LRA = 11
 # realtime (measured: 10 min of pink noise in ~7 s). A typical memo
 # costs well under a second, so this covers absurdly long inputs.
 _MEASURE_TIMEOUT_S = 600.0
+
+# Bounded measurement-cache size: a cache hit saves a full-file ffmpeg
+# pass, so a handful of files is plenty — a run's hot set is one file
+# (the merged group) plus its parts; an evicted entry is re-measured on
+# its next access. Failures (``None``) are cached too (a failing file
+# must not be re-measured — and re-warned — on every call).
+_MEASURE_CACHE_MAX = 32
+
+#: The measurement memo, keyed by (resolved path, size, mtime).
+_MEASURE_CACHE: dict[tuple[str, int, int], LoudnormMeasurement | None] = {}
 
 # Sanity bounds on measured values (ffmpeg emits "-inf" for silent
 # input): anything outside these is treated as "no measurement" and the
@@ -209,57 +227,68 @@ def decode_argv(p: Path, preprocess: str | None) -> list[str]:
     decode argv, raw f32le on stdout — byte count, never ffprobe), with
     the loudnorm pass-2 filter added when *preprocess* is ``"loudnorm"``
     (the issue #135 consistency rule: part offsets and source durations
-    must match the processed decode). The loudnorm measurement runs here
-    (pass 1) so the streaming duration decode uses the same measured
-    values as the transcript's decode; a measurement failure falls back
-    to the plain decode (fail-open, matching :func:`ingest_audio`'s
+    must match the processed decode). The filter is built by the same
+    single ``_decode_args`` builder the transcript's pass 2 uses, so the
+    two decodes share one argv shape; the measurement comes from the
+    in-process cache (one pass-1 per unchanged file, shared with
+    ``ingest_audio``'s pass 2), and a measurement failure falls back to
+    the plain decode (fail-open, matching :func:`ingest_audio`'s
     behaviour). ``-f null -`` is NOT used here: the output goes to
     stdout for the byte count.
     """
     plain = ["ffmpeg", *_FFMPEG_AUDIO_ARGS, "-i", str(p)]
     if preprocess != "loudnorm":
         return plain
-    measurement = _measure_loudnorm(p)
+    measurement = _measurement_for(p)
     if measurement is None:
-        logger.warning(
-            "loudnorm: duration measurement failed for %s; measuring the "
-            "plain (unprocessed) decode — the loudnorm gain is linear, so "
-            "the sample count (and thus the duration) is identical either "
-            "way (fail-open)",
-            p.name,
-        )
         return plain
-    return [
-        "ffmpeg",
-        "-nostdin",
-        "-v",
-        "error",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-c:a",
-        "pcm_f32le",
-        "-af",
-        loudnorm_pass2_filter(measurement),
-        "-f",
-        "f32le",
-        "-",
-        "-i",
-        str(p),
-    ]
+    # The same single builder the transcript's pass 2 uses (exactly ONE
+    # pass-2 argv builder, issue #135): same filter, same ordering, so
+    # the duration decode and the transcript decode stay in lock-step.
+    return _decode_args(("-af", loudnorm_pass2_filter(measurement))) + [str(p)]
+
+
+def _measurement_for(path: Path) -> LoudnormMeasurement | None:
+    """The loudnorm measurement for *path*, memoized (fail open).
+
+    Memoized in an in-process cache keyed by ``(resolved path, size,
+    mtime)``: a group run measures the same file several times (per-part
+    offsets, the group's own decode, the sidecar durations), and pass 1
+    is a full-file pass — an unchanged file is measured once, a changed
+    or deleted file is re-measured. A FAILED measurement is cached too
+    (``None``): a file that just failed is not re-measured (or
+    re-warned) on every call, and the warning is emitted by the caller
+    that finds ``None`` — once per call site, as before.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        # A vanished file has no stable identity — do not cache it.
+        return _measure_loudnorm(path)
+    key = (str(path.resolve()), st.st_size, st.st_mtime_ns)
+    cached = _MEASURE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    if key in _MEASURE_CACHE:
+        return None  # a cached failure (``None``)
+    m = _measure_loudnorm(path)
+    if len(_MEASURE_CACHE) >= _MEASURE_CACHE_MAX:
+        _MEASURE_CACHE.pop(next(iter(_MEASURE_CACHE)))
+    _MEASURE_CACHE[key] = m
+    return m
 
 
 def _measure_loudnorm(path: Path) -> LoudnormMeasurement | None:
     """Run pass 1 (measurement) and return the sanitized values.
 
     ``None`` on ANY failure (fail open — the caller runs the plain
-    decode): ffmpeg missing, non-zero exit, timeout, or a JSON block
+    decode): ffmpeg missing (``FileNotFoundError``), an ``OSError`` from
+    the stderr temp file, a non-zero exit, a timeout, or a JSON block
     that is missing/malformed/absurd.
 
     Note: ``-v error`` is NOT used here (unlike the plain decode) because
     ffmpeg 9.x suppresses the loudnorm filter's JSON output (``input_i``
-    etc.) at ``-v error`` level — the JSON is only emitted at the default
+    etc.) at ``-v info`` level — the JSON is only emitted at the default
     ``-v info`` level. The null muxer (``-f null -``) means no audio
     output is produced, so the extra stderr noise from info-level logging
     is harmless.
@@ -281,6 +310,7 @@ def _measure_loudnorm(path: Path) -> LoudnormMeasurement | None:
         "-i",
         str(path),
     ]
+    proc: subprocess.Popen | None = None
     stderr_file = tempfile.TemporaryFile()  # noqa: SIM115
     try:
         try:
@@ -290,14 +320,23 @@ def _measure_loudnorm(path: Path) -> LoudnormMeasurement | None:
                 stderr=stderr_file,
                 stdin=subprocess.DEVNULL,
             )
-        except FileNotFoundError:
-            return None  # no ffmpeg: the plain decode will raise cleanly
+        except (FileNotFoundError, OSError):
+            # No ffmpeg (or the launch failed): fail open, the plain
+            # decode raises a clean IngestError for a missing ffmpeg.
+            return None
         proc.wait(timeout=_MEASURE_TIMEOUT_S)
         stderr: bytes
         stderr_file.seek(0)
         stderr = stderr_file.read()
     except subprocess.TimeoutExpired:
-        _kill_and_reap(proc)
+        if proc is not None:
+            _kill_and_reap(proc)
+        return None
+    except OSError:
+        # The stderr temp file's seek/read failed: the measurement is
+        # unusable — fail open like any other measurement failure.
+        if proc is not None:
+            _kill_and_reap(proc)
         return None
     finally:
         stderr_file.close()
@@ -334,7 +373,7 @@ def preprocess_audio(
         raise IngestError(f"audio file not found: {p}")
 
     if preprocess == "loudnorm":
-        measurement = _measure_loudnorm(p)
+        measurement = _measurement_for(p)
         if measurement is None:
             # Fail open: ONE warning, file name only (no transcript or
             # path content), then the plain unprocessed decode.

@@ -259,10 +259,10 @@ def pcm_duration_seconds(
     # The same decode as ingest_audio: the byte count of the decoded PCM
     # is the duration, and the decode must match what the transcript saw
     # (issue #135 consistency rule: part offsets and source durations
-    # come from the processed decode, never the raw one). The loudnorm
-    # measurement runs inside ingest_audio for the loudnorm path, so
-    # here we simply call the loudnorm module's pass-2 argv when the
-    # flag is set — via the same helper ingest_audio uses.
+    # come from the processed decode, never the raw one). decode_argv
+    # builds the loudnorm pass-2 argv from the same cached measurement
+    # the transcript decode uses, so for an unchanged file the two
+    # decodes share the measured values (one pass-1 per file).
     from . import loudnorm as _loudnorm
 
     argv = _loudnorm.decode_argv(p, preprocess)
