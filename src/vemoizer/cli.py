@@ -77,15 +77,9 @@ def doctor(
     ),
 ) -> None:
     """Run local health checks; exit non-zero on any red check."""
-    from .doctor import run_doctor
+    from .doctor_cli import run_doctor_command
 
-    lowered = preprocess.strip().lower() if preprocess is not None else None
-    if lowered is not None and lowered != "loudnorm":
-        typer.echo(f"error: unknown preprocess {lowered!r} (known: loudnorm)", err=True)
-        raise typer.Exit(code=2)
-    report = run_doctor(echo=lambda line: typer.echo(line), preprocess=lowered or None)
-    if not report.ok:
-        raise typer.Exit(code=1)
+    run_doctor_command(preprocess)
 
 
 @models_app.command("pull")
