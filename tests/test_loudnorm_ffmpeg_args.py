@@ -1,4 +1,5 @@
-"""Named ffmpeg argv constants: byte-identical to the main branch (issue #135, fix pass 2).
+"""Named ffmpeg argv constants: byte-identical to the main branch
+(issue #135, fix pass 2).
 
 The spec says: in ingest.py define two named tuples (e.g. _FFMPEG_DECODE_ARGS
 = the first part up to and including pcm_f32le, _FFMPEG_OUTPUT_ARGS = -f
@@ -10,8 +11,6 @@ expected tuple, then asserts that _FFMPEG_AUDIO_ARGS equals it.
 """
 
 from __future__ import annotations
-
-import pytest
 
 
 def _get_main_ffmpeg_audio_args() -> tuple[str, ...]:
@@ -57,7 +56,7 @@ def test_ffmpeg_audio_args_byte_identical_to_main() -> None:
         "-",
     )
 
-    assert _FFMPEG_AUDIO_ARGS == expected, (
+    assert expected == _FFMPEG_AUDIO_ARGS, (
         f"_FFMPEG_AUDIO_ARGS changed from main:\n"
         f"  expected: {expected}\n"
         f"  got:      {_FFMPEG_AUDIO_ARGS}"

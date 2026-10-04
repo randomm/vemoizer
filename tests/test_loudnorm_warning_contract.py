@@ -1,4 +1,5 @@
-"""Loudnorm warning contract: exactly ONE warning per failing file (issue #135, fix pass 2).
+"""Loudnorm warning contract: exactly ONE warning per failing file
+(issue #135, fix pass 2).
 
 The spec says: "ONE warning per failing file" — not one per call site.
 Today, `preprocess_audio` logs a warning on EVERY call that gets a cached
@@ -128,16 +129,13 @@ def test_failing_file_logs_one_warning_total(
     # Exactly ONE warning in total (file name only, no full path)
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
     assert len(warnings) == 1, (
-        f"expected 1 warning, got {len(warnings)}: "
-        f"{[r.message for r in warnings]}"
+        f"expected 1 warning, got {len(warnings)}: {[r.message for r in warnings]}"
     )
     assert "x.wav" in warnings[0].message  # file name only
     assert str(fixture) not in warnings[0].message  # no full path
 
 
-def test_changed_failing_file_warns_again(
-    tmp_path: Path, monkeypatch, caplog
-) -> None:
+def test_changed_failing_file_warns_again(tmp_path: Path, monkeypatch, caplog) -> None:
     """A changed file (size/mtime) that fails again warns again (the cache
     key changes, so it's a fresh cache MISS)."""
     fixture = _make_wav(tmp_path / "x.wav", 0.2)
@@ -269,6 +267,5 @@ def test_successful_measurement_logs_no_warning(
     # NO warnings (the measurement succeeded)
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
     assert len(warnings) == 0, (
-        f"expected 0 warnings, got {len(warnings)}: "
-        f"{[r.message for r in warnings]}"
+        f"expected 0 warnings, got {len(warnings)}: {[r.message for r in warnings]}"
     )
