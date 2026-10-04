@@ -1,7 +1,7 @@
 """Typer CLI entry point for vemoizer.
 
 Multi-file batch interface: one or more voice-memo paths as positional
-arguments, format selection (default: all of txt/json/srt/vtt), and
+arguments, format selection (default: all formats), and
 ``--quiet`` / ``--verbose`` verbosity flags.
 
 macOS UX polish (issue #14):

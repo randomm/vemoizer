@@ -8,6 +8,19 @@ Three drift checks, all read-only against the spec file:
 - every ``--flag`` named in the spec's ``transcribe`` flag table exists on
   the real Typer command (parsed via Typer/click params — no subprocess).
 
+The flag check is deliberately one-way (spec table ⊆ real command): a flag
+added to the command without a spec row goes undetected. Full equality is
+noisier — positional args and short forms (``-q``) keep the two sides from
+matching exactly — so the guard pins the direction that would print
+undocumented flags in the spec only, and new real flags are caught by
+review.
+
+This module intentionally couples to Typer's command-info internals
+(``CommandInfo`` + ``get_command_from_info`` + click ``param.opts``) instead
+of the ``CliRunner`` path used by ``tests/test_cli.py``: it reads the flag
+set without a CLI run, which keeps it hermetic even if a flag's callback
+behaviour changes.
+
 Unit test: no pipeline, no network, no CLI invocation.
 """
 
@@ -70,6 +83,7 @@ def test_spec_has_no_planned_subcommands_section() -> None:
 
 
 def test_spec_transcribe_flags_exist_on_real_command() -> None:
+    # One-way by design (see module docstring): spec table ⊆ real command.
     opts = _transcribe_flag_options()
     missing = sorted(_transcribe_table_flags(_spec_text()) - opts)
     assert not missing, (

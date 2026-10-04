@@ -645,7 +645,7 @@ Exit codes: `0` on success, `1` on an unreadable or malformed sidecar,
 
 Transcribe one or more audio files and write transcript files. The expert
 command that exposes every pipeline flag explicitly. The per-file loop that
-used to live here moved to `src/vemoizer/batch.py` (new module) so the
+used to live here moved to `src/vemoizer/batch.py` so the
 `meeting` and `memo` presets can reuse it.
 
 | Flag | Default | Meaning |
