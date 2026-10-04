@@ -416,6 +416,8 @@ def test_run_preset_meeting_group_path_loudnorm(
     exactly once per part file."""
     if not HAS_FFMPEG:
         pytest.skip("ffmpeg not available")
+    if not HAS_LOUDNORM:
+        pytest.skip("ffmpeg loudnorm filter not available")
 
     from vemoizer import batch
     from vemoizer import ingest as ing

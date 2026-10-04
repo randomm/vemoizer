@@ -28,6 +28,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
+from _cli_helpers import ffmpeg_has_loudnorm
 
 from vemoizer import loudnorm as ln
 from vemoizer.ingest import (
@@ -52,24 +53,9 @@ FFMPEG = pytest.mark.skipif(
 # lavfi (no private audio, no network, no models).
 
 
-def _ffmpeg_has_loudnorm() -> bool:
-    if shutil.which("ffmpeg") is None:
-        return False
-    try:
-        proc = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-filters"],
-            capture_output=True,
-            check=False,
-            timeout=10.0,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return b"loudnorm" in proc.stdout
-
-
-HAS_LOUDNORM = FFMPEG and _ffmpeg_has_loudnorm()
+HAS_LOUDNORM = FFMPEG and ffmpeg_has_loudnorm()
 NO_LOUDNORM = pytest.mark.skipif(
-    not _ffmpeg_has_loudnorm(),
+    not HAS_LOUDNORM,
     reason="ffmpeg loudnorm filter not available",
 )
 
