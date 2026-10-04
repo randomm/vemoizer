@@ -256,12 +256,17 @@ def _measure_loudnorm(path: Path) -> LoudnormMeasurement | None:
     ``None`` on ANY failure (fail open — the caller runs the plain
     decode): ffmpeg missing, non-zero exit, timeout, or a JSON block
     that is missing/malformed/absurd.
+
+    Note: ``-v error`` is NOT used here (unlike the plain decode) because
+    ffmpeg 9.x suppresses the loudnorm filter's JSON output (``input_i``
+    etc.) at ``-v error`` level — the JSON is only emitted at the default
+    ``-v info`` level. The null muxer (``-f null -``) means no audio
+    output is produced, so the extra stderr noise from info-level logging
+    is harmless.
     """
     argv = [
         "ffmpeg",
         "-nostdin",
-        "-v",
-        "error",
         "-ac",
         "1",
         "-ar",
@@ -349,9 +354,18 @@ def _decode_args(extra: tuple[str, ...] = ()) -> list[str]:
     before ``-i`` (the filter chain runs after resample/downmix, before
     the f32le output — the order chosen by the synthetic-signal
     measurement, issue #135). No args → the argv is literally unchanged
-    (the flag-less contract a test pins)."""
+    (the flag-less contract a test pins).
+
+    The ``-f f32le -`` output spec comes BEFORE ``-i`` (the raw stream
+    output goes to stdout before the input is opened — the ffmpeg CLI
+    ordering that keeps ``-f`` from being misinterpreted as the output
+    file name). ``-i`` is the last element, so the caller appends the
+    path: ``_decode_args(...) + [str(path)]``.
+    """
     base = list(_FFMPEG_AUDIO_ARGS)
-    return ["ffmpeg", *base[:10], *extra, *base[10:], "-i"]
+    # base[:9] = -nostdin -v error -ac 1 -ar 16000 -c:a pcm_f32le
+    # base[9:]  = -f f32le -
+    return ["ffmpeg", *base[:9], *extra, *base[9:], "-i"]
 
 
 def _decode_pass2(p: Path, measurement: LoudnormMeasurement) -> np.ndarray:
