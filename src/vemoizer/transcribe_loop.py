@@ -49,6 +49,7 @@ def transcribe_batch(
     quiet: bool = False,
     copy: bool = False,
     display: ProgressDisplay | None = None,
+    preprocess: str | None = None,
 ) -> int:
     """Transcribe *files* and write output files (the loop from old cli.py).
 
@@ -97,6 +98,7 @@ def transcribe_batch(
                         glossary_path=glossary_path,
                         speakers=speakers,
                         display=display,
+                        preprocess=preprocess,
                     )
                 except (KeyboardInterrupt, SystemExit):
                     # ConfigError is handled by the try above; only the two

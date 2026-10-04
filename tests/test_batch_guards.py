@@ -57,7 +57,7 @@ def test_run_batch_all_single_part_groups_middle_failure_is_clean(
             raise RuntimeError("decoder exploded")
         return {"text": "hei", "segments": []}
 
-    def fake_decode_boundaries(files, transcribe_fn=None):
+    def fake_decode_boundaries(files, transcribe_fn=None, **kw):
         # Both boundaries break (empty tail/head texts) -> three
         # single-file groups, all taken through the single-part branch.
         return ["", ""], ["", ""]
@@ -92,7 +92,7 @@ def test_run_batch_single_part_group_keyboard_interrupt_still_propagates(
     def fake_transcribe_file(path, **kwargs):
         raise KeyboardInterrupt()
 
-    def fake_decode_boundaries(files, transcribe_fn=None):
+    def fake_decode_boundaries(files, transcribe_fn=None, **kw):
         return ["", ""], ["", ""]
 
     monkeypatch.chdir(tmp_path)

@@ -63,15 +63,15 @@ def _fake_group_seams(
     """
     touched = {"decode": 0, "concat": 0, "offsets": 0}
 
-    def fake_decode_boundaries(files, transcribe_fn=None):
+    def fake_decode_boundaries(files, transcribe_fn=None, **kw):
         touched["decode"] += 1
         return [tail], [head]
 
-    def fake_concat(files):
+    def fake_concat(files, **kw):
         touched["concat"] += 1
         return files[0]
 
-    def fake_offsets(files):
+    def fake_offsets(files, **kw):
         touched["offsets"] += 1
         return []
 

@@ -92,7 +92,11 @@ def build_sidecar(
       ``glossary_files`` is the list of files actually used (``[]`` when
       none); ``glossary_sha256`` is the sha256 over their prompt-term set
       (see :func:`prompt_term_set_hash`), or ``None`` when
-      ``glossary_files`` is empty.
+      ``glossary_files`` is empty. ``preprocess`` (issue #135) is
+      recorded present-only: added to the options dict only when the run
+      set it (``"loudnorm"``), so ``render`` keeps it; absent (or
+      ``None``) otherwise, so the flag-less sidecar stays byte-identical
+      to before.
     * ``speaker_names``: ``{}`` by default (``render``'s ``--name`` persists
       into it later). Never a ``clips`` key.
 
@@ -117,6 +121,14 @@ def build_sidecar(
         "glossary_files": files,
         "glossary_sha256": prompt_term_set_hash(files) if files else None,
     }
+    # Issue #135: the opt-in preprocess is recorded present-only, so
+    # ``render`` keeps it. The value comes from the result dict (the
+    # pipeline stashes it there when the flag is set); absent or None
+    # when the flag was not set, so the flag-less sidecar is unchanged.
+    preprocess = result.get("preprocess")
+    if preprocess:
+        result["options"]["preprocess"] = preprocess
+        result.pop("preprocess", None)
 
     result.setdefault("speaker_names", {})
 
@@ -248,7 +260,7 @@ def group_part_paths(label: Path | str, files: list[Path]) -> list[Path]:
     return parts
 
 
-def group_durations(paths: list[Path]) -> list[float]:
+def group_durations(paths: list[Path], *, preprocess: str | None = None) -> list[float]:
     """Per-part decoded-PCM durations for a group's sidecar ``source``.
 
     *paths* are the group's real part paths (:func:`group_part_paths`),
@@ -256,11 +268,14 @@ def group_durations(paths: list[Path]) -> list[float]:
     bare name resolved against the process CWD) and the caller need not
     resolve the label a second time. The same measurement the sidecar's
     ``part_offset_s`` (derived from ``part_markers``) is based on, so
-    the two stay consistent.
+    the two stay consistent. ``preprocess`` (issue #135) is threaded
+    through so the duration matches the processed decode (the loudnorm
+    gain is linear, so the sample count — and thus the duration — is
+    identical either way, but the argv must stay in lock-step).
     """
     from vemoizer.ingest import pcm_duration_seconds
 
-    return [pcm_duration_seconds(p) for p in paths]
+    return [pcm_duration_seconds(p, preprocess=preprocess) for p in paths]
 
 
 def resolve_run_glossary_files(

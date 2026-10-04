@@ -244,7 +244,9 @@ def run_batch(
     # can be any exception type (HuggingFace/network) — none of those
     # may escape as a raw traceback. KeyboardInterrupt still propagates.
     try:
-        tail_texts, head_texts = _db(ordered, transcribe_fn)
+        tail_texts, head_texts = _db(
+            ordered, transcribe_fn, preprocess=options.preprocess
+        )
     except KeyboardInterrupt:
         raise
     except Exception as e:  # noqa: BLE001 - intentional: any load failure -> clean line
@@ -302,6 +304,8 @@ def run_batch(
                     label = group[0].name
                 else:
                     try:
+                        # The loudnorm filter is applied at the later
+                        # decode (the demuxer stream-copies), not here.
                         merged = concat_groups(group)
                     except GroupingError as e:
                         # Fail this group, continue with the rest (the
@@ -315,7 +319,7 @@ def run_batch(
                         # A per-part ingest failure (missing/corrupt file) is
                         # a group failure, not a crash: clean error line and
                         # continue with the remaining groups.
-                        offsets = part_offsets(group)
+                        offsets = part_offsets(group, preprocess=options.preprocess)
                     except IngestError as e:
                         if merged_is_temp:
                             remove_concat_output(merged)

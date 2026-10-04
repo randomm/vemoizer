@@ -56,16 +56,16 @@ def _fake_continuation_seams(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         grouping,
         "decode_boundaries",
-        lambda files, transcribe_fn=None: (["t1"], ["t2"]),
+        lambda files, transcribe_fn=None, **kw: (["t1"], ["t2"]),
     )
     import vemoizer.batch as batch
 
-    monkeypatch.setattr(batch, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr(batch, "part_offsets", lambda files: [])
-    monkeypatch.setattr(grouping, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr(grouping_concat, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr(grouping, "part_offsets", lambda files: [])
-    monkeypatch.setattr(grouping_concat, "part_offsets", lambda files: [])
+    monkeypatch.setattr(batch, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(batch, "part_offsets", lambda files, **kw: [])
+    monkeypatch.setattr(grouping, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(grouping_concat, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(grouping, "part_offsets", lambda files, **kw: [])
+    monkeypatch.setattr(grouping_concat, "part_offsets", lambda files, **kw: [])
     monkeypatch.setattr(
         grouping,
         "propose_groups",
@@ -188,7 +188,9 @@ def test_meeting_grouped_diarize_without_labels_reason_matches_stderr(
 def test_meeting_grouped_error_key_reason_matches_stderr(tmp_path, monkeypatch):
     _fake_ingest(monkeypatch)
     monkeypatch.setattr(
-        grouping, "decode_boundaries", lambda files, transcribe_fn=None: ([""], [""])
+        grouping,
+        "decode_boundaries",
+        lambda files, transcribe_fn=None, **kw: ([""], [""]),
     )
     touch_files(["a.m4a", "b.m4a"], tmp_path)
 
@@ -242,7 +244,9 @@ def test_transcribe_no_group_diarize_without_labels_reason_matches_stderr(
     expert wording ``--diarize``): reason == stderr line per file."""
     _fake_ingest(monkeypatch)
     monkeypatch.setattr(
-        grouping, "decode_boundaries", lambda files, transcribe_fn=None: ([""], [""])
+        grouping,
+        "decode_boundaries",
+        lambda files, transcribe_fn=None, **kw: ([""], [""]),
     )
     touch_files(["a.m4a", "b.m4a"], tmp_path)
 

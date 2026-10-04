@@ -45,7 +45,9 @@ def _audio(seconds: float = 2.0) -> np.ndarray:
 
 
 def _patch_ingest(monkeypatch) -> None:
-    monkeypatch.setattr(pipeline, "ingest_audio", lambda path: _audio())
+    # *kwargs: the pipeline passes preprocess=... (issue #135) — the fake
+    # ignores it (tests exercise the plain decode path).
+    monkeypatch.setattr(pipeline, "ingest_audio", lambda path, **kw: _audio())
 
 
 def _patch_preflight_pass(monkeypatch) -> None:
@@ -275,7 +277,7 @@ def test_fail_open_when_both_decodes_fail(tmp_path, monkeypatch) -> None:
 def test_fail_open_on_ingest_error(monkeypatch) -> None:
     from vemoizer.ingest import IngestError
 
-    def _boom(path):
+    def _boom(path, **kw):
         raise IngestError("corrupt")
 
     monkeypatch.setattr(pipeline, "ingest_audio", _boom)
@@ -286,7 +288,7 @@ def test_fail_open_on_ingest_error(monkeypatch) -> None:
 
 def test_empty_audio_short_circuits(monkeypatch) -> None:
     _patch_preflight_pass(monkeypatch)
-    monkeypatch.setattr(pipeline, "ingest_audio", lambda path: _audio(0.0))
+    monkeypatch.setattr(pipeline, "ingest_audio", lambda path, **kw: _audio(0.0))
     result = transcribe_file("/nonexistent.m4a")
     assert result["text"] == ""
     assert result["segments"] == []
@@ -631,7 +633,7 @@ def test_decode_only_unknown_backend_raises() -> None:
 def test_decode_only_ingest_error_fails_open(monkeypatch) -> None:
     from vemoizer.ingest import IngestError
 
-    def _boom(path):
+    def _boom(path, **kw):
         raise IngestError("corrupt")
 
     monkeypatch.setattr(pipeline, "ingest_audio", _boom)

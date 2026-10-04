@@ -58,6 +58,19 @@ ffmpeg -nostdin -v error -ac 1 -ar 16000 -c:a pcm_f32le -f f32le - <input>
   never from ffprobe: iOS Voice Memos carry edit lists that make container
   metadata lie.
 
+**`--preprocess loudnorm` (opt-in, issue #135).** When set, an ffmpeg
+two-pass `loudnorm` filter (I=-16 LUFS, TP=-1.5, LRA=11) is inserted into
+every ffmpeg decode argv that feeds the transcript or the grouping decision:
+`ingest_audio`, `pcm_duration_seconds`, the concat decode in
+grouping_concat.py, and the 20 s edge-window decode in grouping_decode.py.
+The filter is never applied to `speaker_clips.extract_clips` — clips are for a
+human to listen to and a normalised clip would misrepresent the real level.
+When the flag is absent the decode argv is literally unchanged (a test pins
+equality with today's argv constants). The effect on accuracy is unmeasured;
+the flag is intended for by-ear verification on private far-field memos, not
+a claim of improvement. The two-pass design adds a measurement pass (about a
+minute per hour of audio) before the decode.
+
 ## Stages
 
 ### 1. Ingest
@@ -572,6 +585,7 @@ changes the run's exit code, and a per-sidecar naming failure only warns
 | `--yes` | off | group mode for 2+ files: run the boundary decodes and accept every continuation proposal without a prompt (mutually exclusive with `--no-group`) |
 | `--no-group` | off | skip split-recording grouping entirely — each file is transcribed standalone (no boundary decode, no concat, no part markers); mutually exclusive with `--yes` |
 | `--language` | `auto` | recognition language for the whisper decode: `auto` (detect per window), `fi`, or `en` (case-insensitive); a `[meeting] language` key in the config file pins the same choice for meeting (and memo) runs (issue #108) |
+| `--preprocess` | off | audio level normalisation: `loudnorm` (two-pass, I=-16 LUFS, TP=-1.5, LRA=11) before decode; opt-in for far-field meeting recordings (issue #135) |
 
 ### `vemoizer memo FILES... [options]` (issue #82)
 
@@ -600,6 +614,7 @@ the same empty-prompt invariant (prompt terms ignored).
 | `--config` | layered search | explicit LLM config path (replaces the search) |
 | `--glossary` | layered merge | explicit glossary file (correction pairs only for memo) |
 | `--repair` / `--no-repair` | on | LLM repair pass over the final paragraphs |
+| `--preprocess` | off | audio level normalisation: `loudnorm` (two-pass, I=-16 LUFS, TP=-1.5, LRA=11) before decode; opt-in for far-field meeting recordings (issue #135) |
 
 ### `vemoizer render X.json [options]` (issue #89, M5a)
 
@@ -664,6 +679,7 @@ used to live here moved to `src/vemoizer/batch.py` so the
 | `--diarize` | off | run speaker diarization and attach speaker labels (pyannote.audio) |
 | `--yes` | off | group mode for 2+ files: run the 20 s boundary decodes and accept every continuation proposal without a prompt (mutually exclusive with `--no-group`) |
 | `--no-group` | off | skip split-recording grouping entirely — each file is transcribed standalone (no boundary decode, no concat, no part markers) |
+| `--preprocess` | off | audio level normalisation: `loudnorm` (two-pass, I=-16 LUFS, TP=-1.5, LRA=11) before decode; opt-in for far-field meeting recordings (issue #135) |
 
 Split-recording grouping (issue #77, 2+ files only): the inputs are
 naturally sorted (NFC stem, trailing integer as the numeric key), the

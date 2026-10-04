@@ -53,19 +53,19 @@ def _fake_continuation_seams(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         grouping,
         "decode_boundaries",
-        lambda files, transcribe_fn=None: (
+        lambda files, transcribe_fn=None, **kw: (
             ["ja tässä ollaan nyt"],
             ["tässä jatketaan"],
         ),
     )
     import vemoizer.batch as batch
 
-    monkeypatch.setattr(batch, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr(batch, "part_offsets", lambda files: [])
-    monkeypatch.setattr(grouping, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr(grouping_concat, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr(grouping, "part_offsets", lambda files: [])
-    monkeypatch.setattr(grouping_concat, "part_offsets", lambda files: [])
+    monkeypatch.setattr(batch, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(batch, "part_offsets", lambda files, **kw: [])
+    monkeypatch.setattr(grouping, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(grouping_concat, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(grouping, "part_offsets", lambda files, **kw: [])
+    monkeypatch.setattr(grouping_concat, "part_offsets", lambda files, **kw: [])
     # One continuation proposal: fold the two files into a single group.
     monkeypatch.setattr(
         grouping,
@@ -161,7 +161,7 @@ def test_transcribe_grouped_middle_failure_one_fail_notify(tmp_path, monkeypatch
     monkeypatch.setattr(
         grouping,
         "decode_boundaries",
-        lambda files, transcribe_fn=None: (["", ""], ["", ""]),
+        lambda files, transcribe_fn=None, **kw: (["", ""], ["", ""]),
     )
     touch_files(["a.m4a", "b.m4a", "c.m4a"], tmp_path)
 

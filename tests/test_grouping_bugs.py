@@ -61,14 +61,14 @@ def test_run_batch_part_ingest_error_is_clean_and_batch_continues(
         decode_calls.append(Path(path).name)
         return {"text": "hei", "segments": []}
 
-    def fake_decode_boundaries(files, transcribe_fn=None):
+    def fake_decode_boundaries(files, transcribe_fn=None, **kw):
         # Both boundaries continue -> all 3 files in ONE multi-part group.
         return ["t jatkumossa", "t jatkuu"], ["h jatkuu", "h jatkuu"]
 
-    def fake_concat(files):
+    def fake_concat(files, **kw):
         return files[0]
 
-    def boom(files):
+    def boom(files, **kw):
         raise IngestError("part file missing or corrupt: Uusi äänitys 425.m4a")
 
     monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
@@ -219,7 +219,7 @@ def test_decode_boundaries_does_not_destroy_shared_whisper_cache(
     monkeypatch.setattr(
         grouping,
         "_decode_edge_window",
-        lambda path, start, end: np.zeros(16000, dtype=np.float32),
+        lambda path, start, end, **kw: np.zeros(16000, dtype=np.float32),
     )
     files = [tmp_path / "Uusi äänitys 425.m4a", tmp_path / "Uusi äänitys 426.m4a"]
     for f in files:
@@ -254,7 +254,7 @@ def test_run_batch_out_file_with_multiple_groups_fails_loud(
         decode_calls.append(1)
         return {"text": "hei", "segments": []}
 
-    def fake_decode_boundaries(files, transcribe_fn=None):
+    def fake_decode_boundaries(files, transcribe_fn=None, **kw):
         # Both boundaries break (closing cue in each tail) -> 3 singleton
         # groups -> 3 writes to the same --out target would be an
         # overwrite.
@@ -303,7 +303,7 @@ def test_run_batch_out_stdout_with_multiple_groups_is_fine(
     def fake_transcribe_file(path, **kwargs):
         return {"text": "hei", "segments": []}
 
-    def _two_group_boundaries(files, transcribe_fn=None):
+    def _two_group_boundaries(files, transcribe_fn=None, **kw):
         # Both boundaries break -> 2 singleton groups -> 2 streams to stdout.
         return ["t1 kiitos", "t2 moi"], ["h1", "h2"]
 
@@ -348,12 +348,12 @@ def test_run_batch_out_file_with_single_group_is_fine(tmp_path, monkeypatch) -> 
     monkeypatch.setattr(
         grouping,
         "decode_boundaries",
-        lambda files, transcribe_fn=None: (["t jatkumossa"], ["h jatkuu"]),
+        lambda files, transcribe_fn=None, **kw: (["t jatkumossa"], ["h jatkuu"]),
     )
-    monkeypatch.setattr(grouping, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr(batch, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr(grouping, "part_offsets", lambda files: [])
-    monkeypatch.setattr(batch, "part_offsets", lambda files: [])
+    monkeypatch.setattr(grouping, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(batch, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(grouping, "part_offsets", lambda files, **kw: [])
+    monkeypatch.setattr(batch, "part_offsets", lambda files, **kw: [])
     out = tmp_path / "merged.txt"
     files = [tmp_path / "Uusi äänitys 425.m4a", tmp_path / "Uusi äänitys 426.m4a"]
     for f in files:
@@ -397,7 +397,7 @@ def test_run_batch_non_tty_without_yes_or_no_group_fails_immediately(
 
     touched: dict[str, int] = {"decode": 0, "transcribe_file": 0, "ingest": 0}
 
-    def fake_decode_boundaries(files, transcribe_fn=None):
+    def fake_decode_boundaries(files, transcribe_fn=None, **kw):
         touched["decode"] += 1
         return [""], [""]
 
@@ -451,7 +451,7 @@ def test_run_batch_yes_and_no_group_are_mutually_excluded(
 
     touched: dict[str, int] = {}
 
-    def fake_decode_boundaries(files, transcribe_fn=None):
+    def fake_decode_boundaries(files, transcribe_fn=None, **kw):
         touched["decode"] = touched.get("decode", 0) + 1
         return [""], [""]
 
@@ -491,7 +491,7 @@ def test_run_batch_single_file_needs_no_tty_and_does_no_grouping(
 
     touched: dict[str, int] = {"decode": 0, "transcribe_file": 0, "isatty": 0}
 
-    def fake_decode_boundaries(files, transcribe_fn=None):
+    def fake_decode_boundaries(files, transcribe_fn=None, **kw):
         touched["decode"] += 1
         return [""], [""]
 
@@ -572,7 +572,7 @@ def test_decode_boundaries_releases_transcriber_without_cleanup(
     monkeypatch.setattr(
         grouping,
         "_decode_edge_window",
-        lambda path, start, end: np.zeros(16000, dtype=np.float32),
+        lambda path, start, end, **kw: np.zeros(16000, dtype=np.float32),
     )
     files = [tmp_path / "Uusi äänitys 425.m4a", tmp_path / "Uusi äänitys 426.m4a"]
     for f in files:

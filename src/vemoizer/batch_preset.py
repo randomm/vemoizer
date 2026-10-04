@@ -107,7 +107,13 @@ def _run_preset_groups(
 
         parts = group_part_paths(label, files)
         with suppress(OSError, IngestError):  # fail-open: skip on ffmpeg error
-            result["_source_durations"] = group_durations(parts)
+            result["_source_durations"] = group_durations(
+                parts, preprocess=options.preprocess
+            )
+        # Issue #135: stash the opt-in preprocess on the result so
+        # build_sidecar records it present-only.
+        if options.preprocess:
+            result["preprocess"] = options.preprocess
         build_sidecar(
             result,
             command=command,
@@ -187,6 +193,7 @@ def run_preset(
     diarize: bool | None = None,
     speakers: SpeakerCount | None = None,
     language: str | None = None,
+    preprocess: str | None = None,
     quiet: bool = False,
     yes: bool = False,
     no_group: bool = False,
@@ -197,6 +204,10 @@ def run_preset(
     display: ProgressDisplay | None = None,
 ) -> int:
     """Run the *meeting* or *memo* preset over *files*.
+
+    ``preprocess`` (issue #135): ``"loudnorm"`` threads the two-pass
+    loudnorm normalization through the option (the CLI validates the
+    value; ``None`` keeps the plain decode).
 
     Composes the layered glossary, resolves the preset options, then runs
     the plain per-file loop (single file / memo / ``--no-group``) or, for
@@ -245,6 +256,7 @@ def run_preset(
             "diarize": diarize,
             "speakers": speakers,
             "language": language,
+            "preprocess": preprocess,
         },
     )
 
@@ -356,7 +368,13 @@ def run_preset(
                     with suppress(
                         OSError, IngestError
                     ):  # fail-open: skip on ffmpeg error
-                        result["_source_durations"] = [pcm_duration_seconds(file)]
+                        result["_source_durations"] = [
+                            pcm_duration_seconds(file, preprocess=options.preprocess)
+                        ]
+                    # Issue #135: stash the opt-in preprocess on the result
+                    # so build_sidecar records it present-only.
+                    if options.preprocess:
+                        result["preprocess"] = options.preprocess
                     build_sidecar(
                         result,
                         command=command,

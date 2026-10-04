@@ -39,7 +39,9 @@ from vemoizer.transcriber import Transcriber
 logger = logging.getLogger(__name__)
 
 
-def _decode_edge_window(path: Path, start: float, end: float) -> np.ndarray:
+def _decode_edge_window(
+    path: Path, start: float, end: float, *, preprocess: str | None = None
+) -> np.ndarray:
     """Decode ``[start, end)`` seconds of *path* — just that window.
 
     ``-ss`` / ``-t`` are placed BEFORE ``-i``: ffmpeg seeks into the input
@@ -52,7 +54,23 @@ def _decode_edge_window(path: Path, start: float, end: float) -> np.ndarray:
     over-estimated probed duration never over-reads; the caller clamps
     the tail start against the probed duration and skips the tail when
     the probe is empty (``0.0``).
+
+    ``preprocess="loudnorm"`` (issue #135) adds the loudnorm filter to
+    this decode: the boundary heuristic must see the same signal as the
+    transcript (which is loudnorm-processed when the flag is set).
     """
+    from . import loudnorm as _loudnorm
+
+    extra: tuple[str, ...] = ()
+    if preprocess == "loudnorm":
+        measurement = _loudnorm.measurement_for(path)
+        if measurement is not None:
+            extra = ("-af", _loudnorm.loudnorm_pass2_filter(measurement))
+        else:
+            # Fail open: the plain decode (the transcript's own loudnorm
+            # pass already warned, if it also failed).
+            pass
+
     argv = [
         "ffmpeg",
         "-nostdin",
@@ -68,6 +86,7 @@ def _decode_edge_window(path: Path, start: float, end: float) -> np.ndarray:
         "16000",
         "-c:a",
         "pcm_f32le",
+        *extra,
         "-f",
         "f32le",
         "-",
@@ -94,6 +113,8 @@ def _decode_edge_window(path: Path, start: float, end: float) -> np.ndarray:
 def decode_boundaries(
     files: Sequence[Path | str],
     transcribe_fn: Callable[[np.ndarray], dict[str, Any]] | None = None,
+    *,
+    preprocess: str | None = None,
 ) -> tuple[list[str], list[str]]:
     """Decode each boundary's 20 s tail and head.
 
@@ -154,7 +175,7 @@ def decode_boundaries(
             """
             tr = _tr_snapshot
             try:
-                audio = _dew(path, start, end)
+                audio = _dew(path, start, end, preprocess=preprocess)
                 if len(audio) == 0:
                     return "", None
                 if transcribe_fn is not None:

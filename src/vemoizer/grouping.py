@@ -83,7 +83,9 @@ from vemoizer.textnorm import textnorm
 from .grouping_common import PartMarker, PartOffset  # noqa: F401  (re-export)
 
 
-def _decode_edge_window(path: Path, start: float, end: float) -> np.ndarray:
+def _decode_edge_window(
+    path: Path, start: float, end: float, *, preprocess: str | None = None
+) -> np.ndarray:
     """Indirection for :func:`grouping_decode._decode_edge_window`.
 
     Defined here (not imported) so that ``monkeypatch.setattr(grouping,
@@ -92,7 +94,7 @@ def _decode_edge_window(path: Path, start: float, end: float) -> np.ndarray:
     """
     from .grouping_decode import _decode_edge_window as _dew
 
-    return _dew(path, start, end)
+    return _dew(path, start, end, preprocess=preprocess)
 
 
 #: Seconds of each file edge decoded for the continuation probe.

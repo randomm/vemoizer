@@ -36,7 +36,11 @@ from vemoizer.audio_contract import SAMPLE_RATE
 #   -c:a pcm_f32le: encode to raw little-endian float32 PCM
 #   -f f32le      : raw format on stdout
 #   -             : output to stdout (never write a temp file)
-_FFMPEG_AUDIO_ARGS = (
+# The split into _FFMPEG_DECODE_ARGS (up to and including the codec spec)
+# and _FFMPEG_OUTPUT_ARGS (the raw stream output spec) is structural, not
+# arbitrary: the loudnorm filter is inserted BETWEEN them (after the
+# resample/downmix, before the output spec) in the pass-2 argv builder.
+_FFMPEG_DECODE_ARGS = (
     "-nostdin",
     "-v",
     "error",
@@ -46,10 +50,13 @@ _FFMPEG_AUDIO_ARGS = (
     "16000",
     "-c:a",
     "pcm_f32le",
+)
+_FFMPEG_OUTPUT_ARGS = (
     "-f",
     "f32le",
     "-",
 )
+_FFMPEG_AUDIO_ARGS = _FFMPEG_DECODE_ARGS + _FFMPEG_OUTPUT_ARGS
 
 
 class IngestError(RuntimeError):
@@ -60,11 +67,16 @@ class IngestError(RuntimeError):
         self.returncode = returncode
 
 
-def ingest_audio(path: Path | str) -> np.ndarray:
+def ingest_audio(path: Path | str, *, preprocess: str | None = None) -> np.ndarray:
     """Decode *path* to a 16 kHz mono float32 numpy array.
 
     Args:
         path: Path to an audio file (typically .m4a from iOS Voice Memos).
+        preprocess: ``"loudnorm"`` (issue #135) runs the two-pass
+            ``loudnorm`` normalization first (fail open: any measurement
+            failure falls back to the plain decode with one warning);
+            ``None`` (the default) keeps the plain decode argv literally
+            unchanged.
 
     Returns:
         numpy array of shape ``(n,)`` with ``dtype=np.float32`` at 16 kHz.
@@ -73,9 +85,14 @@ def ingest_audio(path: Path | str) -> np.ndarray:
         IngestError: ffmpeg is missing, the file is unreadable/corrupt, or
             ffmpeg exits non-zero for any other reason.
     """
+    from . import loudnorm as _loudnorm
+
     p = Path(path)
     if not p.is_file():
         raise IngestError(f"audio file not found: {p}")
+
+    if preprocess == "loudnorm":
+        return _loudnorm.preprocess_audio(p, preprocess="loudnorm")
 
     argv = ["ffmpeg", *_FFMPEG_AUDIO_ARGS, "-i", str(p)]
 
@@ -214,7 +231,9 @@ def _bounded_stderr(stderr: bytes) -> str:
     return stderr_text
 
 
-def pcm_duration_seconds(path: Path | str, timeout: float = 300.0) -> float:
+def pcm_duration_seconds(
+    path: Path | str, timeout: float = 300.0, *, preprocess: str | None = None
+) -> float:
     """Duration in seconds of *path*'s decoded PCM, without materialising it.
 
     Same contract as :func:`ingest_audio` (the :data:`_FFMPEG_AUDIO_ARGS`
@@ -232,7 +251,9 @@ def pcm_duration_seconds(path: Path | str, timeout: float = 300.0) -> float:
     kept for error messages. The process is always killed and reaped on
     timeout, exception, and KeyboardInterrupt — no zombie, no leak.
 
-    Returns exactly what ``duration_seconds(ingest_audio(path))`` would.
+    Returns exactly what ``duration_seconds(ingest_audio(path))`` would
+    (the same decode argv, so part offsets and source durations match
+    the processed decode when *preprocess* is ``"loudnorm"``).
 
     Raises:
         IngestError: ffmpeg is missing, the file is unreadable/corrupt,
@@ -242,7 +263,16 @@ def pcm_duration_seconds(path: Path | str, timeout: float = 300.0) -> float:
     if not p.is_file():
         raise IngestError(f"audio file not found: {p}")
 
-    argv = ["ffmpeg", *_FFMPEG_AUDIO_ARGS, "-i", str(p)]
+    # The same decode as ingest_audio: the byte count of the decoded PCM
+    # is the duration, and the decode must match what the transcript saw
+    # (issue #135 consistency rule: part offsets and source durations
+    # come from the processed decode, never the raw one). decode_argv
+    # builds the loudnorm pass-2 argv from the same cached measurement
+    # the transcript decode uses, so for an unchanged file the two
+    # decodes share the measured values (one pass-1 per file).
+    from . import loudnorm as _loudnorm
+
+    argv = _loudnorm.decode_argv(p, preprocess)
 
     # stderr goes to a temp file (not a pipe) so a chatty ffmpeg cannot
     # fill the pipe buffer and deadlock the stdout drain; stdout is a

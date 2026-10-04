@@ -323,7 +323,7 @@ def test_decode_boundaries_calls_transcribe_once_per_edge(
     def fake_probe(path):
         return durations[Path(path).name]
 
-    def fake_edge_window(path, start, end):
+    def fake_edge_window(path, start, end, **kw):
         return np.zeros(int((end - start) * 16000), dtype=np.float32)
 
     transcribe_calls: list[float] = []
@@ -358,7 +358,9 @@ def test_decode_boundaries_short_file_tail_clips(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         grouping,
         "_decode_edge_window",
-        lambda path, start, end: np.zeros(int((end - start) * 16000), dtype=np.float32),
+        lambda path, start, end, **kw: np.zeros(
+            int((end - start) * 16000), dtype=np.float32
+        ),
     )
     transcribe_calls: list[float] = []
 
@@ -410,7 +412,7 @@ def test_decode_boundaries_empty_audio_is_empty_text(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(
         grouping,
         "_decode_edge_window",
-        lambda path, start, end: np.zeros(0, dtype=np.float32),
+        lambda path, start, end, **kw: np.zeros(0, dtype=np.float32),
     )
     files = [tmp_path / "Uusi äänitys 425.m4a", tmp_path / "Uusi äänitys 426.m4a"]
     for f in files:
@@ -556,7 +558,7 @@ def test_part_offsets_cumulative_pcm_durations(tmp_path, monkeypatch) -> None:
         f.touch()
     durations_by_name = {f.name: d for f, d in zip(files, durations, strict=True)}
 
-    def fake_pcm_duration(path, timeout=300.0):
+    def fake_pcm_duration(path, timeout=300.0, **kw):
         name = Path(path).name
         return durations_by_name[name]
 
@@ -581,7 +583,7 @@ def test_part_offsets_uses_pcm_duration_not_full_decode(tmp_path, monkeypatch) -
     for f in files:
         f.touch()
 
-    def fake_pcm_duration(path, timeout=300.0):
+    def fake_pcm_duration(path, timeout=300.0, **kw):
         return 7.0
 
     monkeypatch.setattr(grouping, "pcm_duration_seconds", fake_pcm_duration)
@@ -774,7 +776,7 @@ def test_probe_failure_logs_a_warning(tmp_path, monkeypatch, caplog) -> None:
     monkeypatch.setattr(
         grouping,
         "_decode_edge_window",
-        lambda path, start, end: np.zeros(16000, dtype=np.float32),
+        lambda path, start, end, **kw: np.zeros(16000, dtype=np.float32),
     )
     files = [tmp_path / "Uusi äänitys 425.m4a", tmp_path / "Uusi äänitys 426.m4a"]
     for f in files:

@@ -86,6 +86,12 @@ class RunOptions:
     # config ``language`` key, which only picks the Markdown heading
     # language (``_normalize_language``) — never recognition.
     language: str
+    # Opt-in audio preprocessing (issue #135): ``"loudnorm"`` runs the
+    # two-pass loudnorm normalization at ingest (fail-open on any
+    # measurement failure); ``None`` (the default) keeps the plain decode
+    # argv literally unchanged. Validated at the CLI (unknown values
+    # exit 2, case-insensitive — same contract as ``--language``).
+    preprocess: str | None
 
     @classmethod
     def expert_transcribe(
@@ -119,6 +125,7 @@ class RunOptions:
             corrections={},
             # The expert command has no --language flag: auto-detect.
             language="auto",
+            preprocess=None,
         )
 
 
@@ -222,6 +229,7 @@ def resolve_options(
             llm_terms=[],
             corrections={},
             language="auto",
+            preprocess=None,
         )
     else:
         # memo: whisper meeting decode, no diarization, no repair; the
@@ -238,6 +246,7 @@ def resolve_options(
             llm_terms=[],
             corrections={},
             language="auto",
+            preprocess=None,
         )
     # --glossary REPLACES both layers entirely (no merging): when it is
     # given, the single file is passed straight through as glossary_path
@@ -275,6 +284,19 @@ def resolve_options(
         known = ", ".join(LANGUAGE_VALUES)
         raise ValueError(f"unknown language {language_raw!r} (known: {known})")
 
+    # Opt-in preprocessing (issue #135): ``None`` (flag absent) keeps the
+    # plain decode; ``"loudnorm"`` (the only accepted value) is threaded
+    # through verbatim (the CLI lowercases + validates, mirroring
+    # --language).
+    preprocess_raw = overrides.get("preprocess")
+    preprocess: str | None = (
+        str(preprocess_raw).strip().lower()
+        if preprocess_raw is not None
+        else base.preprocess
+    )
+    if preprocess is not None and preprocess != "loudnorm":
+        raise ValueError(f"unknown preprocess {preprocess!r} (known: loudnorm)")
+
     return replace(
         base,
         profile=str(_opt("profile", base.profile)),
@@ -289,4 +311,5 @@ def resolve_options(
         llm_terms=llm_terms,
         corrections=dict(corrections),
         language=language,
+        preprocess=preprocess,
     )

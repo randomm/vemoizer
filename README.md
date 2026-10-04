@@ -102,6 +102,8 @@ See `docs/pipeline-spec.md` → "Fully-offline LLM" for the full spec.
 weights: accept the license on HuggingFace and provide an access token
 before first use. Attribution is printed whenever the stage runs.
 
+**`--preprocess loudnorm`** (optional): two-pass ffmpeg loudnorm (I=-16 LUFS) before decode for far-field recordings; effect on accuracy is unmeasured.
+
 ## Commands
 
 `meeting` and `memo` are the recommended entry points: they write dated

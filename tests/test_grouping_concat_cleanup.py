@@ -258,7 +258,7 @@ def _fake_pcm_for_clock(
     idx = {"i": 0}
     costs = wall_costs if wall_costs is not None else durations
 
-    def fake_pcm(path, timeout=300.0):
+    def fake_pcm(path, timeout=300.0, **kw):
         i = idx["i"]
         idx["i"] += 1
         timeouts_seen.append(timeout)
@@ -421,13 +421,15 @@ def test_run_preset_group_duration_ingest_error_is_fail_open(
     import vemoizer.grouping as grouping
     import vemoizer.sidecar as sidecar_module
 
-    def boom(paths):
+    def boom(paths, **kw):
         raise IngestError("ffmpeg failed to decode group parts")
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sidecar_module, "group_durations", boom)
     monkeypatch.setattr(
-        grouping, "decode_boundaries", lambda files, transcribe_fn=None: ([""], ["x"])
+        grouping,
+        "decode_boundaries",
+        lambda files, transcribe_fn=None, **kw: ([""], ["x"]),
     )
     monkeypatch.setattr(
         grouping, "propose_groups", lambda files, t, h: [[files[0]], [files[1]]]
@@ -486,7 +488,9 @@ def _fake_preset_groups(monkeypatch: pytest.MonkeyPatch, groups) -> None:
     import vemoizer.grouping as grouping
 
     monkeypatch.setattr(
-        grouping, "decode_boundaries", lambda files, transcribe_fn=None: ([""], ["x"])
+        grouping,
+        "decode_boundaries",
+        lambda files, transcribe_fn=None, **kw: ([""], ["x"]),
     )
     monkeypatch.setattr(grouping, "propose_groups", lambda files, t, h: groups)
     monkeypatch.setattr(

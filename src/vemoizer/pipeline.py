@@ -231,6 +231,7 @@ def transcribe_file(
     speakers: SpeakerCount | None = None,
     display: ProgressDisplay | None = None,
     language: str | None = None,
+    preprocess: str | None = None,
 ) -> dict:
     """Run the full consensus pipeline over one audio file.
 
@@ -274,7 +275,10 @@ def transcribe_file(
     from .preflight import preflight_gate
 
     gate = preflight_gate(
-        diarize=diarize, profile=profile, echo=lambda line: logger.error(line)
+        diarize=diarize,
+        profile=profile,
+        echo=lambda line: logger.error(line),
+        preprocess=preprocess,
     )
     if gate is not None:
         return gate
@@ -283,7 +287,7 @@ def transcribe_file(
     logger.info("transcribe: %s (profile: %s)", path, profile)
     ingest_start = time.monotonic()
     try:
-        audio = ingest_audio(Path(path))
+        audio = ingest_audio(Path(path), preprocess=preprocess)
     except IngestError as e:
         logger.error("ingest failed for %s: %s", path, e)
         return {"text": "", "segments": [], "error": str(e)}

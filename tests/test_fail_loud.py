@@ -506,13 +506,18 @@ def test_cli_batch_continues_after_empty_transcript(tmp_path, monkeypatch) -> No
             return {"text": "", "segments": []}
         return {"text": "moikka", "segments": []}
 
-    def fake_decode(files, transcribe_fn=None):
+    def fake_decode(files, transcribe_fn=None, **kw):
         return ["kiitos ja moi"], ["a"]
 
     monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
     monkeypatch.setattr(grouping, "decode_boundaries", fake_decode)
-    monkeypatch.setattr(grouping, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr(grouping, "part_offsets", lambda files: [])
+    import vemoizer.batch as batch
+
+    monkeypatch.setattr(batch, "decode_boundaries", fake_decode)
+    monkeypatch.setattr(grouping, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(batch, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(grouping, "part_offsets", lambda files, **kw: [])
+    monkeypatch.setattr(batch, "part_offsets", lambda files, **kw: [])
     monkeypatch.chdir(tmp_path)
     runner = CliRunner()
     result = runner.invoke(

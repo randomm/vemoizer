@@ -191,7 +191,7 @@ def _run_real_pipeline(monkeypatch, tmp_path: Path, extra_args: list[str] | None
     seen: dict = {}
     _spy_decode_meeting(monkeypatch, seen)
 
-    def fake_pcm_duration_seconds(path):
+    def fake_pcm_duration_seconds(path, **kw):
         return 2.0
 
     # The post-transcribe sidecar duration probe is an ffmpeg subprocess;

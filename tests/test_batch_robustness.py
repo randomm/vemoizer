@@ -619,7 +619,7 @@ def test_run_batch_group_transcribe_failure_is_clean_and_continues(
             raise RuntimeError("decoder exploded")
         return {"text": "hei", "segments": []}
 
-    def fake_decode_boundaries(files, transcribe_fn=None):
+    def fake_decode_boundaries(files, transcribe_fn=None, **kw):
         # Boundary 1 continues (files 1+2 in one group), boundary 2 does
         # not -> [files 1, 2], [file 3].
         return ["t jatkumossa", ""], ["h", ""]
@@ -628,10 +628,10 @@ def test_run_batch_group_transcribe_failure_is_clean_and_continues(
     tmp_concat.parent.mkdir(parents=True)
     tmp_concat.touch()
 
-    def fake_concat(files):
+    def fake_concat(files, **kw):
         return tmp_concat
 
-    def fake_offsets(files):
+    def fake_offsets(files, **kw):
         # One offset per part (only the first is consumed by
         # with_part_markers in this fake's shape — the marker builder
         # reads the real PartOffset fields).
@@ -689,7 +689,7 @@ def test_run_batch_group_keyboard_interrupt_still_propagates(
     def fake_transcribe_file(path, **kwargs):
         raise KeyboardInterrupt()
 
-    def fake_decode_boundaries(files, transcribe_fn=None):
+    def fake_decode_boundaries(files, transcribe_fn=None, **kw):
         return ["t jatkumossa", ""], ["h", "h"]
 
     tmp_concat = tmp_path / "concat" / "group.m4a"
@@ -699,19 +699,19 @@ def test_run_batch_group_keyboard_interrupt_still_propagates(
     monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
     monkeypatch.setattr(batch, "_resolve_llm_config", lambda p: None)
     monkeypatch.setattr(grouping, "decode_boundaries", fake_decode_boundaries)
-    monkeypatch.setattr(grouping, "concat_groups", lambda files: tmp_concat)
-    monkeypatch.setattr(batch, "concat_groups", lambda files: tmp_concat)
+    monkeypatch.setattr(grouping, "concat_groups", lambda files, **kw: tmp_concat)
+    monkeypatch.setattr(batch, "concat_groups", lambda files, **kw: tmp_concat)
     monkeypatch.setattr(
         grouping,
         "part_offsets",
-        lambda files: [
+        lambda files, **kw: [
             grouping.PartOffset(part_number=1, source_filename="x", start_offset=0.0),
         ],
     )
     monkeypatch.setattr(
         batch,
         "part_offsets",
-        lambda files: [
+        lambda files, **kw: [
             grouping.PartOffset(part_number=1, source_filename="x", start_offset=0.0),
         ],
     )
