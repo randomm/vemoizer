@@ -278,10 +278,12 @@ def _measurement_for(path: Path) -> LoudnormMeasurement | None:
     """
     try:
         st = path.stat()
+        resolved = str(path.resolve())
     except OSError:
-        # A vanished file has no stable identity — do not cache it.
+        # A vanished file (or a resolve failure) has no stable identity
+        # — do not cache it.
         return _measure_loudnorm(path)
-    key = (str(path.resolve()), st.st_size, st.st_mtime_ns)
+    key = (resolved, st.st_size, st.st_mtime_ns)
     cached = _MEASURE_CACHE.get(key)
     if cached is not None:
         return cached
