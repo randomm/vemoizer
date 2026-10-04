@@ -190,7 +190,10 @@ def wav_duration_seconds(wav_bytes: bytes) -> float:
     """
     try:
         header, payload = _parse_wav_chunks(wav_bytes)
-    except (struct.error, IndexError) as e:
+    except (struct.error, IndexError, ValueError) as e:
+        # _parse_wav_chunks raises ValueError for a non-RIFF/WAVE payload
+        # or a struct.error for a truncated header; both map to the
+        # documented clean error.
         raise ValueError(f"unparseable WAV payload: {e}") from e
     if header is None or payload is None:
         raise ValueError("WAV payload has no fmt or data chunk")
@@ -241,7 +244,10 @@ def _parse_wav_chunks(
             header = (audio_format, channels, rate, _block_align, sample_width)
         elif chunk_id == b"data" and payload is None:
             payload = body
-        off += 8 + size + (size & 1)  # chunks are word-aligned
+        # The RIFF spec says a chunk with an odd size is followed by one
+        # pad byte that is NOT counted in the chunk's size field; (size & 1)
+        # accounts for that pad byte when the size is odd.
+        off += 8 + size + (size & 1)
     return header, payload
 
 

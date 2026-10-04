@@ -275,7 +275,12 @@ def test_eval_agreement_pin_by_name_uses_parakeet_canary(tmp_path, monkeypatch) 
 
 
 def test_eval_agreement_not_emitted_for_single_backend(tmp_path, monkeypatch) -> None:
-    """--agreement with a single backend produces no agreement line."""
+    """--agreement with a single backend produces no agreement line.
+
+    The test asserts the skip-note text (not just the absence of the
+    metric) so that a future change that prints the metric anyway — or
+    changes the skip note — is caught here rather than silently passing.
+    """
     corpus = _corpus(tmp_path)
     _patch_backends(monkeypatch, {"one": "moro maailma", "two": "toinen testi"})
     result = runner.invoke(
@@ -284,6 +289,53 @@ def test_eval_agreement_not_emitted_for_single_backend(tmp_path, monkeypatch) ->
     )
     assert result.exit_code == 0
     assert "[agreement_on_wrong]" not in result.stdout
+    # The skip note is printed to stderr, naming the missing backend.
+    assert "skipping agreement_on_wrong" in result.stderr
+    assert "canary" in result.stderr
+
+
+def test_eval_agreement_emitted_when_both_backends_present(
+    tmp_path, monkeypatch
+) -> None:
+    """--agreement with exactly parakeet + canary (no consensus) prints the metric.
+
+    This is the non-vacant single-pair case: both pinned backends are
+    present, so the skip-note path is not taken and the metric is computed
+    and printed. The existing test
+    ``test_eval_agreement_emits_metric_when_two_backends_scored`` covers
+    the three-backend case (consensus excluded); this test isolates the
+    two-backend case to make clear the metric fires when *both* pinned
+    names are in ``per_backend_hyps``.
+    """
+    corpus = _corpus(tmp_path)
+    parakeet_hyps = {"one": "moro maailma", "two": "väärä teksti"}
+    canary_hyps = {"one": "x y z", "two": "toinen testi"}
+
+    def _make(name: str, hyps: dict[str, str]):
+        def _transcribe(wav: Path) -> str:
+            return hyps.get(wav.stem, "")
+
+        return _transcribe
+
+    monkeypatch.setattr(
+        eval_cli,
+        "BACKENDS",
+        {
+            "parakeet": _make("parakeet", parakeet_hyps),
+            "canary": _make("canary", canary_hyps),
+        },
+    )
+    result = runner.invoke(
+        app,
+        ["eval", "--corpus", str(corpus), "--backend", "all", "--agreement"],
+    )
+    assert result.exit_code == 0
+    # Both pinned backends are present, so the metric is printed (no skip note).
+    assert "[agreement_on_wrong]" in result.stdout
+    # Neither sample has both hypotheses wrong -> 0.0.
+    assert "[agreement_on_wrong]\t0.0000" in result.stdout
+    # No skip note in stderr.
+    assert "skipping agreement_on_wrong" not in result.stderr
 
 
 def test_eval_agreement_does_not_affect_wer_gate(tmp_path, monkeypatch) -> None:
