@@ -32,9 +32,10 @@ The measurement itself is memoized per file (``_measurement_for``):
 the pass-1 decode is a full-file pass, and a group run measures it
 several times (``part_offsets`` per part, the group's own decode, the
 sidecar durations). The key is ``(resolved path, size, mtime)`` — an
-unchanged file is measured once, a changed or deleted file is
-re-measured, and a FAILED measurement is cached too (``None``, one
-warning, no re-measurement of a file that just failed).
+unchanged file is measured once, a changed file (size/mtime) is
+re-measured and may warn again, and a FAILED measurement is cached
+(``None``, one warning per file per cache entry, no re-measurement
+of a file that just failed).
 """
 
 from __future__ import annotations
@@ -251,14 +252,10 @@ def decode_argv(p: Path, preprocess: str | None) -> list[str]:
 def measurement_for(path: Path) -> LoudnormMeasurement | None:
     """The loudnorm measurement for *path*, memoized (fail open).
 
-    Memoized in an in-process cache keyed by ``(resolved path, size,
-    mtime)``: a group run measures the same file several times (per-part
-    offsets, the group's own decode, the sidecar durations), and pass 1
-    is a full-file pass — an unchanged file is measured once, a changed
-    or deleted file is re-measured. A FAILED measurement is cached too
-    (``None``): a file that just failed is not re-measured (or
-    re-warned) on every call, and the warning is emitted by the caller
-    that finds ``None`` — once per call site, as before.
+    See :func:`_measurement_for` for the cache-key and
+    fail-open/warning contract (one warning per file per cache entry
+    on a cache-miss failure; a changed file is re-measured and may
+    warn again).
     """
     return _measurement_for(path)
 

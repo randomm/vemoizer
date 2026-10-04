@@ -43,11 +43,13 @@ def concat_groups(group: Sequence[Path | str]) -> Path:
     the input itself is returned.
 
     ``preprocess`` is accepted for API uniformity across the argv
-    builders (issue #135) but NOT applied here: a re-encode at concat
-    time would double-process the loudnorm gain and break the
-    sample-count / part-offset invariants. The loudnorm filter runs at
-    DECODE time (the pipeline's ``ingest_audio``), where the merged
-    group is decoded once.
+    builders (issue #135) but NOT applied here: the concat demuxer
+    stream-copies (``-c copy``), so a re-encode at concat time would
+    double-process the loudnorm gain and break the sample-count /
+    part-offset invariants. The loudnorm filter runs at DECODE time,
+    in :func:`vemoizer.loudnorm.preprocess_audio` (reached via
+    :func:`vemoizer.ingest.ingest_audio` with the ``preprocess``
+    option), where the merged group is decoded once.
 
     The temp directory is 0o700: ``tempfile.mkdtemp`` already creates it
     that way, but an explicit ``os.chmod`` right after the call makes the

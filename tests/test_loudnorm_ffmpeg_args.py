@@ -6,8 +6,10 @@ The spec says: in ingest.py define two named tuples (e.g. _FFMPEG_DECODE_ARGS
 f32le -) and compose _FFMPEG_AUDIO_ARGS = _FFMPEG_DECODE_ARGS +
 _FFMPEG_OUTPUT_ARGS so the value is byte-identical to today's.
 
-This test reads the tuple from main (via git show) and hardcodes the
-expected tuple, then asserts that _FFMPEG_AUDIO_ARGS equals it.
+The expected tuple is hardcoded in this test — it is the literal value
+of ``_FFMPEG_AUDIO_ARGS`` from the main branch at the time of the change.
+It intentionally pins today's argv: if main's argv is changed on purpose,
+this test is updated with it.
 """
 
 from __future__ import annotations
