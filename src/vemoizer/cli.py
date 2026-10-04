@@ -64,11 +64,26 @@ register_glossary(app)
 
 
 @app.command()
-def doctor() -> None:
+def doctor(
+    preprocess: str | None = typer.Option(  # noqa: B008
+        None,
+        "--preprocess",
+        help=(
+            "Preprocessing to check: loudnorm (checks the ffmpeg loudnorm "
+            "filter; informational only — the preflight gate is the "
+            "enforcement point). Omitted: no extra checks (the no-flag "
+            "path does not require the loudnorm filter)."
+        ),
+    ),
+) -> None:
     """Run local health checks; exit non-zero on any red check."""
     from .doctor import run_doctor
 
-    report = run_doctor(echo=lambda line: typer.echo(line))
+    lowered = preprocess.strip().lower() if preprocess is not None else None
+    if lowered is not None and lowered != "loudnorm":
+        typer.echo(f"error: unknown preprocess {lowered!r} (known: loudnorm)", err=True)
+        raise typer.Exit(code=2)
+    report = run_doctor(echo=lambda line: typer.echo(line), preprocess=lowered or None)
     if not report.ok:
         raise typer.Exit(code=1)
 
@@ -176,6 +191,15 @@ def transcribe(
             "part markers). Mutually exclusive with --yes."
         ),
     ),
+    preprocess: str | None = typer.Option(  # noqa: B008
+        None,
+        "--preprocess",
+        help=(
+            "Audio preprocessing (opt-in): loudnorm (two-pass loudnorm "
+            "normalization for far-field recordings; default: off, the "
+            "plain decode). Case-insensitive, like --language."
+        ),
+    ),
 ) -> None:
     """Transcribe one or more voice memos and write transcript files."""
     # Battery warning (fail-open: pmset errors are silent)
@@ -225,6 +249,16 @@ def transcribe(
     # sort, 20s boundary decodes, confirmation (--yes / --no-group /
     # interactive), concat, one decode per group, part markers. A single
     # file stays on the plain per-file loop (no grouping work at all).
+    # Issue #135: --preprocess loudnorm is validated here (case-insensitive,
+    # like --language) and threaded through run_batch / transcribe_batch
+    # (the RunOptions.expert_transcribe field covers both paths).
+    lowered_preprocess = preprocess.strip().lower() if preprocess is not None else None
+    if lowered_preprocess is not None and lowered_preprocess != "loudnorm":
+        typer.echo(
+            f"error: unknown preprocess {lowered_preprocess!r} (known: loudnorm)",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     try:
         if len(files) > 1:
             from vemoizer.batch import run_batch
@@ -247,6 +281,9 @@ def transcribe(
                 glossary_path=str(glossary) if glossary is not None else None,
                 config_path=str(config) if config is not None else None,
             )
+            from vemoizer.presets import replace as _replace
+
+            batch_options = _replace(batch_options, preprocess=lowered_preprocess)
             exit_code = run_batch(
                 files,
                 batch_options,
@@ -271,6 +308,7 @@ def transcribe(
                 quiet=quiet,
                 copy=copy,
                 display=display,
+                preprocess=lowered_preprocess,
             )
     finally:
         if display is not None:
@@ -352,6 +390,15 @@ def meeting(
             "pins the same choice for meeting (and memo) runs."
         ),
     ),
+    preprocess: str | None = typer.Option(  # noqa: B008
+        None,
+        "--preprocess",
+        help=(
+            "Audio preprocessing (opt-in): loudnorm (two-pass loudnorm "
+            "normalization for far-field recordings; default: off, the "
+            "plain decode). Case-insensitive, like --language."
+        ),
+    ),
 ) -> None:
     """Transcribe a meeting: whisper decode, diarization, repair, .md+.json."""
     _warn_on_battery()
@@ -372,6 +419,13 @@ def meeting(
     display = make_batch_display(quiet=quiet)
     speaker_count = _parse_speakers(speakers)
     lowered = language.strip().lower()
+    lowered_preprocess = preprocess.strip().lower() if preprocess is not None else None
+    if lowered_preprocess is not None and lowered_preprocess != "loudnorm":
+        typer.echo(
+            f"error: unknown preprocess {lowered_preprocess!r} (known: loudnorm)",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     try:
         exit_code = run_preset(
             files,
@@ -386,6 +440,7 @@ def meeting(
             yes=yes,
             no_group=no_group,
             display=display,
+            preprocess=lowered_preprocess,
         )
     except ValueError as e:
         # Unknown --language value (resolve_options validates against
@@ -434,6 +489,15 @@ def memo(
         "--no-repair",
         help="LLM repair pass over the final paragraphs (on by default).",
     ),
+    preprocess: str | None = typer.Option(  # noqa: B008
+        None,
+        "--preprocess",
+        help=(
+            "Audio preprocessing (opt-in): loudnorm (two-pass loudnorm "
+            "normalization for far-field recordings; default: off, the "
+            "plain decode). Case-insensitive, like --language."
+        ),
+    ),
 ) -> None:
     """Transcribe a memo: whisper decode, no diarization, repair, .md+.json."""
     _warn_on_battery()
@@ -452,6 +516,13 @@ def memo(
     # M4b (issue #105): one display per CLI invocation, closed in a finally
     # below; --quiet suppresses the live progress line too.
     display = make_batch_display(quiet=quiet)
+    lowered_preprocess = preprocess.strip().lower() if preprocess is not None else None
+    if lowered_preprocess is not None and lowered_preprocess != "loudnorm":
+        typer.echo(
+            f"error: unknown preprocess {lowered_preprocess!r} (known: loudnorm)",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     try:
         exit_code = run_preset(
             files,
@@ -461,6 +532,7 @@ def memo(
             repair=repair,
             quiet=quiet,
             display=display,
+            preprocess=lowered_preprocess,
         )
     except ValueError as e:
         # Unknown [meeting] language value (resolve_options validates

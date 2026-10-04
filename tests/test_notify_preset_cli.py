@@ -42,7 +42,7 @@ def _fake_ingest(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(grouping_probe, "_probe_stream", lambda p: "wav,16000,1")
     monkeypatch.setattr(grouping, "_probe_stream", lambda p: "wav,16000,1")
     monkeypatch.setattr(
-        ingest_module, "pcm_duration_seconds", lambda p, timeout=300.0: 1.0
+        ingest_module, "pcm_duration_seconds", lambda p, timeout=300.0, **kw: 1.0
     )
     monkeypatch.setattr(grouping_probe, "probe_duration_seconds", lambda p: 1.0)
 
@@ -55,19 +55,19 @@ def _fake_continuation_seams(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         grouping,
         "decode_boundaries",
-        lambda files, transcribe_fn=None: (
+        lambda files, transcribe_fn=None, **kw: (
             ["ja tässä ollaan nyt"],
             ["tässä jatketaan"],
         ),
     )
     import vemoizer.batch as batch
 
-    monkeypatch.setattr(batch, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr(batch, "part_offsets", lambda files: [])
-    monkeypatch.setattr(grouping, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr(grouping_concat, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr(grouping, "part_offsets", lambda files: [])
-    monkeypatch.setattr(grouping_concat, "part_offsets", lambda files: [])
+    monkeypatch.setattr(batch, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(batch, "part_offsets", lambda files, **kw: [])
+    monkeypatch.setattr(grouping, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(grouping_concat, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(grouping, "part_offsets", lambda files, **kw: [])
+    monkeypatch.setattr(grouping_concat, "part_offsets", lambda files, **kw: [])
     # One continuation proposal: fold the two files into a single group.
     monkeypatch.setattr(
         grouping,
@@ -88,7 +88,17 @@ def _notify_calls(mock_notify) -> list[str]:
 
 
 def _run_cli(monkeypatch, args: list[str]):
-    """Invoke the CLI with the notify poster patched; return (mock, result)."""
+    """Invoke the CLI with the notify poster patched; return (mock, result).
+
+    ``--yes`` is appended to meeting invocations with 2+ file args so the
+    TTY guard passes under CliRunner (its stdin is not a TTY) — the
+    grouped-seam fakes already patch the boundary decodes, so --yes just
+    skips the confirmation prompt."""
+    meeting_grouped = (
+        args[0] == "meeting" and len([a for a in args if not a.startswith("-")]) > 1
+    )
+    if meeting_grouped and "--yes" not in args and "--no-group" not in args:
+        args = list(args) + ["--yes"]
     with patch("vemoizer.notify.notify") as mock_notify:
         result = runner.invoke(app, args)
     return mock_notify, result
@@ -182,7 +192,9 @@ def test_meeting_grouped_two_groups_call_count_equals_groups(tmp_path, monkeypat
     (one per group) — the exactly-once invariant across the seams."""
     _fake_ingest(monkeypatch)
     monkeypatch.setattr(
-        grouping, "decode_boundaries", lambda files, transcribe_fn=None: ([""], [""])
+        grouping,
+        "decode_boundaries",
+        lambda files, transcribe_fn=None, **kw: ([""], [""]),
     )
     touch_files(["a.m4a", "b.m4a"], tmp_path)
     record: list[str] = []

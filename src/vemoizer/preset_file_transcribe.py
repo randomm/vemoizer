@@ -64,6 +64,7 @@ def _transcribe_preset_file(
             speakers=options.speakers,
             display=display,
             language=None if options.language == "auto" else options.language,
+            preprocess=options.preprocess,
         )
     except (KeyboardInterrupt, SystemExit):
         raise

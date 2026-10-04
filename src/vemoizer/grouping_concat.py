@@ -32,7 +32,9 @@ logger = logging.getLogger(__name__)
 PART_OFFSETS_TOTAL_TIMEOUT = 900.0
 
 
-def concat_groups(group: Sequence[Path | str]) -> Path:
+def concat_groups(
+    group: Sequence[Path | str], *, preprocess: str | None = None
+) -> Path:
     """Join *group* into one temp .m4a with the ffmpeg concat demuxer.
 
     ``-c copy`` (no re-encode). The concat demuxer needs every part to
@@ -41,6 +43,13 @@ def concat_groups(group: Sequence[Path | str]) -> Path:
     files — ``-c copy`` alone would silently corrupt the output. A
     single-file group is a passthrough: no ffmpeg call, no temp file,
     the input itself is returned.
+
+    ``preprocess`` is accepted for API uniformity across the argv
+    builders (issue #135) but NOT applied here: a re-encode at concat
+    time would double-process the loudnorm gain and break the
+    sample-count / part-offset invariants. The loudnorm filter runs at
+    DECODE time (the pipeline's ``ingest_audio``), where the merged
+    group is decoded once.
 
     The temp directory is 0o700: ``tempfile.mkdtemp`` already creates it
     that way, but an explicit ``os.chmod`` right after the call makes the
@@ -185,7 +194,10 @@ def remove_concat_output(merged: Path) -> None:
 
 
 def part_offsets(
-    group: Sequence[Path | str], total_timeout: float = PART_OFFSETS_TOTAL_TIMEOUT
+    group: Sequence[Path | str],
+    total_timeout: float = PART_OFFSETS_TOTAL_TIMEOUT,
+    *,
+    preprocess: str | None = None,
 ) -> list[PartOffset]:
     """Cumulative decoded-PCM start offset per part of *group*.
 
@@ -254,7 +266,7 @@ def part_offsets(
             )
         granted = remaining
         start = time.monotonic()
-        d = _pcm_duration_seconds(part, timeout=granted)
+        d = _pcm_duration_seconds(part, timeout=granted, preprocess=preprocess)
         remaining -= time.monotonic() - start
         total += d
     return offsets

@@ -113,6 +113,7 @@ def run_doctor(
     *,
     echo: Callable[[str], None] = print,
     ping: object | None = "auto",
+    preprocess: str | None = None,
 ) -> DoctorReport:
     """Run every doctor check, printing a status line per check.
 
@@ -120,6 +121,12 @@ def run_doctor(
     check is red (the caller exits non-zero).  ``ping="auto"`` runs the
     real 1-token ping when a config is present; tests may inject a
     ``bool`` or a callable to skip the network.
+
+    ``preprocess`` (issue #135): when set (``"loudnorm"``), an
+    informational line is printed for the ffmpeg loudnorm filter
+    (informational only — doctor never exits non-zero for it; the
+    preflight gate is the enforcement point). The no-flag path does not
+    print the line.
     """
     report = DoctorReport()
 
@@ -133,6 +140,26 @@ def run_doctor(
 
     # 1. ffmpeg on PATH
     add("ffmpeg on PATH", ffmpeg_ok(), hint="install ffmpeg (brew install ffmpeg)")
+
+    # 1b. ffmpeg loudnorm filter (issue #135) — informational only when
+    # the flag is requested; doctor never exits non-zero for it (the
+    # preflight gate is the enforcement point).
+    if preprocess == "loudnorm":
+        from .preflight import loudnorm_filter_ok
+
+        ln_ok = loudnorm_filter_ok()
+        ln_status = GREEN if ln_ok else WARN
+        report.checks.append(
+            DoctorCheck(
+                "ffmpeg loudnorm filter",
+                ln_status,
+                "" if ln_ok else "update ffmpeg (e.g. `brew upgrade ffmpeg`)",
+            )
+        )
+        ln_line = f"{_MARKERS[ln_status]} ffmpeg loudnorm filter"
+        if not ln_ok:
+            ln_line += "  — update ffmpeg (e.g. `brew upgrade ffmpeg`)"
+        echo(ln_line)
 
     # 2. HF token (get_token, not only the HF_TOKEN env var)
     token_ok = hf_token_present()

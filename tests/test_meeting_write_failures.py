@@ -42,15 +42,15 @@ def _fake_continuation_seams(monkeypatch: pytest.MonkeyPatch) -> dict:
     """Patch the grouping seams so 2 files become ONE multi-part group."""
     touched = {"decode": 0, "concat": 0, "offsets": 0}
 
-    def fake_decode_boundaries(files, transcribe_fn=None):
+    def fake_decode_boundaries(files, transcribe_fn=None, **kw):
         touched["decode"] += 1
         return ["ja tässä ollaan nyt siinä vaiheessa missä"], ["tässä jatketaan"]
 
-    def fake_concat(files):
+    def fake_concat(files, **kw):
         touched["concat"] += 1
         return files[0]
 
-    def fake_offsets(files):
+    def fake_offsets(files, **kw):
         touched["offsets"] += 1
         return []
 
@@ -66,14 +66,14 @@ def _fake_break_seams(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch the grouping seams so 2 files become TWO single-file groups
     (a closing cue on the boundary -> a break)."""
 
-    def fake_decode_boundaries(files, transcribe_fn=None):
+    def fake_decode_boundaries(files, transcribe_fn=None, **kw):
         return ["kiitoksia kaikille, moi"], ["uusi aloitus tässä"]
 
     monkeypatch.setattr(grouping, "decode_boundaries", fake_decode_boundaries)
-    monkeypatch.setattr(grouping, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr(grouping, "part_offsets", lambda files: [])
-    monkeypatch.setattr(batch, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr(batch, "part_offsets", lambda files: [])
+    monkeypatch.setattr(grouping, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(grouping, "part_offsets", lambda files, **kw: [])
+    monkeypatch.setattr(batch, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(batch, "part_offsets", lambda files, **kw: [])
 
 
 def _real_partial_write(result, first_stem, out_dir, *, date_str=None):

@@ -84,16 +84,16 @@ def test_transcribe_with_all_flags(tmp_path, monkeypatch) -> None:
         calls.append(str(path))
         return {"text": "moikka maailma", "segments": []}
 
-    def fake_decode_boundaries(files, transcribe_fn=None):
+    def fake_decode_boundaries(files, transcribe_fn=None, **kw):
         # Mid-sentence tail, no closing cue -> continuation -> one group.
         return ["x"], ["a"]
 
     monkeypatch.setattr(pipeline_module, "transcribe_file", fake_transcribe_file)
     monkeypatch.setattr(grouping, "decode_boundaries", fake_decode_boundaries)
-    monkeypatch.setattr(grouping, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr("vemoizer.batch.concat_groups", lambda files: files[0])
-    monkeypatch.setattr(grouping, "part_offsets", lambda files: [])
-    monkeypatch.setattr("vemoizer.batch.part_offsets", lambda files: [])
+    monkeypatch.setattr(grouping, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr("vemoizer.batch.concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(grouping, "part_offsets", lambda files, **kw: [])
+    monkeypatch.setattr("vemoizer.batch.part_offsets", lambda files, **kw: [])
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(
         app,
@@ -134,7 +134,7 @@ def test_transcribe_no_group_produces_one_transcript_per_file(
         calls.append(str(path))
         return {"text": f"moikka {len(calls)}", "segments": []}
 
-    def fake_decode_boundaries(files, transcribe_fn=None):
+    def fake_decode_boundaries(files, transcribe_fn=None, **kw):
         boundary_calls.append(1)
         return [""], [""]
 
@@ -169,7 +169,7 @@ def test_transcribe_non_tty_without_yes_or_no_group_fails_immediately(
 
     touched: dict[str, int] = {"decode": 0, "transcribe_file": 0, "ingest": 0}
 
-    def fake_decode_boundaries(files, transcribe_fn=None):
+    def fake_decode_boundaries(files, transcribe_fn=None, **kw):
         touched["decode"] += 1
         return [""], [""]
 
@@ -203,7 +203,7 @@ def test_transcribe_yes_and_no_group_mutually_exclusive(tmp_path, monkeypatch) -
 
     touched: dict[str, int] = {"decode": 0, "transcribe_file": 0}
 
-    def fake_decode_boundaries(files, transcribe_fn=None):
+    def fake_decode_boundaries(files, transcribe_fn=None, **kw):
         touched["decode"] += 1
         return [""], [""]
 
@@ -575,12 +575,17 @@ def test_empty_then_healthy_batch_continues_and_exits_nonzero(
             return {"text": "", "segments": []}
         return {"text": "moikka", "segments": []}
 
-    def fake_decode(files, transcribe_fn=None):
+    def fake_decode(files, transcribe_fn=None, **kw):
         return ["kiitos ja moi"], ["a"]
 
+    import vemoizer.batch as batch
+
+    monkeypatch.setattr(batch, "decode_boundaries", fake_decode)
     monkeypatch.setattr(grouping, "decode_boundaries", fake_decode)
-    monkeypatch.setattr(grouping, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr(grouping, "part_offsets", lambda files: [])
+    monkeypatch.setattr(grouping, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(batch, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(grouping, "part_offsets", lambda files, **kw: [])
+    monkeypatch.setattr(batch, "part_offsets", lambda files, **kw: [])
     result = _invoke_transcribe(
         tmp_path,
         monkeypatch,

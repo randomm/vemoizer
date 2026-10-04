@@ -47,17 +47,17 @@ def _write_bad_config(tmp_path: Path) -> None:
 def _fake_continuation_seams(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch the grouping seams so 2 files become ONE multi-part group."""
 
-    def fake_decode_boundaries(files, transcribe_fn=None):
+    def fake_decode_boundaries(files, transcribe_fn=None, **kw):
         return ["ja tässä ollaan nyt siinä vaiheessa missä"], ["tässä jatketaan"]
 
     monkeypatch.setattr(grouping, "decode_boundaries", fake_decode_boundaries)
     monkeypatch.setattr(grouping, "probe_duration_seconds", lambda path: 30.0)
-    monkeypatch.setattr(grouping, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr(grouping, "part_offsets", lambda files: [])
+    monkeypatch.setattr(grouping, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(grouping, "part_offsets", lambda files, **kw: [])
     import vemoizer.batch as batch
 
-    monkeypatch.setattr(batch, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr(batch, "part_offsets", lambda files: [])
+    monkeypatch.setattr(batch, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(batch, "part_offsets", lambda files, **kw: [])
 
 
 def _fake_transcribe_never_called(

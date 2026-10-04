@@ -22,7 +22,7 @@ def fake_ingest(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(grouping_probe, "_probe_stream", lambda p: "wav,16000,1")
     monkeypatch.setattr(grouping, "_probe_stream", lambda p: "wav,16000,1")
     monkeypatch.setattr(
-        ingest_module, "pcm_duration_seconds", lambda p, timeout=300.0: 1.0
+        ingest_module, "pcm_duration_seconds", lambda p, timeout=300.0, **kw: 1.0
     )
     monkeypatch.setattr(grouping_probe, "probe_duration_seconds", lambda p: 1.0)
 
@@ -35,19 +35,19 @@ def fake_continuation_seams(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         grouping,
         "decode_boundaries",
-        lambda files, transcribe_fn=None: (
+        lambda files, transcribe_fn=None, **kw: (
             ["ja tässä ollaan nyt"],
             ["tässä jatketaan"],
         ),
     )
     import vemoizer.batch as batch
 
-    monkeypatch.setattr(batch, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr(batch, "part_offsets", lambda files: [])
-    monkeypatch.setattr(grouping, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr(grouping, "part_offsets", lambda files: [])
-    monkeypatch.setattr(grouping_concat, "concat_groups", lambda files: files[0])
-    monkeypatch.setattr(grouping_concat, "part_offsets", lambda files: [])
+    monkeypatch.setattr(batch, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(batch, "part_offsets", lambda files, **kw: [])
+    monkeypatch.setattr(grouping, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(grouping, "part_offsets", lambda files, **kw: [])
+    monkeypatch.setattr(grouping_concat, "concat_groups", lambda files, **kw: files[0])
+    monkeypatch.setattr(grouping_concat, "part_offsets", lambda files, **kw: [])
     monkeypatch.setattr(
         grouping,
         "propose_groups",
@@ -68,7 +68,7 @@ def fake_breaks(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         grouping,
         "decode_boundaries",
-        lambda files, transcribe_fn=None: ("", ""),
+        lambda files, transcribe_fn=None, **kw: ("", ""),
     )
     from vemoizer.grouping import GroupProposal
 

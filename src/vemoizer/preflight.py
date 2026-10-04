@@ -114,7 +114,40 @@ _REASONS: dict[str, str] = {
         "form at huggingface.co/pyannote/"
         "speaker-diarization-community-1 and set HF_TOKEN"
     ),
+    "loudnorm-filter": (
+        "the loudnorm filter is not available in this ffmpeg build — "
+        "update ffmpeg (e.g. `brew upgrade ffmpeg`) or drop "
+        "--preprocess loudnorm"
+    ),
 }
+
+
+def loudnorm_filter_ok() -> bool:
+    """True when the local ffmpeg build has the ``loudnorm`` filter.
+
+    Checked via ``ffmpeg -hide_banner -filters`` (the filter list is
+    printed on stdout; a missing filter means the line is absent). Only
+    called when the flag is requested (issue #135: the no-flag path must
+    not newly require the filter), so the cost is never paid for plain
+    runs. Fail-open on any ffmpeg error (``True`` when ffmpeg is missing
+    — the plain ``ffmpeg_ok`` check already covers that case and the
+    loudnorm path fails open anyway).
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("ffmpeg") is None:
+        return True  # the ffmpeg_ok check handles the missing-ffmpeg case
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-filters"],
+            capture_output=True,
+            check=False,
+            timeout=10.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return True  # fail-open: the loudnorm path itself fails open
+    return b"loudnorm" in proc.stdout
 
 
 def _check(
@@ -143,17 +176,24 @@ def _check(
 def run_preflight(
     *,
     diarize: bool = False,
+    preprocess: str | None = None,
     echo=print,
 ) -> PreflightResult:
     """Run the inline preflight; a red check aborts before any decode.
 
     Checks, in order: ffmpeg, config parse, all 5 pinned models cached
     (read-only), and — only when *diarize* is requested — the HuggingFace
-    token via ``get_token()``.  On any red check the reasons are printed
+    token via ``get_token()``. On any red check the reasons are printed
     via *echo* (stderr in the CLI path) and the result carries them so
-    the caller can abort.  Never raises: every check is wrapped in a
+    the caller can abort. Never raises: every check is wrapped in a
     guard (``_check``) that turns an unexpected exception into a red entry,
     so a check that itself errors also counts as red.
+
+    ``preprocess`` (issue #135): when set (``"loudnorm"``), the ffmpeg
+    build is additionally checked for the ``loudnorm`` filter — a clear
+    one-line error (per this contract) when missing. The no-flag path
+    does NOT run the check, so plain runs never newly require the
+    filter.
     """
     import time
 
@@ -182,6 +222,9 @@ def run_preflight(
     if diarize:
         _check("hf-token", hf_token_present, red)
 
+    if preprocess == "loudnorm":
+        _check("loudnorm-filter", loudnorm_filter_ok, red)
+
     seconds = time.monotonic() - start
     for label, reason in red:
         echo(f"preflight: {label}: {reason}")
@@ -193,6 +236,7 @@ def preflight_gate(
     diarize: bool = False,
     profile: str = "dictation",
     echo=print,
+    preprocess: str | None = None,
 ) -> dict[str, Any] | None:
     """Run the inline preflight and return an error dict on red.
 
@@ -200,11 +244,13 @@ def preflight_gate(
     preflight passes, or a ``{"text", "segments", "error"}`` dict when
     any check is red.  The *profile* argument encodes the meeting-always-
     diarize rule (issue #79 d4): the token check fires when *diarize* is
-    true OR the profile is ``"meeting"``.
+    true OR the profile is ``"meeting"``. ``preprocess`` (issue #135)
+    threads the opt-in preprocess through to the loudnorm-filter check.
     """
     result = run_preflight(
         diarize=diarize or profile == "meeting",
         echo=echo,
+        preprocess=preprocess,
     )
     if not result.red:
         return None

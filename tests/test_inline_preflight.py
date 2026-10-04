@@ -29,7 +29,7 @@ def test_preflight_red_aborts_before_any_decode(monkeypatch) -> None:
     """A red preflight must short-circuit with an error key and no ingest."""
     _patch_preflight_ffmpeg_fail(monkeypatch)
 
-    def _boom(path):
+    def _boom(path, **kw):
         raise AssertionError("ingest must not run when preflight is red")
 
     monkeypatch.setattr(pipeline, "ingest_audio", _boom)
@@ -101,7 +101,7 @@ def test_preflight_models_missing_is_red(monkeypatch) -> None:
     monkeypatch.setattr(preflight, "models_cached", lambda: ["parakeet"])
     monkeypatch.setattr(preflight, "hf_token_present", lambda: True)
 
-    def _boom(path):
+    def _boom(path, **kw):
         raise AssertionError("ingest must not run when preflight is red")
 
     monkeypatch.setattr(pipeline, "ingest_audio", _boom)
@@ -116,7 +116,7 @@ def test_preflight_config_parse_failure_is_red(monkeypatch) -> None:
     monkeypatch.setattr(preflight, "models_cached", lambda: [])
     monkeypatch.setattr(preflight, "hf_token_present", lambda: True)
 
-    def _boom(path):
+    def _boom(path, **kw):
         raise AssertionError("ingest must not run when preflight is red")
 
     monkeypatch.setattr(pipeline, "ingest_audio", _boom)

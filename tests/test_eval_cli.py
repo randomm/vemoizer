@@ -13,6 +13,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 import vemoizer.eval_cli as eval_cli
+import vemoizer.pipeline
 from vemoizer.cli import app
 
 runner = CliRunner()
@@ -336,6 +337,32 @@ def test_eval_agreement_emitted_when_both_backends_present(
     assert "[agreement_on_wrong]\t0.0000" in result.stdout
     # No skip note in stderr.
     assert "skipping agreement_on_wrong" not in result.stderr
+
+
+def test_eval_decodes_without_preprocess(tmp_path, monkeypatch) -> None:
+    """The eval harness never applies ``--preprocess``: the ingest argv stays default.
+
+    ``transcribe_decode_only`` calls ``ingest_audio(path)`` with no preprocess
+    keyword, so the regression gate (``vemoizer eval --backend all --check``,
+    issue #135) scores unprocessed audio and the eval argv is byte-identical
+    to the pre-loudnorm baseline. ``ingest_audio`` resolves through the
+    pipeline module here, so we pin it where it actually resolves.
+    """
+    corpus = _corpus(tmp_path)
+    calls: list[tuple[object, dict]] = []
+
+    def _recorded_ingest(path: Path, **kwargs: object) -> object:
+        calls.append((path, kwargs))
+        return []  # empty audio short-circuits transcribe_decode_only
+
+    monkeypatch.setattr(vemoizer.pipeline, "ingest_audio", _recorded_ingest)
+    result = runner.invoke(
+        app, ["eval", "--corpus", str(corpus), "--backend", "parakeet"]
+    )
+    assert result.exit_code == 0
+    assert calls  # ingest ran for the corpus samples
+    for _path, kwargs in calls:
+        assert kwargs == {}  # no preprocess keyword — plain unprocessed decode
 
 
 def test_eval_agreement_does_not_affect_wer_gate(tmp_path, monkeypatch) -> None:
