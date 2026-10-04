@@ -68,8 +68,9 @@ def _transcribe_table_flags(spec_text: str) -> set[str]:
         if not line.startswith("|"):
             continue
         # flag-table rows start with the flag itself, backticked
-        if re.match(r"^\|\s*`--", line):
-            flags.update(re.findall(r"--[\w-]+", line.split("|")[1]))
+        m = re.match(r"^\|\s*`(--[\w-]+)", line)
+        if m:
+            flags.add(m.group(1))
     return flags
 
 
