@@ -36,7 +36,11 @@ from vemoizer.audio_contract import SAMPLE_RATE
 #   -c:a pcm_f32le: encode to raw little-endian float32 PCM
 #   -f f32le      : raw format on stdout
 #   -             : output to stdout (never write a temp file)
-_FFMPEG_AUDIO_ARGS = (
+# The split into _FFMPEG_DECODE_ARGS (up to and including the codec spec)
+# and _FFMPEG_OUTPUT_ARGS (the raw stream output spec) is structural, not
+# arbitrary: the loudnorm filter is inserted BETWEEN them (after the
+# resample/downmix, before the output spec) in the pass-2 argv builder.
+_FFMPEG_DECODE_ARGS = (
     "-nostdin",
     "-v",
     "error",
@@ -46,10 +50,13 @@ _FFMPEG_AUDIO_ARGS = (
     "16000",
     "-c:a",
     "pcm_f32le",
+)
+_FFMPEG_OUTPUT_ARGS = (
     "-f",
     "f32le",
     "-",
 )
+_FFMPEG_AUDIO_ARGS = _FFMPEG_DECODE_ARGS + _FFMPEG_OUTPUT_ARGS
 
 
 class IngestError(RuntimeError):

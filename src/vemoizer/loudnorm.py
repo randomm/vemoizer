@@ -423,10 +423,19 @@ def _decode_args(extra: tuple[str, ...] = ()) -> list[str]:
     file name). ``-i`` is the last element, so the caller appends the
     path: ``_decode_args(...) + [str(path)]``.
     """
-    base = list(_FFMPEG_AUDIO_ARGS)
-    # base[:9] = -nostdin -v error -ac 1 -ar 16000 -c:a pcm_f32le
-    # base[9:]  = -f f32le -
-    return ["ffmpeg", *base[:9], *extra, *base[9:], "-i"]
+    from .ingest import _FFMPEG_DECODE_ARGS, _FFMPEG_OUTPUT_ARGS
+
+    # The filter is inserted BETWEEN the decode args (up to and including
+    # the codec spec) and the output spec (the raw stream to stdout):
+    #   ffmpeg [decode args] [extra filter args] [output args] -i <path>
+    # The named constants make the split explicit (no magic indices).
+    return [
+        "ffmpeg",
+        *_FFMPEG_DECODE_ARGS,
+        *extra,
+        *_FFMPEG_OUTPUT_ARGS,
+        "-i",
+    ]
 
 
 def _decode_pass2(p: Path, measurement: LoudnormMeasurement) -> np.ndarray:
