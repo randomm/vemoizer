@@ -613,3 +613,51 @@ def test_ingest_audio_loudnorm_fails_open_on_measurement_failure(
 def test_preprocess_audio_missing_file_raises() -> None:
     with pytest.raises(IngestError, match="not found"):
         ln.preprocess_audio(Path("/nonexistent/nope.m4a"), preprocess="loudnorm")
+
+
+# ---------------------------------------------------------------------------
+# Regression: real pass 1 must actually obtain a measurement (not the
+# fail-open path). If ``-v error`` is re-added to the pass 1 argv, ffmpeg
+# 9.x suppresses the loudnorm JSON and _measure_loudnorm returns None,
+# silently defeating the feature. This test catches that regression.
+# ---------------------------------------------------------------------------
+
+
+@NO_LOUDNORM
+def test_real_pass1_obtains_measurement_not_fail_open(tmp_path: Path) -> None:
+    """Running the REAL _measure_loudnorm on a synthetic tone must return
+    a non-None LoudnormMeasurement (the measurement is actually obtained).
+
+    Regression guard: if ``-v error`` is re-added to the pass 1 argv,
+    ffmpeg 9.x suppresses the loudnorm JSON output and _measure_loudnorm
+    returns None (the fail-open path), silently disabling loudnorm.
+    """
+    raw = _make_raw_f32le(tmp_path / "tone.raw", "sine=frequency=440:duration=2")
+    wav = tmp_path / "tone.wav"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-v",
+            "error",
+            "-f",
+            "f32le",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-i",
+            str(raw),
+            "-c:a",
+            "pcm_f32le",
+            str(wav),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    measurement = ln._measure_loudnorm(wav)
+    assert measurement is not None, (
+        "pass 1 returned None — the loudnorm JSON was not obtained "
+        "(check: did someone re-add -v error to the pass 1 argv?)"
+    )
+    assert measurement.input_i < 0, "input_i must be negative (a real tone)"
