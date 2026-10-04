@@ -40,6 +40,18 @@ def test_transcribe_help_lists_flags() -> None:
     assert "One or more audio files" in result.stdout
 
 
+def test_transcribe_help_format_matches_output_formats() -> None:
+    """The --format help string must name every format from OUTPUT_FORMATS
+    and the correct count (issue #131)."""
+    from vemoizer.output.formatters import OUTPUT_FORMATS
+
+    result = runner.invoke(app, ["transcribe", "--help"])
+    assert result.exit_code == 0
+    for fmt in OUTPUT_FORMATS:
+        assert fmt in result.stdout
+    assert f"all {len(OUTPUT_FORMATS)} formats" in result.stdout
+
+
 def test_transcribe_missing_file_fails_closed(tmp_path, monkeypatch) -> None:
     import vemoizer.pipeline as pipeline_module
 

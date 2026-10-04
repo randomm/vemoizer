@@ -214,7 +214,7 @@ decode A's sentence segments (full coverage — with zero disputes the
 output text is byte-identical to decode A's), and consecutive segments
 group into paragraphs at silence gaps ≥ 1.5 s or speaker changes.
 
-### 10a. Fail-loud contract (issue #73 / #78)
+### 11. Fail-loud contract (issue #73 / #78)
 
 A total decode failure (``decode_all`` returns ``None`` when ``len(slices) > 0``
 and no slice succeeded) must not look like a successful empty transcript.
@@ -247,7 +247,7 @@ file-writing loop (issue #78):
   double-reports; a result with an ``"error"`` key exits via the error
   branch and neither rule runs.
 
-### 11. LLM notes (optional, fails open)
+### 12. LLM notes (optional, fails open)
 
 `src/vemoizer/notes.py`. The configured LLM turns the assembled
 transcript into `{title, summary, key_points, action_items}`; transcripts
@@ -255,7 +255,7 @@ over 24 K chars are map-reduced in ~12 K-char chunks. Any failure returns
 no notes and lands one line in the run's warnings — the transcript is
 never affected.
 
-### 12. Output formatting
+### 13. Output formatting
 
 `src/vemoizer/output/`. Formats: `txt`, `json`, `srt`, `vtt`, `md`
 (default: all five). `md` renders the notes (sections omitted when
@@ -263,7 +263,7 @@ absent) plus the paragraphed, speaker-labelled transcript. Subtitle cue timestam
 1-based), VTT uses `HH:MM:SS.mmm -->` (dot) under a `WEBVTT` header.
 Filenames are NFC-normalized (macOS APFS stores NFD).
 
-#### 12b. M6 reader-ready Markdown and quality report (issue #75)
+### 14. M6 reader-ready Markdown and quality report (issue #75)
 
 The `md` format is the reader-facing deliverable. M6 adds, all via the
 run dict (the seam the CLI/batch layer controls — `format_md` stays a
@@ -324,7 +324,7 @@ The quality report is computed from the warnings list BEFORE that pop
 (`_render_quality_report` in `batch_output`), so the report's warnings
 section is populated in every real run.
 
-### 12a. M5a JSON sidecar keys (issue #89)
+### 15. M5a JSON sidecar keys (issue #89)
 
 The dated `.json` written next to the `.md` by the `meeting` and `memo`
 presets carries four extra keys, assembled by
@@ -398,7 +398,7 @@ equals the stored `options.glossary_sha256`. When they differ,
 corrections and names are still applied but byte-identity is not
 guaranteed (the hash-mismatch warning fires).
 
-### 13. Dated output naming (issue #82)
+### 16. Dated output naming (issue #82)
 
 `src/vemoizer/output/naming.py` adds three exports on top of the
 existing NFC helpers:
@@ -423,11 +423,7 @@ existing NFC helpers:
   appends ` (2)`, ` (3)`, … before the suffix until a free name is
   found. Never overwrites an existing file.
 
-### 13a. M5a JSON sidecar keys (issue #89)
-
-See section 12a — the single canonical sidecar-key contract lives there.
-
-### 14. Speaker clips (issue #90)
+### 17. Speaker clips (issue #90)
 
 `src/vemoizer/speaker_clips.py` selects short audio windows from a
 rendered sidecar's `paragraphs` and decodes them from the `source` parts
@@ -483,7 +479,7 @@ nothing clip-related is ever written to a persistent location, and no
 | Stage | Upstream model | Load repo (MLX) | Pinned revision | Expected size | Notes |
 |---|---|---|---|---|---|
 | Decode A | `nvidia/parakeet-tdt-0.6b-v3` | `mlx-community/parakeet-tdt-0.6b-v3` | `ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15` | ~2.3 GiB | parakeet-mlx; word timestamps built in |
-| Decode B | `nvidia/canary-1b-v2` | community MLX port, e.g. `Mediform/canary-1b-v2-mlx-q8` | `0b6b32ee...` (full SHA at implementation) | ~1.1 GiB | loads the MLX port, not the F32 checkpoint |
+| Decode B | `nvidia/canary-1b-v2` | community MLX port, e.g. `Mediform/canary-1b-v2-mlx-q8` | `0b6b32ee10f30c89e3ead7249bb636445e3019ee` | ~1.1 GiB | loads the MLX port, not the F32 checkpoint |
 | Re-decode | `Finnish-NLP/whisper-large-finnish-v3` | `FredrikKarlssonSpeech/whisper-large-finnish-v3-mlx` | `f51f0310c1b2a3e5acb16905c1a7245bb9476846` | ~2.9 GiB | community MLX conversion (mlx-whisper cannot read the raw HF checkpoint); `word_timestamps=True` |
 | Meeting decode | `openai/whisper-large-v3-turbo` | `mlx-community/whisper-large-v3-turbo` | `a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb` | ~1.5 GiB | MLX community conversion; decoded in 30 s windows so the glossary `initial_prompt` re-seeds every window (issue #76) |
 | Diarization | `pyannote/speaker-diarization-community-1` | n/a (pyannote.audio 4.0.7) | `3533c8cf8e369892e6b79ff1bf80f7b0286a54ee` | ~32 MiB | CC-BY-4.0, HF-gated (form + token) |
@@ -522,11 +518,12 @@ fails — two warnings (one for the error, one for the words degradation).
 
 ## CLI spec
 
-`vemoizer` (Typer; entry point in `pyproject.toml`). Four commands are
-wired: `transcribe` (expert, unchanged), `meeting`, `memo` (preset
-commands added in issue #82), and `render` (M5a, issue #89 — model-free
-re-render of a stored sidecar). `eval` is registered with `hidden=True`
-and does not appear in the main `--help`.
+`vemoizer` (Typer; entry point in `pyproject.toml`). The wired commands:
+`transcribe` (expert), `meeting`, `memo` (preset commands added in issue
+#82), `render` (M5a, issue #89 — model-free re-render of a stored sidecar),
+`names` (speaker naming), `glossary` (glossary inspection), `models`
+(model management), and `doctor` (environment diagnostics). `eval` is
+registered with `hidden=True` and does not appear in the main `--help`.
 
 ### `vemoizer meeting FILES... [options]` (issue #82)
 
@@ -615,7 +612,7 @@ adding a correction pair never requires a re-transcribe.
 Glossary resolution mirrors `meeting` / `memo`: the layered glossary
 (project + home layers, project right-side winning) is used unless
 `--glossary` replaces both layers entirely. The stored
-`options.glossary_sha256` (the run's prompt-term-set hash, see §12a)
+`options.glossary_sha256` (the run's prompt-term-set hash, see §15)
 is compared against the current prompt-term-set hash recomputed from
 the current glossary files; when they differ, exactly one stderr line
 warns that new PROMPT terms need a re-transcribe (corrections and names
@@ -646,11 +643,10 @@ Exit codes: `0` on success, `1` on an unreadable or malformed sidecar,
 
 ### `vemoizer transcribe FILE... [options]`
 
-Transcribe one or more audio files and write transcript files.
-Unchanged from before issue #82 — the expert command that exposes
-every pipeline flag explicitly. The per-file loop that used to live
-here moved to `src/vemoizer/batch.py` (new module) so the `meeting`
-and `memo` presets can reuse it.
+Transcribe one or more audio files and write transcript files. The expert
+command that exposes every pipeline flag explicitly. The per-file loop that
+used to live here moved to `src/vemoizer/batch.py` so the
+`meeting` and `memo` presets can reuse it.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -658,7 +654,14 @@ and `memo` presets can reuse it.
 | `--format` | `all` | `txt`, `json`, `srt`, `vtt`, or a comma-separated subset |
 | `--quiet` / `-q` | off | suppress the summary output |
 | `--verbose` / `-v` | off | per-stage progress logging to stderr |
+| `--out` | — | single output file path; the first requested format is written there |
 | `--copy` | off | copy transcript text to the clipboard via pbcopy (macOS only; single-file runs — a warning is printed when 2+ files are passed) |
+| `--config` | layered search | explicit LLM config path (replaces the layered `.vemoizer/config.toml` search) |
+| `--profile` | `dictation` | `dictation` (solo memo, fast) or `meeting` (far-field multi-speaker; Whisper decode A) |
+| `--glossary` | — | text file of domain terms and names; fed to the recognizer and LLM stages |
+| `--repair` | off | LLM repair pass over the final paragraphs (fixes phonetic ASR garble; needs an LLM config) |
+| `--speakers` | — | `N` pins diarization clustering, `MIN-MAX` bounds it; only used with `--diarize` |
+| `--diarize` | off | run speaker diarization and attach speaker labels (pyannote.audio) |
 | `--yes` | off | group mode for 2+ files: run the 20 s boundary decodes and accept every continuation proposal without a prompt (mutually exclusive with `--no-group`) |
 | `--no-group` | off | skip split-recording grouping entirely — each file is transcribed standalone (no boundary decode, no concat, no part markers) |
 
@@ -707,16 +710,6 @@ before any decode) instead of later groups overwriting the earlier ones.
 Streams: progress bars and warnings go to **stderr**; transcripts and
 summaries go to **stdout** (pipeable). On battery power a warning is
 emitted to stderr before long transcription.
-
-### Planned subcommands (target surface; not all wired yet)
-
-- `vemoizer transcribe --diarize FILE...` — run speaker diarization
-  (issue #13)
-- `vemoizer eval --corpus <dir>` — WER regression over the fixture corpus
-  (accuracy claims in PRs must come from this output, not model cards)
-- `vemoizer eval --agreement` — informational `agreement_on_wrong` metric
-  over the fixture corpus (issue #62)
-- `vemoizer models pull` — pre-download and revision-pin all models
 
 ### `vemoizer eval` — WER gate and informational metrics (issues #11, #51, #62)
 
@@ -871,6 +864,7 @@ connection refused, HTTP error) also fails open per invariant #5.
 | `llm.timeout_seconds` | request timeout; must be set (unset = hang) |
 | `language` | section language for the Markdown header and quality report: `"fi"` (default) or `"en"` (top-level key, issue #75) |
 | `meeting.language` | recognition-language override for the whisper meeting decode: `"auto"` (default, per-window detection), `"fi"`, or `"en"` pins every window (issue #108) |
+| `people` | top-level list of speaker names for the `names` command (strict-validated as a list, issue #93) |
 
 When no config exists or the endpoint fails, every LLM call fails open and
 the un-adjudicated transcript is returned.
