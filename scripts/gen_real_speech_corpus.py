@@ -56,6 +56,7 @@ import struct
 import subprocess
 import sys
 import wave
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -139,15 +140,20 @@ class Clip:
 
 
 def resolve_corpus_dir(out: Path) -> Path:
-    """Resolve *out* and verify it stays under the project root.
+    """Resolve *out* and verify it stays strictly under the project root.
 
     Mirrors ``scripts/gen_fixtures.py::resolve_corpus_dir`` — a symlinked
     corpus dir would let ffmpeg follow the link and overwrite an arbitrary
-    file when resampling in place.
+    file when resampling in place.  The project root itself is **not**
+    allowed: a symlink whose target *is* the project root would be accepted
+    by an ``==`` or ``in parents`` check (``Path.resolve()`` on a symlink to
+    the root yields the root), so we require a *strict* descendant — the
+    project root must appear in ``resolved.parents``, which excludes the
+    equality case.
     """
     resolved = out.resolve()
     project_root = Path(__file__).resolve().parent.parent
-    if not (resolved == project_root or project_root in resolved.parents):
+    if project_root not in resolved.parents:
         raise RuntimeError(
             f"refusing to write corpus outside the project root: {resolved} "
             f"(project root: {project_root})"
@@ -263,28 +269,27 @@ def select_clips(
     original draw (issue #62); the same input + same parameters always
     yields the same set, so a re-run is byte-identical.
 
-    With *ids*, the selection is the **row set** that the seeded draw
-    actually picked: every row whose ``id`` appears in *ids* and whose
-    (real-header) duration and word count still fall inside the window.
-    For the committed :data:`COMMITTED_CLIP_IDS` this reproduces exactly
-    the committed 28 clips — the 28 rows the seed ``20261003`` draw
-    selected, including the same-id takes that make up the
-    ``b``-suffixed stems — and the lookup is order-independent, so a
-    re-run against a re-shuffled or revised parquet regenerates the same
-    clips. An id that no longer has a row inside the window (the dataset
-    shape changed) is a ``ValueError`` naming it, so a silent corpus swap
-    can never happen.
+    With *ids*, the recorded id list is **authoritative**: the duration/
+    word window is **not** applied, because the recorded ids already encode
+    the exact selection.  Instead, each id's **count** in the list (duplicates
+    = number of takes) is checked against the number of rows that share that
+    id in the dataset.  An id whose row count differs from the recorded take
+    count is a ``ValueError`` naming the id, so a silent corpus swap (e.g.
+    a dataset reshuffle that dropped a take or inserted a new same-id row)
+    can never produce a stem letter that differs from the one recorded in
+    ``CORPUS_ATTRIBUTION.md``.
     """
     if ids is not None:
-        wanted = set(ids)
-        if not wanted:
+        if not ids:
             raise ValueError("--ids was given but is empty")
-        window_rows: dict[int, list[tuple[int, dict[str, object]]]] = {}
+        expected_counts: dict[int, int] = dict(Counter(ids))
+        # Collect all rows for each recorded id (window not applied).
+        id_rows: dict[int, list[tuple[int, dict[str, object]]]] = {}
         for row_index, r in enumerate(rows):
             if r.get("id") is None:
                 continue
             cid = _as_int(r["id"])
-            if cid not in wanted:
+            if cid not in expected_counts:
                 continue
             audio = r["audio"]
             if not isinstance(audio, dict):  # FLEURS stores {bytes, path}
@@ -295,24 +300,22 @@ def select_clips(
             raw = audio["bytes"]
             if not isinstance(raw, (bytes, bytearray)):
                 continue
-            duration = wav_duration_seconds(_as_bytes(raw))
-            words = str(r["transcription"]).split()
-            if (
-                MIN_SECONDS <= duration <= MAX_SECONDS
-                and MIN_WORDS <= len(words) <= MAX_WORDS
-            ):
-                window_rows.setdefault(cid, []).append((row_index, r))
-        missing = sorted(wanted - set(window_rows))
-        if missing:
-            raise ValueError(
-                f"clip id(s) from the committed set no longer have a row "
-                f"inside the selection window: {missing} — the dataset "
-                f"shape changed; update the window (or the id list) "
-                f"deliberately, do not regenerate silently"
-            )
+            # Audio must parse (raises ValueError on a corrupt row); this is
+            # the only sanity check — the window is deliberately not applied.
+            wav_duration_seconds(_as_bytes(raw))
+            id_rows.setdefault(cid, []).append((row_index, r))
+        # Verify row count per id matches the recorded take count.
+        for cid, expected in sorted(expected_counts.items()):
+            actual = len(id_rows.get(cid, []))
+            if actual != expected:
+                raise ValueError(
+                    f"clip id {cid}: recorded {expected} take(s) but found "
+                    f"{actual} row(s) in the parquet — the dataset shape "
+                    f"changed; do not regenerate silently"
+                )
         picked: list[tuple[int, dict[str, object]]] = []
-        for cid in sorted(window_rows):
-            picked.extend(sorted(window_rows[cid], key=lambda t: t[0]))
+        for cid in sorted(id_rows):
+            picked.extend(sorted(id_rows[cid], key=lambda t: t[0]))
         return [
             Clip(
                 row_index=ri,
