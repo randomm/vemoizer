@@ -29,21 +29,44 @@ def load_sibling(name: str) -> ModuleType:
     on ``sys.path``); and last to loading the file next to this one via
     ``importlib`` (no sibling on ``sys.path`` at all, as in the tests).
     Repeated calls return the same module object from ``sys.modules``.
+
+    A cached hit is trusted only when its ``__file__`` points to the expected
+    sibling under the scripts dir; an unrelated top-level module of the same
+    name (e.g. a test fixture) falls through to a fresh load.
     """
-    if name in sys.modules:
-        return sys.modules[name]
+    cached = sys.modules.get(name)
+    if cached is not None:
+        file_attr = getattr(cached, "__file__", None)
+        if file_attr is not None and _is_expected_sibling(name, file_attr):
+            return cached
     try:
-        return importlib.import_module(f"scripts.{name}")
+        mod = importlib.import_module(f"scripts.{name}")
     except ImportError:
-        pass
-    try:
-        return importlib.import_module(name)
-    except ImportError:
-        pass
-    # Last resort: the helper itself is not importable (the tests' importlib
-    # path, where no sibling is on ``sys.path`` at all). Load the sibling
-    # file directly from disk via ``importlib``.
+        try:
+            mod = importlib.import_module(name)
+        except ImportError:
+            mod = None
+    # ``importlib.import_module(name)`` can return an unrelated module that
+    # already occupies ``sys.modules[name]`` (Python's import system checks
+    # ``sys.modules`` first). Validate the result; if its ``__file__`` does
+    # not point to the expected sibling, discard the stale entry and load
+    # from disk directly.
+    if mod is not None:
+        file_attr = getattr(mod, "__file__", None)
+        if file_attr is not None and _is_expected_sibling(name, file_attr):
+            return mod
+        sys.modules.pop(name, None)
+    # Last resort: the helper itself is not importable, or a stale module
+    # was cached under the sibling's name. Load the sibling file directly
+    # from disk via ``importlib``.
     return _load_from_disk(f"scripts.{name}", _SCRIPTS_DIR / f"{name}.py")
+
+
+def _is_expected_sibling(name: str, file_attr: object) -> bool:
+    """Return ``True`` when *file_attr* is the expected sibling path."""
+    if not isinstance(file_attr, str):
+        return False
+    return Path(file_attr).resolve() == _SCRIPTS_DIR / f"{name}.py"
 
 
 def _load_from_disk(modname: str, path: Path) -> ModuleType:
@@ -53,5 +76,12 @@ def _load_from_disk(modname: str, path: Path) -> ModuleType:
         raise ImportError(f"cannot build an import spec for {path}")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[modname] = mod
-    spec.loader.exec_module(mod)
+    try:
+        spec.loader.exec_module(mod)
+    except BaseException:
+        # Remove the half-built module so a later load_sibling call does
+        # not return a partial object from the sys.modules cache; the
+        # register-before-exec ordering is kept (dataclass modules need it).
+        sys.modules.pop(modname, None)
+        raise
     return mod
