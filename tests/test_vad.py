@@ -82,7 +82,8 @@ def test_speech_segment_is_frozen_dataclass():
     assert seg.start == 1
     assert seg.end == 2
     with pytest.raises(FrozenInstanceError):
-        seg.start = 3  # ty: ignore[invalid-assignment]
+        # Frozen dataclass: the assignment intentionally fails at runtime.
+        seg.start = 3
 
 
 def test_segment_bounds_ordering():
