@@ -27,6 +27,7 @@ After regenerating, listen-check the WAVs and re-measure the WER baseline
 from __future__ import annotations
 
 import argparse
+import importlib
 import math
 import shutil
 import subprocess
@@ -202,17 +203,17 @@ def resample_to_contract(src: Path, dst: Path) -> None:
 def _load_piper_voice():
     """Download (revision-pinned) and load the fi_FI-harri-low Piper voice."""
     try:
-        from piper import PiperVoice  # ty: ignore[unresolved-import]
+        piper = importlib.import_module("piper")
     except ImportError as e:
         # piper-tts is a runtime-optional dev-time dependency (see the module
         # docstring); it is deliberately not in the CI venv, so the import
-        # only resolves when installed. The per-line suppression is what the
-        # #138 ticket prescribes for this case.
+        # only resolves when installed.
         raise RuntimeError(
             "piper-tts is not installed. Install it with `uv pip install "
             "piper-tts` and re-run, or pass --tones for the no-download "
             "sine-tone corpus."
         ) from e
+    PiperVoice = piper.PiperVoice
     from huggingface_hub import hf_hub_download
 
     model = hf_hub_download(PIPER_REPO, PIPER_VOICE_PATH, revision=PIPER_REVISION)

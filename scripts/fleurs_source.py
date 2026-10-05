@@ -17,41 +17,15 @@ from __future__ import annotations
 
 import hashlib
 import random
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from scripts._sibling_loader import load_sibling
+except ImportError:  # script dir on ``sys.path`` (``python scripts/...``)
+    from _sibling_loader import load_sibling
 
-def _load_helper():
-    """Load the sibling loader helper, handling all three import paths."""
-    try:
-        from scripts._sibling_loader import load_sibling
-
-        return load_sibling
-    except ImportError:
-        pass
-    try:
-        from _sibling_loader import load_sibling  # ty: ignore[unresolved-import]
-
-        return load_sibling
-    except ImportError:
-        pass
-    # Last resort: the helper itself is not importable (the tests' importlib
-    # path, where no sibling is on sys.path at all). Load it from disk.
-    import importlib.util as _ilu
-
-    _helper_path = Path(__file__).resolve().parent / "_sibling_loader.py"
-    _spec = _ilu.spec_from_file_location("scripts._sibling_loader", _helper_path)
-    if _spec is None or _spec.loader is None:
-        raise ImportError(f"cannot build an import spec for {_helper_path}")
-    _mod = _ilu.module_from_spec(_spec)
-    sys.modules["scripts._sibling_loader"] = _mod
-    _spec.loader.exec_module(_mod)
-    return _mod.load_sibling
-
-
-_load_sibling = _load_helper()
-wav_duration_seconds = _load_sibling("wav_header").wav_duration_seconds
+wav_duration_seconds = load_sibling("wav_header").wav_duration_seconds
 
 #: FLEURS dataset (CC-BY-4.0) — ungated, public on HuggingFace.
 FLEURS_REPO = "google/fleurs"

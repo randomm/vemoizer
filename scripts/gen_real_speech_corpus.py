@@ -76,9 +76,6 @@ from vemoizer.audio_contract import SAMPLE_RATE  # single home for the 16 kHz co
 try:
     from scripts._sibling_loader import load_sibling
 except ImportError:
-    # The bare fallback (script directory on ``sys.path``) is not resolvable
-    # to a first-party module from the project root, so ty cannot see it.
-    # ty: ignore[unresolved-import] - runtime-optional path
     from _sibling_loader import load_sibling
 
 _fleurs_source = load_sibling("fleurs_source")

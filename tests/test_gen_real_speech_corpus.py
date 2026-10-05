@@ -22,6 +22,11 @@ _SOURCE = Path(__file__).resolve().parent.parent / "scripts" / "fleurs_source.py
 
 
 def _load_module(name: str, path: Path):
+    # Make the scripts/ dir importable so the consumers' ``from _sibling_loader
+    # import ...`` fallback resolves (mirrors ``python scripts/<script>.py``).
+    _scripts_dir = str(path.resolve().parent)
+    if _scripts_dir not in sys.path:
+        sys.path.insert(0, _scripts_dir)
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None:
         raise RuntimeError(f"could not load {path}")

@@ -56,3 +56,6 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 
 [tool.ty.environment]
 python-version = "3.11"
+# The dev-time scripts import each other by bare sibling name (the script's
+# own directory is on sys.path at runtime); expose scripts/ to the checker.
+extra-paths = ["scripts"]

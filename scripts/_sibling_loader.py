@@ -46,21 +46,6 @@ def load_sibling(name: str) -> ModuleType:
     return _load_from_disk(f"scripts.{name}", _SCRIPTS_DIR / f"{name}.py")
 
 
-def bootstrap() -> None:
-    """Pre-register ``scripts`` in ``sys.modules`` if importable.
-
-    Called at the top of each consumer script so that the helper's
-    ``import scripts.<name>`` path works even when the script directory
-    is not on ``sys.path`` (the tests' importlib load path).
-    """
-    if "scripts" in sys.modules:
-        return
-    from contextlib import suppress
-
-    with suppress(ImportError):
-        importlib.import_module("scripts")
-
-
 def _load_from_disk(modname: str, path: Path) -> ModuleType:
     """Load *path* under *modname* via importlib (no sys.path entry)."""
     spec = importlib.util.spec_from_file_location(modname, path)
