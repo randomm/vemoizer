@@ -253,8 +253,8 @@ def _emit_meeting_term_hits(
 def _collect_references(corpus: Path, references: dict[str, str]) -> None:
     """Fill *references* with the per-sample reference transcripts (stem -> text).
 
-    Reads each ``<stem>.txt`` in *corpus*; a missing or unreadable file is
-    skipped (the sample simply won't be scored by the agreement metric).
+    Reads each ``<stem>.txt`` in *corpus*; a missing file is skipped (the
+    sample simply won't be scored by the agreement metric).
     """
     for wav in sorted(corpus.glob("*.wav")):
         txt = wav.with_suffix(".txt")

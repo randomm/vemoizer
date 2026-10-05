@@ -666,7 +666,7 @@ used to live here moved to `src/vemoizer/batch.py` so the
 | Flag | Default | Meaning |
 |---|---|---|
 | `files` (positional, 1+) | — | audio file paths (`.m4a` etc.) |
-| `--format` | `all` | `txt`, `json`, `srt`, `vtt`, or a comma-separated subset |
+| `--format` | `all` | `txt`, `json`, `srt`, `vtt`, `md`, or a comma-separated subset |
 | `--quiet` / `-q` | off | suppress the summary output |
 | `--verbose` / `-v` | off | per-stage progress logging to stderr |
 | `--out` | — | single output file path; the first requested format is written there |
@@ -880,7 +880,7 @@ connection refused, HTTP error) also fails open per invariant #5.
 | `llm.timeout_seconds` | request timeout; must be set (unset = hang) |
 | `language` | section language for the Markdown header and quality report: `"fi"` (default) or `"en"` (top-level key, issue #75) |
 | `meeting.language` | recognition-language override for the whisper meeting decode: `"auto"` (default, per-window detection), `"fi"`, or `"en"` pins every window (issue #108) |
-| `people` | top-level list of speaker names for the `names` command (strict-validated as a list, issue #93) |
+| `people` | top-level list of speaker names for the `names` command (the read path fails open to an empty list for a non-list value; issue #93) |
 
 When no config exists or the endpoint fails, every LLM call fails open and
 the un-adjudicated transcript is returned.
