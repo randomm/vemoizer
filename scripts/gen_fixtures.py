@@ -202,8 +202,12 @@ def resample_to_contract(src: Path, dst: Path) -> None:
 def _load_piper_voice():
     """Download (revision-pinned) and load the fi_FI-harri-low Piper voice."""
     try:
-        from piper import PiperVoice
+        from piper import PiperVoice  # ty: ignore[unresolved-import]
     except ImportError as e:
+        # piper-tts is a runtime-optional dev-time dependency (see the module
+        # docstring); it is deliberately not in the CI venv, so the import
+        # only resolves when installed. The per-line suppression is what the
+        # #138 ticket prescribes for this case.
         raise RuntimeError(
             "piper-tts is not installed. Install it with `uv pip install "
             "piper-tts` and re-run, or pass --tones for the no-download "

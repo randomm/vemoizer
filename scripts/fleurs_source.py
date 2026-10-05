@@ -9,7 +9,8 @@ main script stays under the source-line cap.
 
 Importable both as a ``scripts`` module (``import fleurs_source``) and via
 ``importlib.util.spec_from_file_location`` (the tests), mirroring
-``scripts/wav_header.py``.
+``scripts/wav_header.py``. Sibling imports go through the shared
+:func:`scripts._sibling_loader.load_sibling` helper (issue #138).
 """
 
 from __future__ import annotations
@@ -20,24 +21,37 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-try:
-    # Direct script run (``python scripts/gen_real_speech_corpus.py``) puts
-    # the script's directory on sys.path, so the sibling module imports
-    # directly.
-    from wav_header import wav_duration_seconds
-except ImportError:  # pragma: no cover - covered by the tests' importlib path
-    # Imported without the sibling on sys.path (e.g. via importlib): resolve
-    # the sibling next to this file.
-    import importlib.util as _importlib_util
 
-    _spec = _importlib_util.spec_from_file_location(
-        "_fleurs_source_wav_header", Path(__file__).resolve().parent / "wav_header.py"
-    )
-    _sib = _importlib_util.module_from_spec(_spec)
-    sys.modules["_fleurs_source_wav_header"] = _sib
-    assert _spec.loader is not None
-    _spec.loader.exec_module(_sib)
-    wav_duration_seconds = _sib.wav_duration_seconds
+def _load_helper():
+    """Load the sibling loader helper, handling all three import paths."""
+    try:
+        from scripts._sibling_loader import load_sibling
+
+        return load_sibling
+    except ImportError:
+        pass
+    try:
+        from _sibling_loader import load_sibling  # ty: ignore[unresolved-import]
+
+        return load_sibling
+    except ImportError:
+        pass
+    # Last resort: the helper itself is not importable (the tests' importlib
+    # path, where no sibling is on sys.path at all). Load it from disk.
+    import importlib.util as _ilu
+
+    _helper_path = Path(__file__).resolve().parent / "_sibling_loader.py"
+    _spec = _ilu.spec_from_file_location("scripts._sibling_loader", _helper_path)
+    if _spec is None or _spec.loader is None:
+        raise ImportError(f"cannot build an import spec for {_helper_path}")
+    _mod = _ilu.module_from_spec(_spec)
+    sys.modules["scripts._sibling_loader"] = _mod
+    _spec.loader.exec_module(_mod)
+    return _mod.load_sibling
+
+
+_load_sibling = _load_helper()
+wav_duration_seconds = _load_sibling("wav_header").wav_duration_seconds
 
 #: FLEURS dataset (CC-BY-4.0) — ungated, public on HuggingFace.
 FLEURS_REPO = "google/fleurs"

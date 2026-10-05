@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import math
-import shutil
 import struct
 import subprocess
 from pathlib import Path
@@ -45,15 +44,12 @@ from vemoizer.loudnorm import (
 )
 from vemoizer.speaker_clips import ClipWindow, extract_clips
 
-FFMPEG = pytest.mark.skipif(
-    shutil.which("ffmpeg") is None, reason="ffmpeg not available"
-)
-
 # The synthetic 16 kHz mono float32 signals are generated with ffmpeg's
 # lavfi (no private audio, no network, no models).
 
-
-HAS_LOUDNORM = FFMPEG and ffmpeg_has_loudnorm()
+# Plain bool: the shared probe is the single source of skip behaviour
+# (issue #138). The mark is derived from it, not mixed with it.
+HAS_LOUDNORM = ffmpeg_has_loudnorm()
 NO_LOUDNORM = pytest.mark.skipif(
     not HAS_LOUDNORM,
     reason="ffmpeg loudnorm filter not available",

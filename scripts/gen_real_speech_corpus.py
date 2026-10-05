@@ -56,8 +56,10 @@ collision (two selected takes of the same utterance) the second+ take in
 collide on a stem (the ``.wav``/``.txt`` pair contract is per-stem).
 
 The dataset-source side (source constants, digest guard, row loading, clip
-selection) lives in the sibling module :mod:`fleurs_source`; this script is
-the CLI plus the writing side (corpus-dir guard, resampling, clip writing).
+selection) lives in the sibling module :mod:`fleurs_source` (reached via the
+shared :func:`scripts._sibling_loader.load_sibling` helper, issue #138);
+this script is the CLI plus the writing side (corpus-dir guard, resampling,
+clip writing).
 """
 
 from __future__ import annotations
@@ -72,40 +74,23 @@ from pathlib import Path
 from vemoizer.audio_contract import SAMPLE_RATE  # single home for the 16 kHz contract
 
 try:
-    # Direct script run (``python scripts/gen_real_speech_corpus.py``) puts the
-    # script's directory on sys.path, so the sibling module imports directly.
-    from fleurs_source import (
-        COMMITTED_CLIP_IDS,
-        FLEURS_PARQUET_SHA256,
-        FLEURS_URL,
-        N_CLIPS,
-        SEED,
-        Clip,
-        load_fleurs_rows,
-        select_clips,
-        verify_parquet_digest,
-    )
-except ImportError:  # pragma: no cover - covered by the tests' importlib path
-    # Imported without the sibling on sys.path (e.g. via importlib): resolve
-    # the sibling next to this file.
-    import importlib.util as _importlib_util
+    from scripts._sibling_loader import load_sibling
+except ImportError:
+    # The bare fallback (script directory on ``sys.path``) is not resolvable
+    # to a first-party module from the project root, so ty cannot see it.
+    # ty: ignore[unresolved-import] - runtime-optional path
+    from _sibling_loader import load_sibling
 
-    _spec = _importlib_util.spec_from_file_location(
-        "_fleurs_source", Path(__file__).resolve().parent / "fleurs_source.py"
-    )
-    _fs = _importlib_util.module_from_spec(_spec)
-    sys.modules["_fleurs_source"] = _fs
-    assert _spec.loader is not None
-    _spec.loader.exec_module(_fs)
-    Clip = _fs.Clip
-    N_CLIPS = _fs.N_CLIPS
-    SEED = _fs.SEED
-    COMMITTED_CLIP_IDS = _fs.COMMITTED_CLIP_IDS
-    FLEURS_PARQUET_SHA256 = _fs.FLEURS_PARQUET_SHA256
-    FLEURS_URL = _fs.FLEURS_URL
-    load_fleurs_rows = _fs.load_fleurs_rows
-    select_clips = _fs.select_clips
-    verify_parquet_digest = _fs.verify_parquet_digest
+_fleurs_source = load_sibling("fleurs_source")
+Clip = _fleurs_source.Clip
+N_CLIPS = _fleurs_source.N_CLIPS
+SEED = _fleurs_source.SEED
+COMMITTED_CLIP_IDS = _fleurs_source.COMMITTED_CLIP_IDS
+FLEURS_PARQUET_SHA256 = _fleurs_source.FLEURS_PARQUET_SHA256
+FLEURS_URL = _fleurs_source.FLEURS_URL
+load_fleurs_rows = _fleurs_source.load_fleurs_rows
+select_clips = _fleurs_source.select_clips
+verify_parquet_digest = _fleurs_source.verify_parquet_digest
 
 #: Contract sample width (bytes) of the clips written: 16-bit PCM, 16 kHz
 #: mono (``resample_to_contract`` converts the float32 source to this).
