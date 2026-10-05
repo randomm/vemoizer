@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -68,7 +69,21 @@ def _disable_pyannote_telemetry() -> None:
     os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 
 
-def _load_pipeline(device: str) -> object:
+class _Pipeline(Protocol):
+    """Typed seam over the pyannote ``Pipeline`` (issue #141).
+
+    The real class is only reachable via the lazy import inside
+    :func:`_load_pipeline` (issue #103: it must stay lazy and run after
+    :func:`_disable_pyannote_telemetry`), so the return type of that seam is
+    expressed as a structural protocol: a callable producing a diarization
+    object. This lets ``diarize`` call the result of ``_load_pipeline``
+    without a ``call-non-callable`` suppression.
+    """
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
+
+
+def _load_pipeline(device: str) -> _Pipeline:
     """Lazily import pyannote and build the community pipeline on *device*.
 
     Weights are downloaded with ``snapshot_download`` pinned to
@@ -134,13 +149,13 @@ def diarize(
     if device == "auto":
         try:
             pipeline = _load_pipeline("mps")
-            diarization = pipeline(waveforms, **kwargs)  # ty: ignore[call-non-callable]
+            diarization = pipeline(waveforms, **kwargs)
         except Exception:
             pipeline = _load_pipeline("cpu")
-            diarization = pipeline(waveforms, **kwargs)  # ty: ignore[call-non-callable]
+            diarization = pipeline(waveforms, **kwargs)
     else:
         pipeline = _load_pipeline(device)
-        diarization = pipeline(waveforms, **kwargs)  # ty: ignore[call-non-callable]
+        diarization = pipeline(waveforms, **kwargs)
 
     # pyannote 4.x returns a DiarizeOutput wrapper. Prefer the exclusive
     # partition (non-overlapping, purpose-built for ASR alignment — no
