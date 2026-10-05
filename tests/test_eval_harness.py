@@ -536,9 +536,24 @@ def test_agreement_sample_different_texts_is_false() -> None:
 
 
 def test_agreement_sample_wrong_but_only_slightly_off_is_false() -> None:
-    # The shared text is close to the reference (WER <= 0.3) -> not "wrong"
-    # enough to count.
-    assert agreement_on_wrong_sample("moro aami", "moro aami", "moro aami") is False
+    # The shared text is close to the reference (WER > 0 but <= 0.3) -> not
+    # "wrong" enough to count. Both inputs keep similarity(A, B) == 1.0 so
+    # the similarity gate passes and the WER gate is what decides the
+    # outcome (a vacuous input would fail at similarity and say nothing
+    # about the 0.3 boundary).
+    #
+    # WER = 0.25: below the _WRONG_WER boundary, False either way.
+    ref_below = "moro aami mutta ei kylla nyt jo viel"
+    hyp_below = "moro aami mutta ei kylla nta jo viel"  # 1 substitution / 8 words
+    assert agreement_on_wrong_sample(ref_below, hyp_below, hyp_below) is False
+
+    # WER = exactly 0.3: the boundary sample does NOT count as wrong under
+    # the strict ``wer > _WRONG_WER`` gate. Flipping the gate to
+    # ``wer >= _WRONG_WER`` would flip this case to True, which proves the
+    # strict comparison (not some earlier short-circuit) decides it.
+    ref_at = "a b c d e f g h i j"
+    hyp_at = "a b c d e f g x y z"  # 3 substitutions / 10 words = 0.3
+    assert agreement_on_wrong_sample(ref_at, hyp_at, hyp_at) is False
 
 
 def test_agreement_sample_one_side_empty_is_false() -> None:

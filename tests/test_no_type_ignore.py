@@ -12,7 +12,7 @@ contain the literal comment in a form a plain source scan would match
 from pathlib import Path
 
 _FORBIDDEN = "#" + " type: " + "ignore"
-_PY_ROOTS = ("src", "tests")
+_PY_ROOTS = ("src", "tests", "scripts")
 
 
 def test_no_type_ignore_suppressions() -> None:

@@ -7,6 +7,7 @@ network.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
 import struct
@@ -22,19 +23,60 @@ _SOURCE = Path(__file__).resolve().parent.parent / "scripts" / "fleurs_source.py
 
 
 def _load_module(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None:
-        raise RuntimeError(f"could not load {path}")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
+    # Make the scripts/ dir importable DURING exec_module so the consumers'
+    # ``from _sibling_loader import ...`` fallback resolves (mirrors
+    # ``python scripts/<script>.py``). Removed after loading to avoid leaking
+    # into the session and masking import breakage in other tests.
+    _scripts_dir = str(path.resolve().parent)
+    _inserted = _scripts_dir not in sys.path
+    if _inserted:
+        sys.path.insert(0, _scripts_dir)
+    try:
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None:
+            raise RuntimeError(f"could not load {path}")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        assert spec.loader is not None
+        spec.loader.exec_module(mod)
+    finally:
+        if _inserted:
+            with contextlib.suppress(ValueError):
+                sys.path.remove(_scripts_dir)
     return mod
 
 
 fs = _load_module("fleurs_source", _SOURCE)
 gen = _load_module("gen_real_speech_corpus", _SCRIPT)
 wav_duration_seconds = fs.wav_duration_seconds
+
+
+class TestLoadModuleSysPathScoping:
+    """``_load_module`` must not leak the scripts dir into ``sys.path``.
+
+    Before the fix, ``sys.path.insert(0, scripts_dir)`` was never reversed,
+    so the scripts dir persisted for the rest of the session. This test
+    proves the entry is removed after the module is loaded.
+    """
+
+    def test_scripts_dir_removed_after_load(self) -> None:
+        scripts_dir = str(_SCRIPT.resolve().parent)
+        # After the module-level _load_module calls above, the scripts dir
+        # should not be in sys.path (it was removed in finally).
+        assert scripts_dir not in sys.path, (
+            f"{scripts_dir} leaked into sys.path after _load_module; "
+            "the insert/finally scope is not working"
+        )
+
+    def test_load_module_restores_sys_path_on_error(self, tmp_path: Path) -> None:
+        """A failing exec also removes the inserted path (finally block)."""
+        bad = tmp_path / "bad_module.py"
+        bad.write_text("raise RuntimeError('boom')\n")
+        before = list(sys.path)
+        with pytest.raises(RuntimeError, match="boom"):
+            _load_module("_bad_module_under_test", bad)
+        after = list(sys.path)
+        assert before == after, "sys.path was modified by a failed _load_module"
 
 
 def _make_wav(chunks: list[tuple[bytes, bytes]]) -> bytes:

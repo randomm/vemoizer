@@ -31,6 +31,9 @@ from _cli_helpers import ffmpeg_has_loudnorm
 
 from vemoizer import loudnorm as ln
 
+# HAS_FFMPEG is NOT redundant: several group-path tests (no-flag variants)
+# need real ffmpeg to generate the .m4a fixtures but do not assert on the
+# loudnorm filter, so they guard on ffmpeg alone, not on HAS_LOUDNORM.
 HAS_FFMPEG = shutil.which("ffmpeg") is not None
 HAS_LOUDNORM = HAS_FFMPEG and ffmpeg_has_loudnorm()
 

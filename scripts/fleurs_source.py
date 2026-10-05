@@ -9,35 +9,23 @@ main script stays under the source-line cap.
 
 Importable both as a ``scripts`` module (``import fleurs_source``) and via
 ``importlib.util.spec_from_file_location`` (the tests), mirroring
-``scripts/wav_header.py``.
+``scripts/wav_header.py``. Sibling imports go through the shared
+:func:`scripts._sibling_loader.load_sibling` helper (issue #138).
 """
 
 from __future__ import annotations
 
 import hashlib
 import random
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 try:
-    # Direct script run (``python scripts/gen_real_speech_corpus.py``) puts
-    # the script's directory on sys.path, so the sibling module imports
-    # directly.
-    from wav_header import wav_duration_seconds
-except ImportError:  # pragma: no cover - covered by the tests' importlib path
-    # Imported without the sibling on sys.path (e.g. via importlib): resolve
-    # the sibling next to this file.
-    import importlib.util as _importlib_util
+    from scripts._sibling_loader import load_sibling
+except ImportError:  # script dir on ``sys.path`` (``python scripts/...``)
+    from _sibling_loader import load_sibling
 
-    _spec = _importlib_util.spec_from_file_location(
-        "_fleurs_source_wav_header", Path(__file__).resolve().parent / "wav_header.py"
-    )
-    _sib = _importlib_util.module_from_spec(_spec)
-    sys.modules["_fleurs_source_wav_header"] = _sib
-    assert _spec.loader is not None
-    _spec.loader.exec_module(_sib)
-    wav_duration_seconds = _sib.wav_duration_seconds
+wav_duration_seconds = load_sibling("wav_header").wav_duration_seconds
 
 #: FLEURS dataset (CC-BY-4.0) — ungated, public on HuggingFace.
 FLEURS_REPO = "google/fleurs"
