@@ -53,6 +53,19 @@ def _mtime_date_str(path: Path) -> str:
     return datetime.fromtimestamp(mtime).date().isoformat()
 
 
+def _close_run_display(display: ProgressDisplay | None) -> None:
+    """Close the run's display before its terminal interactive output.
+
+    Issue #143: the wrote lines and the naming-hook prompt must not be
+    overdrawn by a live rich Progress. ``run_preset`` closes the display
+    itself on the success path (overriding the ``progress_wiring`` "closed
+    by the CLI caller" contract for meeting runs); the CLI's finally-close
+    stays as the memo/error-path owner and is an idempotent no-op here.
+    """
+    if display is not None:
+        display.close()
+
+
 def _run_preset_groups(
     files: list[Path],
     options: RunOptions,
@@ -172,11 +185,8 @@ def _run_preset_groups(
     )
 
     # Issue #143: close the display before the wrote lines and the naming
-    # prompt so neither is overdrawn by the live rich Progress (the CLI
-    # caller's finally-close stays as the memo/error-path owner; close() is
-    # idempotent, so the later close is a no-op).
-    if display is not None:
-        display.close()
+    # prompt so neither is overdrawn by the live rich Progress.
+    _close_run_display(display)
     for name in written:
         if not quiet:
             typer.echo(f"wrote {name}")
@@ -220,6 +230,9 @@ def run_preset(
     meeting with 2+ files, the M3 grouping flow via
     :func:`vemoizer.batch.run_batch` with the meeting write seam.
     ``display`` (issue #105 M4b) is threaded to ``transcribe_file``.
+    ``run_preset`` takes ownership of the display's close on the success
+    path (meeting runs — before the wrote lines / naming prompt); the
+    CLI's finally-close is then a no-op (issue #143).
     Returns 0 on success, 1 on any failure, 2 on a bad flag combination.
     """
     # Deferred import so run_preset (defined here) and _write_temp_glossary
@@ -468,8 +481,8 @@ def run_preset(
         # naming prompt (meeting only — the memo display stays owned by the
         # CLI caller's finally, where it is never followed by a prompt);
         # close() is idempotent, so the later finally-close is a no-op.
-        if command == "meeting" and display is not None:
-            display.close()
+        if command == "meeting":
+            _close_run_display(display)
         for name in written:
             if not quiet:
                 typer.echo(f"wrote {name}")

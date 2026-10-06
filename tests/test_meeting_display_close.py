@@ -6,17 +6,20 @@ the single-file / ``--no-group`` plain path).
 The bug is TTY-only: with non-TTY stderr (piped, CI, ``--quiet``) the
 display never renders and the bug is silent. These tests install a real PTY
 via ``os.openpty()`` as ``sys.stderr`` and construct a REAL
-:class:`~vemoizer.progress.ProgressDisplay` afterwards, so the display is
-actually live (``disable=False``) when the transcribe seam starts it. The
-transcribe seam is stubbed to call ``display.start()`` exactly like the
-production pipeline does, and the injected ``input_fn`` spy records
-``display._started`` each time it is called — i.e. at every interactive
-prompt (the hook's y/N and run_names' downstream prompts).
+:class:`~vemoizer.progress.ProgressDisplay` afterwards, so the display is not
+disabled (``disable=False``) when the transcribe seam
+starts it — a plain file object would work the same way (``start()`` flips
+the state flag regardless of whether rich actually renders), the PTY just
+makes the setup realistic. The transcribe seam is stubbed to call
+``display.start()`` exactly like the production pipeline does, and the
+injected ``input_fn`` spy records the display's ``is_live`` state each time
+it is called — i.e. at every interactive prompt (the hook's y/N and
+run_names' downstream prompts).
 
-State is asserted (not rendered bytes) so the test stays deterministic.
-Break-and-fail: removing the ``display.close()`` calls from
-``batch_preset.py`` leaves the display ``_started`` when ``input_fn`` fires,
-so the tests fail.
+The assertion is on the display's lifecycle state (``is_live``), not on
+rendered bytes, so the test stays deterministic. Break-and-fail: removing
+the display close in ``batch_preset.py`` leaves the display live when
+``input_fn`` fires, so the tests fail.
 """
 
 from __future__ import annotations
@@ -41,24 +44,26 @@ def _two_label_paragraphs() -> list[dict[str, Any]]:
 
 @pytest.fixture
 def pty_display(monkeypatch: pytest.MonkeyPatch):
-    """A real, LIVE :class:`ProgressDisplay` bound to a fake-PTY stderr.
+    """A real :class:`ProgressDisplay` bound to a fake-PTY stderr.
 
-    ``os.openpty()`` gives a genuine terminal pair. The slave fd is opened
-    as a file object and installed as ``sys.stderr`` (``isatty`` patched to
-    True for safety) BEFORE the display is constructed, so the display is
-    genuinely enabled (``disable=False``) and ``start()`` opens a live rich
-    render loop on that fd. The master fd stays open for the test duration
-    (writing to an orphaned pty slave raises EIO) and is closed in
-    teardown.
+    The PTY gives the display a non-disabled stderr so ``start()`` flips
+    its ``is_live`` state; the master fd stays open for the test duration
+    (writing to an orphaned pty slave raises EIO) and both fds are closed
+    in teardown even if construction fails.
     """
     import sys
 
     master, slave = os.openpty()
     buf = os.fdopen(slave, "w")
-    monkeypatch.setattr(sys, "stderr", buf)
-    monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
-    display = ProgressDisplay()
-    assert display.disable is False, "display must be live on a fake-PTY stderr"
+    try:
+        monkeypatch.setattr(sys, "stderr", buf)
+        monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
+        display = ProgressDisplay()
+        assert display.disable is False, "display must be live on a fake-PTY stderr"
+    except Exception:
+        buf.close()
+        os.close(master)
+        raise
     try:
         yield display
     finally:
@@ -151,7 +156,7 @@ def test_single_file_path_closes_display_before_hook(
 
     def input_fn(prompt: str) -> str:
         record["prompt"] = prompt
-        record["display_started"] = pty_display._started
+        record["display_started"] = pty_display.is_live
         return ""  # "no" — do not enter run_names
 
     ctx = _stub_seams(pty_display)
@@ -174,7 +179,7 @@ def test_single_file_path_closes_display_before_hook(
     # The display must NOT be live at the moment of the prompt.
     assert record["display_started"] is False
     # And it must remain closed (no later stage re-opened it).
-    assert pty_display._started is False
+    assert pty_display.is_live is False
 
 
 def test_group_path_closes_display_before_hook(
@@ -189,7 +194,7 @@ def test_group_path_closes_display_before_hook(
 
     def input_fn(prompt: str) -> str:
         record["prompt"] = prompt
-        record["display_started"] = pty_display._started
+        record["display_started"] = pty_display.is_live
         return ""
 
     ctx = _stub_seams(pty_display, group=True)
@@ -210,7 +215,7 @@ def test_group_path_closes_display_before_hook(
     assert record["prompt"].startswith("Name the speakers now?")
     # The display must NOT be live at the moment of the prompt.
     assert record["display_started"] is False
-    assert pty_display._started is False
+    assert pty_display.is_live is False
 
 
 def test_names_cli_prompts_run_after_display_closed(
@@ -226,7 +231,7 @@ def test_names_cli_prompts_run_after_display_closed(
     calls: list[tuple[bool, str]] = []
 
     def input_fn(prompt: str) -> str:
-        calls.append((pty_display._started, prompt))
+        calls.append((pty_display.is_live, prompt))
         if prompt.startswith("Name the speakers now?"):
             return "y"
         if prompt.startswith("Name for "):

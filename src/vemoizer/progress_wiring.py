@@ -5,7 +5,9 @@ invocation (before any stderr redirection) and threads it down through the
 batch layer to ``transcribe_file``.  For multi-file runs the batch layer
 prefixes the active stage with ``[i/N] <stem> ·`` (shown only when N > 1)
 so the user can see which file is being processed.  The display is closed
-in a ``finally`` block by the CLI caller.
+in a ``finally`` block by the CLI caller; ``run_preset`` may close it
+earlier (meeting runs, before the end-of-run prompt) — the CLI finally
+stays as the idempotent backstop (issue #143).
 """
 
 from __future__ import annotations
