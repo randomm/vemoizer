@@ -57,6 +57,10 @@ def pty_display(monkeypatch: pytest.MonkeyPatch):
     buf = os.fdopen(slave, "w")
     try:
         monkeypatch.setattr(sys, "stderr", buf)
+        # Force the isatty contract ProgressDisplay.__init__ reads; do not
+        # rely on the fdopen'd PTY slave's native isatty (platform-dependent
+        # — e.g. rich may have cached stderr TTY state at import).
+        monkeypatch.setattr(buf, "isatty", lambda: True, raising=False)
         display = ProgressDisplay()
         assert display.disable is False, "display must be live on a fake-PTY stderr"
     except Exception:
