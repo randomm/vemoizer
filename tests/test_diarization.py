@@ -3,11 +3,19 @@
 All tests mock pyannote: the library is NOT installed in the dev
 environment, the weights are gated, and AGENTS.md forbids model or
 network access in unit tests.
+
+The lazy-import tests below stub ``sys.modules`` with typed fake module
+objects (issue #141): the stubs mirror the real module surface the
+production code reaches (``pyannote.audio.Pipeline``,
+``huggingface_hub.snapshot_download``) so no suppression comments are
+needed to satisfy the checker.
 """
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from collections.abc import Callable
+from types import ModuleType, SimpleNamespace
+from typing import Any
 from unittest import mock
 
 import numpy as np
@@ -81,6 +89,61 @@ def test_mps_failure_falls_back_to_cpu(monkeypatch):
     assert result.segments == _TURNS
 
 
+class _PyannoteAudioModule(ModuleType):
+    """Typed stand-in for the ``pyannote.audio`` module (issue #141).
+
+    The lazy import in ``_load_pipeline`` resolves ``from pyannote.audio
+    import Pipeline`` through ``sys.modules``; a plain ``types.ModuleType``
+    has no ``Pipeline`` attribute in the checker's view, which is what
+    forced the old suppressions. A subclass with a declared class attribute
+    keeps the same runtime semantics with a clean static surface.
+    """
+
+    Pipeline: Any
+
+    def __init__(self, pipeline_cls: Any) -> None:
+        super().__init__("pyannote.audio")
+        self.Pipeline = pipeline_cls
+
+
+class _HuggingfaceHubModule(ModuleType):
+    """Typed stand-in for the ``huggingface_hub`` module (issue #141)."""
+
+    snapshot_download: Callable[..., Any]
+
+    def __init__(self, snapshot_download_fn: Callable[..., Any]) -> None:
+        super().__init__("huggingface_hub")
+        self.snapshot_download = snapshot_download_fn
+
+
+class _PyannoteParentModule(ModuleType):
+    """Typed stand-in for the ``pyannote`` parent package (issue #141)."""
+
+    audio: Any
+
+    def __init__(self, audio_module: ModuleType) -> None:
+        super().__init__("pyannote")
+        self.audio = audio_module
+
+
+def _install_fake_modules(
+    monkeypatch: pytest.MonkeyPatch, pipeline_cls: mock.Mock
+) -> mock.Mock:
+    """Register typed fakes for pyannote and huggingface_hub in sys.modules."""
+    import sys
+
+    module = _PyannoteAudioModule(pipeline_cls)
+    parent = _PyannoteParentModule(module)
+    monkeypatch.setitem(sys.modules, "pyannote", parent)
+    monkeypatch.setitem(sys.modules, "pyannote.audio", module)
+    monkeypatch.setitem(sys.modules, "torch", mock.Mock())
+
+    fake_snapshot = mock.Mock(return_value="/fake/hf-cache/snapshot")
+    hf_mod = _HuggingfaceHubModule(fake_snapshot)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hf_mod)
+    return fake_snapshot
+
+
 def test_load_pipeline_lazy_imports_pyannote(monkeypatch):
     """pyannote is imported only inside _load_pipeline, weights are pinned.
 
@@ -89,8 +152,6 @@ def test_load_pipeline_lazy_imports_pyannote(monkeypatch):
     bare repo ID (invariant #4).
     """
     import re
-    import sys
-    import types
 
     assert re.fullmatch(r"[0-9a-f]{40}", DIARIZATION_REVISION)
 
@@ -98,19 +159,8 @@ def test_load_pipeline_lazy_imports_pyannote(monkeypatch):
     fake_pipeline_cls = mock.Mock()
     fake_pipeline_cls.from_pretrained.return_value = fake_pipeline_obj
 
-    module = types.ModuleType("pyannote.audio")
-    module.Pipeline = fake_pipeline_cls  # ty: ignore[unresolved-attribute]
-    parent = types.ModuleType("pyannote")
-    parent.audio = module  # ty: ignore[unresolved-attribute]
-    monkeypatch.setitem(sys.modules, "pyannote", parent)
-    monkeypatch.setitem(sys.modules, "pyannote.audio", module)
-    monkeypatch.setitem(sys.modules, "torch", mock.Mock())
+    fake_snapshot = _install_fake_modules(monkeypatch, fake_pipeline_cls)
     monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-
-    fake_snapshot = mock.Mock(return_value="/fake/hf-cache/snapshot")
-    hf_mod = types.ModuleType("huggingface_hub")
-    hf_mod.snapshot_download = fake_snapshot  # ty: ignore[unresolved-attribute]
-    monkeypatch.setitem(sys.modules, "huggingface_hub", hf_mod)
 
     pipeline = _load_pipeline("cpu")
     assert pipeline is fake_pipeline_obj
@@ -126,24 +176,11 @@ def test_load_pipeline_lazy_imports_pyannote(monkeypatch):
 def test_load_pipeline_raises_on_none(monkeypatch):
     """A snapshot that yields no loadable pipeline fails loudly with a clear
     error (instead of ``None.to``) rather than a confusing downstream crash."""
-    import sys
-    import types
-
     fake_pipeline_cls = mock.Mock()
     fake_pipeline_cls.from_pretrained.return_value = None
 
-    module = types.ModuleType("pyannote.audio")
-    module.Pipeline = fake_pipeline_cls  # ty: ignore[unresolved-attribute]
-    parent = types.ModuleType("pyannote")
-    parent.audio = module  # ty: ignore[unresolved-attribute]
-    monkeypatch.setitem(sys.modules, "pyannote", parent)
-    monkeypatch.setitem(sys.modules, "pyannote.audio", module)
-    monkeypatch.setitem(sys.modules, "torch", mock.Mock())
+    _install_fake_modules(monkeypatch, fake_pipeline_cls)
     monkeypatch.delenv("HF_TOKEN", raising=False)
-
-    hf_mod = types.ModuleType("huggingface_hub")
-    hf_mod.snapshot_download = mock.Mock(return_value="/fake/hf-cache/snapshot")  # ty: ignore[unresolved-attribute]
-    monkeypatch.setitem(sys.modules, "huggingface_hub", hf_mod)
 
     with pytest.raises(RuntimeError, match="returned None"):
         _load_pipeline("cpu")
@@ -159,9 +196,6 @@ def test_attribution_string_is_cc_by():
 
 def test_load_pipeline_disables_telemetry(monkeypatch):
     """After _load_pipeline with pyannote mocked, PYANNOTE_METRICS_ENABLED is false."""
-    import sys
-    import types
-
     monkeypatch.delenv("PYANNOTE_METRICS_ENABLED", raising=False)
     monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
 
@@ -169,18 +203,8 @@ def test_load_pipeline_disables_telemetry(monkeypatch):
     fake_pipeline_cls = mock.Mock()
     fake_pipeline_cls.from_pretrained.return_value = fake_pipeline_obj
 
-    module = types.ModuleType("pyannote.audio")
-    module.Pipeline = fake_pipeline_cls  # ty: ignore[unresolved-attribute]
-    parent = types.ModuleType("pyannote")
-    parent.audio = module  # ty: ignore[unresolved-attribute]
-    monkeypatch.setitem(sys.modules, "pyannote", parent)
-    monkeypatch.setitem(sys.modules, "pyannote.audio", module)
-    monkeypatch.setitem(sys.modules, "torch", mock.Mock())
+    _install_fake_modules(monkeypatch, fake_pipeline_cls)
     monkeypatch.delenv("HF_TOKEN", raising=False)
-
-    hf_mod = types.ModuleType("huggingface_hub")
-    hf_mod.snapshot_download = mock.Mock(return_value="/fake/hf-cache/snapshot")  # ty: ignore[unresolved-attribute]
-    monkeypatch.setitem(sys.modules, "huggingface_hub", hf_mod)
 
     _load_pipeline("cpu")
 
@@ -192,9 +216,6 @@ def test_load_pipeline_disables_telemetry(monkeypatch):
 
 def test_load_pipeline_preserves_user_opt_in(monkeypatch):
     """A pre-existing PYANNOTE_METRICS_ENABLED=true is not overwritten."""
-    import sys
-    import types
-
     monkeypatch.setenv("PYANNOTE_METRICS_ENABLED", "true")
     monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
 
@@ -202,18 +223,8 @@ def test_load_pipeline_preserves_user_opt_in(monkeypatch):
     fake_pipeline_cls = mock.Mock()
     fake_pipeline_cls.from_pretrained.return_value = fake_pipeline_obj
 
-    module = types.ModuleType("pyannote.audio")
-    module.Pipeline = fake_pipeline_cls  # ty: ignore[unresolved-attribute]
-    parent = types.ModuleType("pyannote")
-    parent.audio = module  # ty: ignore[unresolved-attribute]
-    monkeypatch.setitem(sys.modules, "pyannote", parent)
-    monkeypatch.setitem(sys.modules, "pyannote.audio", module)
-    monkeypatch.setitem(sys.modules, "torch", mock.Mock())
+    _install_fake_modules(monkeypatch, fake_pipeline_cls)
     monkeypatch.delenv("HF_TOKEN", raising=False)
-
-    hf_mod = types.ModuleType("huggingface_hub")
-    hf_mod.snapshot_download = mock.Mock(return_value="/fake/hf-cache/snapshot")  # ty: ignore[unresolved-attribute]
-    monkeypatch.setitem(sys.modules, "huggingface_hub", hf_mod)
 
     _load_pipeline("cpu")
 
@@ -231,9 +242,9 @@ def test_pipeline_receives_waveform_tensor_not_ndarray(monkeypatch):
     The old {"audio": ndarray} key means "a file path" to pyannote and is
     rejected at runtime — the stage could never actually run.
     """
-    received = {}
+    received: dict[str, object] = {}
 
-    def fake_pipeline(waveforms):
+    def fake_pipeline(waveforms: dict[str, Any]) -> mock.Mock:
         received.update(waveforms)
         wrapper = mock.Mock(spec=["speaker_diarization"])
         wrapper.speaker_diarization = _fake_diarization()
@@ -246,15 +257,15 @@ def test_pipeline_receives_waveform_tensor_not_ndarray(monkeypatch):
     assert "waveform" in received
     assert "audio" not in received
     assert received["sample_rate"] == 16_000
-    waveform = received["waveform"]
+    waveform: Any = received["waveform"]
     # (channel, time) with a leading singleton channel dim
     assert tuple(waveform.shape) == (1, len(_AUDIO))
 
 
 def _received_kwargs(monkeypatch, speakers) -> dict:
-    received: dict = {}
+    received: dict[str, object] = {}
 
-    def fake_pipeline(waveforms, **kwargs):
+    def fake_pipeline(waveforms: dict[str, object], **kwargs: object) -> mock.Mock:
         received.update(kwargs)
         wrapper = mock.Mock(spec=["speaker_diarization"])
         wrapper.speaker_diarization = _fake_diarization()

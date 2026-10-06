@@ -15,7 +15,9 @@ any load/inference exception we fall back to CPU.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -68,7 +70,35 @@ def _disable_pyannote_telemetry() -> None:
     os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 
 
-def _load_pipeline(device: str) -> object:
+class _DiarizePipeline(Protocol):
+    """The callable seam the module relies on for pyannote pipelines (issue #141).
+
+    pyannote's ``Pipeline`` is lazy-imported (issue #103: the import must
+    stay inside :func:`_load_pipeline`, after
+    :func:`_disable_pyannote_telemetry`) and is untyped, so this documents
+    only the call boundary ``diarize`` actually uses — nothing more. The
+    positional argument is pyannote 4.x's in-memory audio contract
+    (``{"waveform": tensor, "sample_rate": int}``, i.e. an ``AudioFile``
+    mapping), and the keyword set is the fixed speaker-count arguments
+    pyannote's ``apply`` accepts: ``num_speakers`` (int) or the pair
+    ``min_speakers``/``max_speakers``. The result stays ``Any`` because
+    ``diarize`` only reads it via ``getattr`` fallbacks
+    (``exclusive_speaker_diarization`` / ``speaker_diarization``) rather
+    than a typed interface.
+    """
+
+    def __call__(
+        self,
+        waveforms: Mapping[str, Any],
+        /,
+        *,
+        num_speakers: int | None = None,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+    ) -> Any: ...
+
+
+def _load_pipeline(device: str) -> _DiarizePipeline:
     """Lazily import pyannote and build the community pipeline on *device*.
 
     Weights are downloaded with ``snapshot_download`` pinned to
@@ -134,13 +164,13 @@ def diarize(
     if device == "auto":
         try:
             pipeline = _load_pipeline("mps")
-            diarization = pipeline(waveforms, **kwargs)  # ty: ignore[call-non-callable]
+            diarization = pipeline(waveforms, **kwargs)
         except Exception:
             pipeline = _load_pipeline("cpu")
-            diarization = pipeline(waveforms, **kwargs)  # ty: ignore[call-non-callable]
+            diarization = pipeline(waveforms, **kwargs)
     else:
         pipeline = _load_pipeline(device)
-        diarization = pipeline(waveforms, **kwargs)  # ty: ignore[call-non-callable]
+        diarization = pipeline(waveforms, **kwargs)
 
     # pyannote 4.x returns a DiarizeOutput wrapper. Prefer the exclusive
     # partition (non-overlapping, purpose-built for ASR alignment — no
