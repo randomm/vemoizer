@@ -6,15 +6,15 @@ the single-file / ``--no-group`` plain path).
 The bug is TTY-only: with non-TTY stderr (piped, CI, ``--quiet``) the
 display never renders and the bug is silent. These tests install a real PTY
 via ``os.openpty()`` as ``sys.stderr`` and construct a REAL
-:class:`~vemoizer.progress.ProgressDisplay` afterwards, so the display is not
-disabled (``disable=False``) when the transcribe seam
-starts it — a plain file object would work the same way (``start()`` flips
-the state flag regardless of whether rich actually renders), the PTY just
-makes the setup realistic. The transcribe seam is stubbed to call
-``display.start()`` exactly like the production pipeline does, and the
-injected ``input_fn`` spy records the display's ``is_live`` state each time
-it is called — i.e. at every interactive prompt (the hook's y/N and
-run_names' downstream prompts).
+:class:`~vemoizer.progress.ProgressDisplay` afterwards; the fixture asserts
+``display.disable is False`` so the display is not disabled when the
+transcribe seam starts it — a plain file object would work the same way
+(``start()`` flips the state flag regardless of whether rich actually
+renders), the PTY just makes the setup realistic. The transcribe seam is
+stubbed to call ``display.start()`` exactly like the production pipeline
+does, and the injected ``input_fn`` spy records the display's ``is_live``
+state each time it is called — i.e. at every interactive prompt (the hook's
+y/N and run_names' downstream prompts).
 
 The assertion is on the display's lifecycle state (``is_live``), not on
 rendered bytes, so the test stays deterministic. Break-and-fail: removing
@@ -57,7 +57,10 @@ def pty_display(monkeypatch: pytest.MonkeyPatch):
     buf = os.fdopen(slave, "w")
     try:
         monkeypatch.setattr(sys, "stderr", buf)
-        monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
+        # Force the isatty contract ProgressDisplay.__init__ reads; do not
+        # rely on the fdopen'd PTY slave's native isatty (platform-dependent
+        # — e.g. rich may have cached stderr TTY state at import).
+        monkeypatch.setattr(buf, "isatty", lambda: True, raising=False)
         display = ProgressDisplay()
         assert display.disable is False, "display must be live on a fake-PTY stderr"
     except Exception:
