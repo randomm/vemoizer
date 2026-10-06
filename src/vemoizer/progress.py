@@ -199,6 +199,16 @@ class ProgressDisplay:
 
     # -- lifecycle ---------------------------------------------------------
 
+    @property
+    def is_live(self) -> bool:
+        """Whether the display is currently rendering (between start/close).
+
+        Public read-only view of the lifecycle state, for callers that need
+        to inspect it after the fact (e.g. asserting a display was closed
+        before an interactive prompt).
+        """
+        return self._started
+
     def start(self) -> None:
         """Start rendering. Idempotent; a disabled progress is a no-op."""
         if not self._started:
