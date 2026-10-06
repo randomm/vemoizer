@@ -171,6 +171,12 @@ def _run_preset_groups(
         display=display,
     )
 
+    # Issue #143: close the display before the wrote lines and the naming
+    # prompt so neither is overdrawn by the live rich Progress (the CLI
+    # caller's finally-close stays as the memo/error-path owner; close() is
+    # idempotent, so the later close is a no-op).
+    if display is not None:
+        display.close()
     for name in written:
         if not quiet:
             typer.echo(f"wrote {name}")
@@ -458,6 +464,12 @@ def run_preset(
                     from vemoizer.notify import notify_write
 
                     notify_write(file, len(pair), len(PRESET_FORMATS))
+        # Issue #143: close the display before the wrote lines and the
+        # naming prompt (meeting only — the memo display stays owned by the
+        # CLI caller's finally, where it is never followed by a prompt);
+        # close() is idempotent, so the later finally-close is a no-op.
+        if command == "meeting" and display is not None:
+            display.close()
         for name in written:
             if not quiet:
                 typer.echo(f"wrote {name}")
