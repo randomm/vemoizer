@@ -33,6 +33,19 @@ def make_batch_display(quiet: bool = False) -> ProgressDisplay | None:
     return ProgressDisplay()
 
 
+def _close_run_display(display: ProgressDisplay | None) -> None:
+    """Close the run's display before its terminal interactive output.
+
+    Issue #143: the wrote lines and the naming-hook prompt must not be
+    overdrawn by a live rich Progress. ``run_preset`` closes the display
+    itself on the success path (overriding the ``progress_wiring`` "closed
+    by the CLI caller" contract for meeting runs); the CLI's finally-close
+    stays as the memo/error-path owner and is an idempotent no-op here.
+    """
+    if display is not None:
+        display.close()
+
+
 def set_batch_prefix(
     display: ProgressDisplay | None, index: int, total: int, stem: str
 ) -> None:
