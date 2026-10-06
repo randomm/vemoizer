@@ -104,7 +104,11 @@ _PLANTED_CASES: list[tuple[str, str, bool]] = [
 def test_planted_suppression_matrix(
     tmp_path: Path, label: str, line_text: str, expected_flagged: bool
 ) -> None:
-    """Parametrized matrix: each spelling must be flagged or not as specified."""
+    """Parametrized matrix: each spelling must be flagged or not as specified.
+
+    Plants under a single root (``scripts``) — cross-root coverage lives in
+    :func:`test_planted_in_every_scanned_root`.
+    """
     (tmp_path / "scripts").mkdir()
     planted = tmp_path / "scripts" / "planted.py"
     planted.write_text(line_text + "\n")
@@ -116,26 +120,21 @@ def test_planted_suppression_matrix(
     )
 
 
-def test_planted_ty_ignore_in_temp_file_is_flagged(tmp_path: Path) -> None:
-    """A planted ``ty``-style suppression in a scanned tree must be detected.
+@pytest.mark.parametrize("py_root", _PY_ROOTS)
+def test_planted_in_every_scanned_root(tmp_path: Path, py_root: str) -> None:
+    """A plant in each scanned root (first, middle, last) must be detected."""
+    (tmp_path / py_root).mkdir()
+    planted = tmp_path / py_root / "planted.py"
+    planted.write_text("x: int = 1  " + _TYPE_STD + "\n")
+    offenders = _find_offenders(tmp_path)
+    assert offenders, f"planted suppression under {py_root!r} was not detected"
+    assert any(f"{py_root}/planted.py:1" in line for line in offenders)
 
-    Plants in ``scripts/`` (the last entry of ``_PY_ROOTS``) to prove roots
-    past the first are scanned too, and uses a temp file so the planted
-    comment never appears in this repo's source scan.
-    """
+
+def test_missing_roots_are_skipped(tmp_path: Path) -> None:
+    """A temp repo with only one of the roots still scans that root."""
     (tmp_path / "scripts").mkdir()
     planted = tmp_path / "scripts" / "planted.py"
     planted.write_text("x: int = 1  " + _TY_STD + "\n")
     offenders = _find_offenders(tmp_path)
-    assert offenders, "planted suppression was not detected"
-    assert any("scripts/planted.py:1" in line for line in offenders)
-
-
-def test_planted_type_ignore_in_temp_file_is_flagged(tmp_path: Path) -> None:
-    """A planted mypy-style suppression in a scanned tree must be detected."""
-    (tmp_path / "src").mkdir()
-    planted = tmp_path / "src" / "planted.py"
-    planted.write_text("x: int = 1  " + _TYPE_STD + "\n")
-    offenders = _find_offenders(tmp_path)
-    assert offenders, "planted suppression was not detected"
-    assert any("src/planted.py:1" in line for line in offenders)
+    assert offenders, "planted suppression in a partial repo was not detected"
