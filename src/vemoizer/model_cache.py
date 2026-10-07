@@ -329,6 +329,4 @@ def _is_safe_shard_name(name: object) -> bool:
     windows = PureWindowsPath(name)
     if posix.is_absolute() or windows.is_absolute():
         return False
-    if ".." in posix.parts or ".." in windows.parts:
-        return False
-    return True
+    return ".." not in posix.parts and ".." not in windows.parts

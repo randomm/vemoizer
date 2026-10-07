@@ -528,9 +528,12 @@ def test_shard_name_windows_and_trick_forms_are_incomplete(tmp_path: Path) -> No
         (snap / "model.safetensors.index.json").write_text(
             _json.dumps({"weight_map": {"w1": bad_name}})
         )
-        assert model_cache._index_shards_complete(
-            snap, snap / "model.safetensors.index.json"
-        ) is False, f"shard name {bad_name!r} must be rejected by name"
+        assert (
+            model_cache._index_shards_complete(
+                snap, snap / "model.safetensors.index.json"
+            )
+            is False
+        ), f"shard name {bad_name!r} must be rejected by name"
 
 
 def test_shard_name_non_string_value_is_incomplete_without_raising(
@@ -547,14 +550,21 @@ def test_shard_name_non_string_value_is_incomplete_without_raising(
         (snap / "model.safetensors.index.json").write_text(
             _json.dumps({"weight_map": {"w1": bad_value}})
         )
-        assert model_cache._index_shards_complete(
-            snap, snap / "model.safetensors.index.json"
-        ) is False
+        assert (
+            model_cache._index_shards_complete(
+                snap, snap / "model.safetensors.index.json"
+            )
+            is False
+        )
 
 
 def test_shard_name_relative_subfolder_stays_allowed(tmp_path: Path) -> None:
-    """A legitimate relative subfolder shard name (``sub/model-00001-of-\n    00002.safetensors``) with a real non-empty file stays complete — the
-    name check must not over-reject."""
+    """A legitimate relative subfolder shard name (``sub/model-00001-of-
+    00002.safetensors``) with a real non-empty file stays complete.
+
+    The name check must not over-reject: subfolder names under the snapshot
+    dir are a normal sharded-layout form and must stay complete.
+    """
     import json as _json
 
     repo = "org/shard-subfolder"
@@ -564,9 +574,10 @@ def test_shard_name_relative_subfolder_stays_allowed(tmp_path: Path) -> None:
     (snap / "model.safetensors.index.json").write_text(
         _json.dumps({"weight_map": {"w1": "sub/model-00001-of-00002.safetensors"}})
     )
-    assert model_cache._index_shards_complete(
-        snap, snap / "model.safetensors.index.json"
-    ) is True
+    assert (
+        model_cache._index_shards_complete(snap, snap / "model.safetensors.index.json")
+        is True
+    )
     assert _probe_fresh(repo, PINNED_REVISION, tmp_path) is True
 
 
