@@ -43,6 +43,10 @@ class TranscriptionResult(_TranscriptionBase, total=False):
     # transcriber backend.
     part_markers: list[dict[str, Any]]
     language: str
+    # Per-window language distribution (issue #147, display only): e.g.
+    # "fi 29/30, en 1/30". Present when at least one window reported a
+    # language; absent when no window reported one (empty decode).
+    language_summary: str
     transcribe_time: float
     audio_duration: float
     rtf: float
