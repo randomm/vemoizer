@@ -53,6 +53,8 @@ def _run_repair(
     budget = StageBudget(llm_config.repair_budget_seconds)
     repair_client = client_cls(llm_config)
     if tracker is not None:
+        # Right before the repair work starts (issue #148 FIX 3): the
+        # label a Ctrl-C reads must be the stage actually in flight.
         tracker.set_stage("repair")
     repair_task: TaskID | None = (
         display.add_stage("repair", total=len(result["paragraphs"]))
@@ -101,6 +103,9 @@ def _run_notes(
     budget = StageBudget(llm_config.notes_budget_seconds)
     client = client_cls(llm_config)
     if tracker is not None:
+        # Right before the notes work starts (issue #148 FIX 3): a Ctrl-C
+        # during repair must read 'repair', during notes 'notes' — the
+        # stage is set where the work actually begins, not upstream.
         tracker.set_stage("notes")
     notes_task = display.add_stage("notes") if display is not None else None
     try:

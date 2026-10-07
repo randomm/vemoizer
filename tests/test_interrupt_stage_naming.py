@@ -245,106 +245,111 @@ class TestInterruptStageNaming:
 
     # -- repair -----------------------------------------------------------
 
-    def _run_repair_case(self, tmp_path, monkeypatch, *, quiet: bool) -> None:
-        """Drive llm_tail._run_repair directly: the tracker must say 'repair'
-        when a Ctrl-C fires inside repair_paragraphs (as bound in llm_tail)."""
+    def _tail_case(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        quiet: bool,
+        repair: bool,
+        interrupt_in: str,
+    ) -> None:
+        """Drive the REAL ``apply_llm_tail`` (vemoizer.llm_tail namespace):
+        a Ctrl-C inside the stage seam the tail actually calls must read
+        that stage off the tracker at that moment."""
+        import io
+        import sys
 
         import vemoizer.llm_tail as lt
         from vemoizer.llm_config import LLMConfig
         from vemoizer.preset_interrupt import begin_interrupt_tracking, handle_interrupt
+
+        holder: dict[str, Any] = {}
+        if quiet:
+            display = None
+        else:
+            buf = io.StringIO()
+            monkeypatch.setattr(sys, "stderr", buf)
+            monkeypatch.setattr(buf, "isatty", lambda: True, raising=False)
+            from vemoizer.progress import ProgressDisplay
+
+            display = ProgressDisplay()  # isatty patched BEFORE construction
+            holder["display"] = display
+
+        monkeypatch.setenv("VEMOIZER_TEST_KEY", "sk-test")
+        config = LLMConfig(
+            base_url="http://localhost:9999/v1",
+            model="test",
+            api_key_env="VEMOIZER_TEST_KEY",
+            timeout_seconds=10.0,
+        )
 
         calls: list[Any] = []
 
         def fake_repair(client, paragraphs, glossary=None, **kw):
-            calls.append(client)
-            raise KeyboardInterrupt()
-
-        monkeypatch.setattr(lt, "repair_paragraphs", fake_repair)
-
-        class _FakeClient:
-            def __init__(self, cfg):
-                self._c = cfg
-
-            def close(self):
-                pass
-
-            def complete(self, *a, **kw):
-                return "ok"
-
-        monkeypatch.setattr(lt, "LLMClient", _FakeClient)
-        config = LLMConfig(
-            base_url="http://localhost:9999/v1",
-            model="test",
-            api_key_env="VEMOIZER_TEST_KEY",
-            timeout_seconds=10.0,
-        )
-        result: dict[str, Any] = {
-            "text": "x",
-            "paragraphs": [{"text": "a"}, {"text": "b"}],
-        }
-        tracker = begin_interrupt_tracking()
-        with contextlib.suppress(KeyboardInterrupt):
-            lt._run_repair(result, config, None, tracker=tracker)
-        assert calls, "the repair_paragraphs seam was never reached"
-        line = handle_interrupt(tracker, None)
-        assert "interrupted during repair " in line, line
-        assert SENTINEL_STEM not in line
-
-    def test_ctrl_c_in_repair_quiet(self, tmp_path, monkeypatch) -> None:
-        self._run_repair_case(tmp_path, monkeypatch, quiet=True)
-
-    def test_ctrl_c_in_repair_tty(self, tmp_path, monkeypatch) -> None:
-        self._run_repair_case(tmp_path, monkeypatch, quiet=False)
-
-    # -- notes -------------------------------------------------------------
-
-    def _run_notes_case(self, tmp_path, monkeypatch, *, quiet: bool) -> None:
-        """Drive llm_tail._run_notes directly: the tracker must say 'notes'
-        when a Ctrl-C fires inside generate_notes (as bound in llm_tail)."""
-
-        import vemoizer.llm_tail as lt
-        from vemoizer.llm_config import LLMConfig
-        from vemoizer.preset_interrupt import begin_interrupt_tracking, handle_interrupt
-
-        calls: list[Any] = []
+            calls.append("repair")
+            if interrupt_in == "repair":
+                raise KeyboardInterrupt()
+            return paragraphs
 
         def fake_notes(client, text, **kw):
-            calls.append(client)
-            raise KeyboardInterrupt()
+            calls.append("notes")
+            if interrupt_in == "notes":
+                raise KeyboardInterrupt()
+            return {"title": "T"}
 
+        # Fakes bound where the code looks up the names (the llm_tail
+        # namespace), so the patch is provably the code path.
+        monkeypatch.setattr(lt, "repair_paragraphs", fake_repair)
         monkeypatch.setattr(lt, "generate_notes", fake_notes)
 
-        class _FakeClient:
-            def __init__(self, cfg):
-                self._c = cfg
-
-            def close(self):
-                pass
-
-            def complete(self, *a, **kw):
-                return "ok"
-
-        monkeypatch.setattr(lt, "LLMClient", _FakeClient)
-        config = LLMConfig(
-            base_url="http://localhost:9999/v1",
-            model="test",
-            api_key_env="VEMOIZER_TEST_KEY",
-            timeout_seconds=10.0,
-        )
         result: dict[str, Any] = {
             "text": "some transcript",
             "paragraphs": [{"text": "a"}, {"text": "b"}],
         }
         tracker = begin_interrupt_tracking()
         with contextlib.suppress(KeyboardInterrupt):
-            lt._run_notes(result, config, None, None, tracker=tracker)
-        assert calls, "the generate_notes seam was never reached"
-        line = handle_interrupt(tracker, None)
-        assert "interrupted during notes " in line, line
-        assert SENTINEL_STEM not in line
+            lt.apply_llm_tail(
+                result,
+                config,
+                repair=repair,
+                corrections=None,
+                glossary=None,
+                display=display,
+                tracker=tracker,
+            )
+        # The patch took effect: the named seam (and, when the interrupt
+        # fires later, the earlier one) was really called.
+        assert interrupt_in in calls, calls
+        line = handle_interrupt(tracker, holder.get("display"))
+        assert f"interrupted during {interrupt_in} " in line, line
+        assert SENTINEL_STEM not in line, line
+        if display is not None:
+            # The tail's per-stage task was finished by the seam's
+            # finally (issue #143: tasks must be finished/stopped by the
+            # run's close point; the display itself is closed later by
+            # _close_run_display in the preset layer).
+            tasks = display._progress.tasks  # noqa: SLF001
+            assert all(t.description.startswith("[green]✓") for t in tasks)
+
+    def test_ctrl_c_in_repair_quiet(self, tmp_path, monkeypatch) -> None:
+        self._tail_case(monkeypatch, quiet=True, repair=True, interrupt_in="repair")
+
+    def test_ctrl_c_in_repair_tty(self, tmp_path, monkeypatch) -> None:
+        self._tail_case(monkeypatch, quiet=False, repair=True, interrupt_in="repair")
+
+    # -- notes -------------------------------------------------------------
 
     def test_ctrl_c_in_notes_quiet(self, tmp_path, monkeypatch) -> None:
-        self._run_notes_case(tmp_path, monkeypatch, quiet=True)
+        self._tail_case(monkeypatch, quiet=True, repair=True, interrupt_in="notes")
 
     def test_ctrl_c_in_notes_tty(self, tmp_path, monkeypatch) -> None:
-        self._run_notes_case(tmp_path, monkeypatch, quiet=False)
+        self._tail_case(monkeypatch, quiet=False, repair=True, interrupt_in="notes")
+
+    def test_ctrl_c_in_notes_with_repair_disabled(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """repair=False: the notes interrupt must read 'notes', not the
+        earlier 'repair' (or nothing) — a skipped stage must not set its
+        stage, and 'notes' must be set where the notes work actually
+        starts."""
+        self._tail_case(monkeypatch, quiet=True, repair=False, interrupt_in="notes")
