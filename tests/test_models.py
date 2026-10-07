@@ -6,7 +6,6 @@ pointed at ``tmp_path``; nothing touches the real HF cache or the network.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -425,13 +424,6 @@ def test_pull_models_warm_cache_silences_per_model(tmp_path) -> None:
     _mc.clear_memo()
     for spec in MODELS:
         _make_complete_cache(tmp_path, spec.repo_id, spec.revision)
-
-    # After laying out the cache, verify the probe sees it.
-    probe_results = [
-        _mc.snapshot_locally_complete(spec.repo_id, spec.revision, str(tmp_path))
-        for spec in MODELS
-    ]
-    print(f"PROBE RESULTS: {probe_results}", file=sys.stderr)
 
     seen: list[bool] = []
 
