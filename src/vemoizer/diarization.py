@@ -219,6 +219,8 @@ def run_diarization_stage(
     """
     try:
         result = diarize(audio, num_speakers=speakers)
+    except KeyboardInterrupt:  # noqa: S110 - let Ctrl-C propagate (issue #148)
+        raise
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
         import logging
 
