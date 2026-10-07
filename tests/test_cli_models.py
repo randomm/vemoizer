@@ -108,7 +108,7 @@ def test_models_pull_help_describes_download() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_pull_calls_snapshot_download_per_model_with_full_sha(tmp_path: Path) -> None:
+def test_pull_calls_snapshot_download_per_model_with_full_sha() -> None:
     """Every model is pulled with its full-SHA revision as a kwarg."""
     calls: list[tuple[str, str | None]] = []
 
