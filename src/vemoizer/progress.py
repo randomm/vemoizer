@@ -259,6 +259,36 @@ class ProgressDisplay:
         """Replace a running stage's status text (e.g. 'loading model...')."""
         self._progress.update(task_id, description=description)
 
+    def active_stage_name(self) -> str | None:
+        """The last unfinished task's base stage name (prefix-free).
+
+        Reads the name off the display's own base-name registry (set at
+        ``add_stage``, prefix-free) so a batch prefix's file stem can never
+        leak into the result. ``None`` when there is no live task, when the
+        only task is the last one and it is already finished (its
+        description carries the ``[green]`` completion marker), or when the
+        registry does not know the task's id (falls back to the live
+        description with the ``[i/N] <stem> · `` prefix stripped). Used by
+        :func:`vemoizer.preset_interrupt.handle_interrupt` to name the
+        active stage without reaching into private display state.
+        """
+        from vemoizer.preset_interrupt import _strip_batch_prefix
+
+        tasks = self._progress.tasks
+        if not tasks:
+            return None
+        task = tasks[-1]
+        if task.description.startswith("[green]"):
+            # A completed task carries the completion marker; it is not the
+            # active stage (the ``prefix_active_stage`` convention).
+            return None
+        # The base name per task id (set at add_stage); the prefix never
+        # reaches this map, so the stem cannot leak.
+        name = self._stage_names.get(task.id, "")
+        if name and not name.startswith("[green]"):
+            return name
+        return _strip_batch_prefix(task.description)
+
     def prefix_active_stage(self, prefix: str) -> None:
         """Prepend *prefix* (e.g. ``"[1/3] memo · "``) to the active stage.
 

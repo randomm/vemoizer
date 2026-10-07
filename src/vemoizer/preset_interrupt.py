@@ -125,30 +125,13 @@ def handle_interrupt(
 def _active_display_stage(display: ProgressDisplay | None) -> str | None:
     """The display's active task's base stage name (prefix stripped), or None.
 
-    The stage name is read off the display's own base-name registry (set
-    at ``add_stage``, prefix-free), so the batch prefix's file stem cannot
-    leak into the line; a live task the registry does not know falls back
-    to its live description with the ``[i/N] <stem> · `` prefix stripped.
+    Delegates to the display's public :meth:`ProgressDisplay.active_stage_name`
+    (issue #148 FIX 5) so this module no longer reaches into the display's
+    private task list and stage-name registry.
     """
     if display is None:
         return None
-    try:
-        tasks = display._progress.tasks  # noqa: SLF001
-    except AttributeError:  # noqa: SIM105 - display object without _progress
-        return None
-    if not tasks:
-        return None
-    task = tasks[-1]
-    if task.description.startswith("[green]"):
-        # A completed task carries the completion marker; it is not the
-        # active stage (the ``prefix_active_stage`` convention).
-        return None
-    # The base name per task id (set at add_stage); the prefix never
-    # reaches this map, so the stem cannot leak.
-    name = display._stage_names.get(task.id, "")  # noqa: SLF001
-    if name and not name.startswith("[green]"):
-        return name
-    return _strip_batch_prefix(task.description)
+    return display.active_stage_name()
 
 
 def _strip_batch_prefix(description: str) -> str | None:
