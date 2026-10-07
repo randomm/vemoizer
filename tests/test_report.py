@@ -436,3 +436,43 @@ def test_render_does_not_raise_for_malformed_segments() -> None:
     # Non-dict segments dropped; the single dict segment is not degenerate alone.
     result = render_report(t)
     assert "Jäljellä olevat loopit" not in result
+
+
+# -- language_summary in the quality report (issue #147) ----------------------
+
+
+def test_report_includes_language_summary_when_present() -> None:
+    """A run dict with language_summary gets a Kielet/Languages section."""
+    t = _transcript(language_summary="fi 29/30, en 1/30")
+    result = render_report(t)
+    assert "Kielet: fi 29/30, en 1/30" in result
+
+
+def test_report_language_summary_english_label() -> None:
+    """The language summary section uses the English label in English mode."""
+    t = _transcript(language_summary="fi 3/3")
+    result = render_report(t, language="en")
+    assert "Languages: fi 3/3" in result
+
+
+def test_report_no_language_summary_when_absent() -> None:
+    """A run dict without language_summary has no Kielet/Languages section."""
+    t = _transcript()
+    result = render_report(t)
+    assert "Kielet:" not in result
+    assert "Languages:" not in result
+
+
+def test_report_no_language_summary_for_non_string() -> None:
+    """A non-string language_summary is ignored (fail-open)."""
+    t = _transcript(language_summary=None)
+    result = render_report(t)
+    assert "Kielet:" not in result
+
+
+def test_build_quality_report_includes_language_summary() -> None:
+    """build_quality_report (the fail-open wrapper) passes language_summary
+    through to the rendered report."""
+    t = _transcript(language_summary="fi 10/10")
+    result = build_quality_report(t)
+    assert "Kielet: fi 10/10" in result

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -795,3 +796,68 @@ def test_language_summary_absent_on_empty_audio() -> None:
     assert "language" not in result
     assert "language_summary" not in result
     assert result["text"] == ""
+
+
+# -- huggingface_hub progress bar suppression (issue #147) --------------------
+
+
+def test_pinned_download_suppresses_bars_when_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the snapshot is cached, _pinned_download calls
+    disable_progress_bars() before and enable_progress_bars() after
+    snapshot_download (issue #147)."""
+    from vemoizer.whisper_transcriber import _pinned_download
+
+    revision = "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb"
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    marker = tmp_path / "hub" / "models--org--name" / "refs" / revision
+    marker.parent.mkdir(parents=True)
+    marker.touch()
+
+    calls: list[str] = []
+
+    def _fake_download(repo_id: str, revision: str) -> str:
+        calls.append("download")
+        return str(tmp_path / "snap")
+
+    with (
+        patch("vemoizer.models._model_cache_name", return_value="models--org--name"),
+        patch("huggingface_hub.snapshot_download", side_effect=_fake_download),
+        patch(
+            "huggingface_hub.utils.disable_progress_bars",
+            side_effect=lambda: calls.append("disable"),
+        ),
+        patch(
+            "huggingface_hub.utils.enable_progress_bars",
+            side_effect=lambda: calls.append("enable"),
+        ),
+    ):
+        result = _pinned_download("org/name", revision)
+
+    assert result == str(tmp_path / "snap")
+    assert "disable" in calls
+    assert "enable" in calls
+    assert calls.index("disable") < calls.index("download")
+    assert calls.index("download") < calls.index("enable")
+
+
+def test_pinned_download_keeps_bars_when_uncached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the snapshot is NOT cached, _pinned_download does NOT call
+    disable_progress_bars (a real multi-GB download must show a bar)."""
+    from vemoizer.whisper_transcriber import _pinned_download
+
+    revision = "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb"
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    # No marker file → not cached
+    with (
+        patch("vemoizer.models._model_cache_name", return_value="models--org--name"),
+        patch("huggingface_hub.snapshot_download", return_value="/tmp/snap"),
+        patch("huggingface_hub.utils.disable_progress_bars") as mock_disable,
+        patch("huggingface_hub.utils.enable_progress_bars") as mock_enable,
+    ):
+        _pinned_download("org/name", revision)
+    mock_disable.assert_not_called()
+    mock_enable.assert_not_called()

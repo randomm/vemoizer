@@ -116,10 +116,9 @@ class WhisperTranscriber:
             start = time.time()
             try:
                 import mlx_whisper
-                from huggingface_hub import snapshot_download
 
                 # Revision-pinned: never load from the bare repo ID (invariant #4).
-                self._model_path = snapshot_download(MODEL_ID, revision=MODEL_REVISION)
+                self._model_path = _pinned_download(MODEL_ID, MODEL_REVISION)
                 self._mlx_whisper = mlx_whisper
                 # Marker: the real weights live in mlx-whisper's ModelHolder
                 # cache once the first transcribe runs.
@@ -385,3 +384,55 @@ def decode_meeting(
         if transcriber is not None:
             with suppress(Exception):  # cleanup is best-effort (fail-open)
                 transcriber.cleanup()
+
+
+def _pinned_download(repo_id: str, revision: str) -> str:
+    """Revision-pinned ``snapshot_download`` with cached-bar suppression (issue #147).
+
+    The ``vemoizer meeting`` / ``memo`` command loads its model at run start
+    (not via ``models pull``). When the snapshot is already in the HF cache
+    (the routine case) ``snapshot_download`` still emits three huggingface_hub
+    tqdm bars ("Fetching", "Download complete", "Reconstruction complete")
+    that scroll the rich progress display away. Suppression is therefore
+    scoped: when the snapshot is already local, ``disable_progress_bars()``
+    silences the three bars; when a real download happens (first run, cache
+    miss, ``HF_HUB_OFFLINE=1`` cache miss), the bar is left intact because a
+    multi-GB silent download looks like a hang. The offline invariant
+    (revision-pinned snapshot_download from a local path, invariant #4) is
+    untouched.
+
+    Fail-open: any exception from ``disable_progress_bars`` / the cache check
+    / ``snapshot_download`` propagates to the caller's except handler.
+    """
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.utils import (
+        disable_progress_bars,
+        enable_progress_bars,
+    )
+
+    from vemoizer.models import _model_cache_name, cache_dir
+
+    def _is_cached() -> bool:
+        """Cheap local-only cache probe (no network, no download).
+
+        The pinned-snapshot marker file (``refs/<revision>``) is written by
+        ``snapshot_download`` once the download completes. Its presence is a
+        sufficient (not necessary) condition for the snapshot being cached:
+        an absent marker always means "not cached" (the bar stays on, which
+        is safe — the download bar is shown); a present marker means the
+        snapshot is almost certainly cached (the bar is suppressed, which is
+        the goal). Fail-open: any exception returns False (bar stays on).
+        """
+        try:
+            marker = cache_dir() / _model_cache_name(repo_id) / "refs" / revision
+            return marker.is_file()
+        except Exception:  # noqa: BLE001 - fail-open (bar stays on)
+            return False
+
+    if _is_cached():
+        disable_progress_bars()
+        try:
+            return str(snapshot_download(repo_id, revision=revision))
+        finally:
+            enable_progress_bars()
+    return str(snapshot_download(repo_id, revision=revision))

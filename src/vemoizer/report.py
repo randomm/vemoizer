@@ -232,6 +232,16 @@ def render_report(
         source_part = f" ({glossary_source})" if glossary_source else ""
         sections.append(f"{label}: {hits} of {len(terms)}{source_part}")
 
+    # -- Languages (issue #147) ---------------------------------------
+    # Per-window language distribution (display only, invariant #3):
+    # e.g. "fi 29/30, en 1/30". Present only on meeting-profile runs
+    # where the whisper decode detected per-window languages; absent
+    # on dictation runs (no per-window detection) and empty decodes.
+    lang_summary = transcript.get("language_summary")
+    if isinstance(lang_summary, str) and lang_summary:
+        label = {"fi": "Kielet", "en": "Languages"}[lang]
+        sections.append(f"{label}: {lang_summary}")
+
     # -- Warnings -------------------------------------------------------
     warnings = transcript.get("warnings")
     warnings = [w for w in warnings] if isinstance(warnings, list) else []
