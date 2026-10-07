@@ -13,6 +13,7 @@ needed to satisfy the checker.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -111,10 +112,17 @@ class _HuggingfaceHubModule(ModuleType):
     """Typed stand-in for the ``huggingface_hub`` module (issue #141)."""
 
     snapshot_download: Callable[..., Any]
+    utils: Any
+    constants: Any
 
     def __init__(self, snapshot_download_fn: Callable[..., Any]) -> None:
         super().__init__("huggingface_hub")
         self.snapshot_download = snapshot_download_fn
+        self.utils = mock.Mock(
+            disable_progress_bars=lambda: contextlib.nullcontext(),
+            are_progress_bars_disabled=lambda: False,
+        )
+        self.constants = mock.Mock(HF_HUB_CACHE="/tmp/hf-cache")
 
 
 class _PyannoteParentModule(ModuleType):
@@ -165,11 +173,57 @@ def test_load_pipeline_lazy_imports_pyannote(monkeypatch):
 
     pipeline = _load_pipeline("cpu")
     assert pipeline is fake_pipeline_obj
-    fake_snapshot.assert_called_once_with(
-        DIARIZATION_REPO_ID,
-        revision=DIARIZATION_REVISION,
-        token="hf_test_token",
-    )
+    # Warm-cache silencing probe (local-only) + the real pinned call; the
+    # token is forwarded to the real call only, never to the local-only probe.
+    for call in fake_snapshot.call_args_list:
+        _, kwargs = call
+        assert kwargs.get("revision") == DIARIZATION_REVISION
+    real = [
+        c for c in fake_snapshot.call_args_list if not c.kwargs.get("local_files_only")
+    ]
+    assert len(real) == 1
+    assert real[0].args[0] == DIARIZATION_REPO_ID
+    assert real[0].kwargs.get("token") == "hf_test_token"
+
+
+def test_load_pipeline_warm_cache_silences_progress_bars(monkeypatch):
+    """The diarization loader resolves its weights through the shared models
+    seam (issue #147): a locally-complete snapshot is fetched silently, and
+    the gated-repo ``token`` is forwarded to the real download — the
+    local-only probe never carries it."""
+    from unittest.mock import patch
+
+    from huggingface_hub import utils as hf_utils
+
+    fake_pipeline_obj = mock.Mock()
+    fake_pipeline_cls = mock.Mock()
+    fake_pipeline_cls.from_pretrained.return_value = fake_pipeline_obj
+    _install_fake_modules(monkeypatch, fake_pipeline_cls)
+    monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+
+    seen: list[bool] = []
+    token_calls: list[str | None] = []
+
+    def fake_snapshot(repo_id, **kwargs):
+        if not kwargs.get("local_files_only"):
+            token_calls.append(kwargs.get("token"))
+        seen.append(hf_utils.are_progress_bars_disabled())
+        return "/fake/hf-cache/snapshot"
+
+    with (
+        patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot) as snap,
+        patch("vemoizer.model_cache.snapshot_locally_complete", return_value=True),
+    ):
+        pipeline = _load_pipeline("cpu")
+
+    assert pipeline is fake_pipeline_obj
+    assert not hf_utils.are_progress_bars_disabled()  # no leaked disable
+    # One call, inside the silencing switch (warm cache).
+    assert seen == [True]
+    # The token reached exactly the one real download call (the local-only
+    # probe does not carry it).
+    assert snap.call_count == 1
+    assert token_calls == ["hf_test_token"]
     # Pipeline loads from the local snapshot path, never the bare repo ID.
     fake_pipeline_cls.from_pretrained.assert_called_once_with("/fake/hf-cache/snapshot")
 

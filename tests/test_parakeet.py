@@ -15,6 +15,9 @@ Mock shapes mirror the REAL parakeet_mlx API surface (``AlignedResult`` has
 production matches test behavior.
 """
 
+from __future__ import annotations
+
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -65,6 +68,21 @@ def make_mock_alignment(text="hello world", sentences=None):
     else:
         aligned.sentences = sentences
     return aligned
+
+
+def _make_complete_cache(tmp_path: Path, repo_id: str, revision: str) -> None:
+    """Lay out a complete HF cache for *repo_id*@*revision* in *tmp_path*."""
+    from huggingface_hub.file_download import repo_folder_name
+
+    from vemoizer import model_cache
+
+    folder = tmp_path / repo_folder_name(repo_id=repo_id, repo_type="model")
+    snap = folder / "snapshots" / revision
+    snap.mkdir(parents=True)
+    for pattern in model_cache._expected_weights_for(repo_id):
+        weight = snap / pattern.replace("*", "weights")
+        weight.parent.mkdir(parents=True, exist_ok=True)
+        weight.write_bytes(b"0" * 16)
 
 
 def make_mock_model(generate_result=None):
@@ -178,10 +196,11 @@ class TestParakeetTranscriber:
         ):
             t.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32))
 
-    def test_load_model_revision_pinned(self):
+    def test_load_model_revision_pinned(self, tmp_path):
         """First transcribe() triggers a revision-pinned load from the local path."""
         t = ParakeetTranscriber()
-        local_path = MagicMock()  # a str-like path returned by snapshot_download
+        local_path = str(tmp_path)
+        _make_complete_cache(tmp_path, MODEL_ID, MODEL_REVISION)
         with (
             patch(
                 "huggingface_hub.snapshot_download",
@@ -193,14 +212,20 @@ class TestParakeetTranscriber:
             ) as fp,
         ):
             t.transcribe(np.array([], dtype=np.float32))
-            snap.assert_called_once_with(MODEL_ID, revision=MODEL_REVISION)
-            # Loaded from the returned local path, not the bare repo ID.
+            # The conservative probe no longer calls snapshot_download: exactly
+            # one real call per model.
+            for call in snap.call_args_list:
+                _, kwargs = call
+                assert kwargs.get("revision") == MODEL_REVISION
+            assert len(snap.call_args_list) == 1
+            # Loaded from the returned local path (stringified), not the bare repo ID.
             fp.assert_called_once_with(local_path)
         assert t.model is not None
 
-    def test_load_model_idempotent(self):
+    def test_load_model_idempotent(self, tmp_path):
         """_load_model loads exactly once across repeated transcribe calls."""
         t = ParakeetTranscriber()
+        _make_complete_cache(tmp_path, MODEL_ID, MODEL_REVISION)
         with (
             patch(
                 "huggingface_hub.snapshot_download",
@@ -213,6 +238,8 @@ class TestParakeetTranscriber:
         ):
             t.transcribe(np.array([], dtype=np.float32))
             t.transcribe(np.array([], dtype=np.float32))
+            # The probe no longer calls snapshot_download: exactly one real call,
+            # memoized after the first load.
             assert snap.call_count == 1
 
     def test_load_failure_leaves_model_none(self):
@@ -228,6 +255,38 @@ class TestParakeetTranscriber:
         ):
             t.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32))
         assert t.model is None
+
+    def test_warm_cache_load_silences_progress_bars(self, tmp_path, monkeypatch):
+        """A locally-complete snapshot is resolved silently on the decode A
+        load path (issue #147): no HF progress bars on a warm-cache run."""
+        from huggingface_hub import utils as hf_utils
+
+        from vemoizer import model_cache
+
+        model_cache.clear_memo()  # isolate from prior tests that may have memoized
+
+        t = ParakeetTranscriber()
+        _make_complete_cache(tmp_path, MODEL_ID, MODEL_REVISION)
+        # Point the probe at the tmp cache (the transcriber calls
+        # resolve_model_path with cache_dir=None, which reads
+        # huggingface_hub.constants.HF_HUB_CACHE at call time).
+        import huggingface_hub.constants as _hf_constants
+
+        monkeypatch.setattr(_hf_constants, "HF_HUB_CACHE", str(tmp_path))
+        seen: list[bool] = []
+
+        def fake_snapshot(repo_id, **kwargs):
+            seen.append(hf_utils.are_progress_bars_disabled())
+            return "mock-path"
+
+        with (
+            patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot),
+            patch("parakeet_mlx.from_pretrained", return_value=make_mock_model()),
+        ):
+            t.transcribe(np.zeros(0, dtype=np.float32))
+            assert not hf_utils.are_progress_bars_disabled()  # no leaked disable
+        # The probe no longer calls snapshot_download: exactly one silent call.
+        assert seen == [True]
 
     def test_transcribe_no_language_for_real_aligned_result_shape(self):
         """The real parakeet-mlx AlignedResult has no ``language`` attribute.

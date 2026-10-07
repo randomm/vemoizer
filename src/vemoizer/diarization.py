@@ -21,7 +21,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from .models import get_model
+from .models import get_model, resolve_model_path
 
 #: HuggingFace repo for the diarization weights (CC-BY-4.0, gated), read
 #: from the central registry so no repo/SHA pair lives in two places
@@ -108,12 +108,11 @@ def _load_pipeline(device: str) -> _DiarizePipeline:
     _disable_pyannote_telemetry()
 
     import torch
-    from huggingface_hub import snapshot_download
     from pyannote.audio import Pipeline
 
-    local_path = snapshot_download(
+    local_path = resolve_model_path(
         DIARIZATION_REPO_ID,
-        revision=DIARIZATION_REVISION,
+        DIARIZATION_REVISION,
         token=os.environ.get(_HF_TOKEN_ENV),
     )
     pipeline = Pipeline.from_pretrained(local_path)

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -169,7 +170,12 @@ def test_transcribe_empty_audio_short_circuits() -> None:
     assert mock.transcribe.call_count == 0
 
 
-def test_load_failure_latches_and_raises() -> None:
+def test_load_failure_latches_and_raises(tmp_path: Path) -> None:
+    from huggingface_hub.file_download import repo_folder_name
+
+    # Cold cache: no snapshot dir for the pinned revision.
+    folder = tmp_path / repo_folder_name(repo_id=MODEL_ID, repo_type="model")
+    folder.mkdir(parents=True)
     with patch(
         "huggingface_hub.snapshot_download", side_effect=RuntimeError("offline")
     ) as dl:
@@ -178,7 +184,52 @@ def test_load_failure_latches_and_raises() -> None:
             t.transcribe(_audio(1.0))
         with pytest.raises(RuntimeError):
             t.transcribe(_audio(1.0))
-    assert dl.call_count == 1  # latched
+    # The conservative probe (fails) latches the load; the real download
+    # (which also fails) is never retried.
+    assert dl.call_count == 1
+
+
+def test_warm_cache_load_silences_progress_bars(
+    tmp_path: Path,
+    _hermetic_hf_cache: Path,
+) -> None:
+    """A locally-complete snapshot is resolved silently (no HF bars) on the
+    meeting decode path — the load goes through the shared models seam
+    (issue #147), so a warm-cache `vemoizer meeting` run prints no
+    "Fetching" / "Download" / "Reconstruction" bars."""
+    from huggingface_hub import utils as hf_utils
+    from huggingface_hub.file_download import repo_folder_name
+
+    from vemoizer import model_cache
+
+    # Lay out a complete snapshot under the hermetic empty cache dir (the
+    # autouse fixture points the probe there via HF_HUB_CACHE).
+    folder = _hermetic_hf_cache / repo_folder_name(repo_id=MODEL_ID, repo_type="model")
+    snap = folder / "snapshots" / MODEL_REVISION
+    snap.mkdir(parents=True)
+    for pattern in model_cache._expected_weights_for(MODEL_ID):
+        weight = snap / pattern.replace("*", "weights")
+        weight.parent.mkdir(parents=True, exist_ok=True)
+        weight.write_bytes(b"0" * 16)
+
+    mock = _mock_whisper({})
+    seen: list[bool] = []
+
+    def fake_snapshot(repo_id, **kwargs):
+        seen.append(hf_utils.are_progress_bars_disabled())
+        return "/tmp/turbo"
+
+    with (
+        patch.dict("sys.modules", {"mlx_whisper": mock}),
+        patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot),
+    ):
+        t = WhisperTranscriber()
+        # Use 1 s of audio (non-empty) so the model actually loads.
+        result = t.transcribe(np.zeros(16_000, dtype=np.float32))
+        assert not hf_utils.are_progress_bars_disabled()  # no leaked disable
+    assert result["text"] == ""
+    # The probe no longer calls snapshot_download: exactly one silent call.
+    assert seen == [True]
 
 
 # -- slice_records_from_words --------------------------------------------
@@ -400,13 +451,14 @@ def test_decode_meeting_language_kwarg_pins_every_window() -> None:
 # -- verbose kwarg pinning (issue #105, lens MEDIUM) ------------------------
 
 
-def test_verbose_false_only_when_display_active(
+def test_verbose_false_always_passed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With an active (non-disabled) display, every window call receives
-    verbose=False (which enables the real tqdm bar in mlx-whisper 0.4.3 —
-    the shim intercepts it). With display=None or a disabled display,
-    NO verbose kwarg is passed (library default: no bar, no print)."""
+    """verbose=False is ALWAYS passed to mlx_whisper.transcribe (issue #147),
+    regardless of display state: it suppresses the per-window
+    "Detected language: X" print in all cases. With an active display the
+    shim intercepts the tqdm bar; with no display or a disabled display,
+    tqdm auto-suppresses in non-TTY contexts."""
     monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
     raw = _raw(
         [
@@ -420,9 +472,9 @@ def test_verbose_false_only_when_display_active(
         ]
     )
 
-    # Case 1: active display → verbose=False passed
     from vemoizer.progress import ProgressDisplay
 
+    # Case 1: active display → verbose=False
     display_on = ProgressDisplay(verbose=True)
     display_on.start()
     mock_on = _mock_whisper(raw)
@@ -435,12 +487,9 @@ def test_verbose_false_only_when_display_active(
         t._mlx_whisper = mock_on
         t.transcribe(_audio(60.0), display=display_on)
     display_on.close()
-    kwargs_on = mock_on.transcribe.call_args.kwargs
-    assert kwargs_on.get("verbose") is False, (
-        f"Expected verbose=False with active display, got {kwargs_on.get('verbose')}"
-    )
+    assert mock_on.transcribe.call_args.kwargs.get("verbose") is False
 
-    # Case 2: display=None → no verbose kwarg
+    # Case 2: display=None → verbose=False
     mock_off = _mock_whisper(raw)
     with (
         patch.dict("sys.modules", {"mlx_whisper": mock_off}),
@@ -450,12 +499,9 @@ def test_verbose_false_only_when_display_active(
         t._model_path = "/tmp/turbo"
         t._mlx_whisper = mock_off
         t.transcribe(_audio(60.0))
-    kwargs_off = mock_off.transcribe.call_args.kwargs
-    assert "verbose" not in kwargs_off, (
-        f"Expected no verbose kwarg with display=None, got {kwargs_off.get('verbose')}"
-    )
+    assert mock_off.transcribe.call_args.kwargs.get("verbose") is False
 
-    # Case 3: disabled display → no verbose kwarg
+    # Case 3: disabled display → verbose=False
     display_disabled = ProgressDisplay(verbose=False)  # disable=True
     mock_disabled = _mock_whisper(raw)
     with (
@@ -466,17 +512,13 @@ def test_verbose_false_only_when_display_active(
         t._model_path = "/tmp/turbo"
         t._mlx_whisper = mock_disabled
         t.transcribe(_audio(60.0), display=display_disabled)
-    kwargs_disabled = mock_disabled.transcribe.call_args.kwargs
-    assert "verbose" not in kwargs_disabled, (
-        f"Expected no verbose kwarg with disabled display, "
-        f"got {kwargs_disabled.get('verbose')}"
-    )
+    assert mock_disabled.transcribe.call_args.kwargs.get("verbose") is False
 
 
 def test_heal_redecode_never_gets_verbose_true() -> None:
     """The self-heal re-decode (condition_on_previous_text=False) must never
-    receive verbose=True. The heal path calls transcribe with display=None
-    (the heal lambdas do not pass a display), so no verbose kwarg is set."""
+    receive verbose=True. verbose=False is always passed (issue #147) —
+    it suppresses the per-window print and is safe for heal re-decodes."""
     raw = _raw(
         [
             _seg(
@@ -493,16 +535,14 @@ def test_heal_redecode_never_gets_verbose_true() -> None:
         t = WhisperTranscriber()
         t._model_path = "/tmp/turbo"
         t._mlx_whisper = mock
-        # Simulate the heal re-decode call
         t.transcribe(_audio(10.0), condition_on_previous_text=False)
 
     kwargs = mock.transcribe.call_args.kwargs
     assert kwargs.get("verbose") is not True, (
         f"heal re-decode must not get verbose=True, got {kwargs.get('verbose')}"
     )
-    # The heal path does not pass a display, so no verbose kwarg
-    assert "verbose" not in kwargs, (
-        f"Expected no verbose kwarg on heal path, got {kwargs.get('verbose')}"
+    assert kwargs.get("verbose") is False, (
+        f"Expected verbose=False on heal path, got {kwargs.get('verbose')}"
     )
 
 

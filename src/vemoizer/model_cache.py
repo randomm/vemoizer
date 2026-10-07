@@ -1,0 +1,332 @@
+"""Local-cache probe for revision-pinned HF snapshots (issue #147).
+
+The single place that decides whether a pinned snapshot is already
+resolvable from the local cache, so that :func:`vemoizer.models.resolve_model_path`
+can silence the warm-cache download (no HF progress bars) while leaving
+the cold-cache download with its progress bar.
+
+The probe is a **conservative, filesystem-only completeness check** (no
+``snapshot_download``, no network): it reports a snapshot as complete only
+when the pinned revision's snapshot directory exists and every expected
+weight pattern (per :data:`_EXPECTED_WEIGHT_FILES`, or the generic
+fallback) matches at least one non-empty file, every entry in the snapshot
+directory resolves to a real file, the repo's blob directory has no
+``*.incomplete`` file, and any sharded-weights index names only non-empty
+shards. Anything missing, partial, or unreadable counts as
+*not complete* — the caller then runs the real download with progress bars
+enabled (the safe direction: a silent multi-GB fetch would look like a
+hang).
+
+The result is memoized per ``(repo_id, revision, resolved storage root)``;
+only ``False`` results are cached (a failed probe is re-checked on the next
+call, and a failed real download never poisons the memo with ``True``).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path, PurePosixPath, PureWindowsPath
+
+__all__ = ["snapshot_locally_complete", "clear_memo"]
+
+#: Per-process memo of "pinned snapshot resolvable from local cache" probes,
+#: keyed by ``(repo_id, revision, resolved storage root)``. Only negative
+#: results are cached: a failed probe is re-checked on the next call, and a
+#: ``True`` is never cached across a failed real download. The resolved
+#: storage root is part of the key because the probe result depends on which
+#: cache directory is consulted, not only on the pinned repo/revision.
+_COMPLETE_SNAPSHOTS: dict[tuple[str, str, str], bool] = {}
+
+#: Minimal weight-file expectations per registry model, derived from the
+#: actual pinned snapshots in the local HF cache (the single source of
+#: truth for the registry: ``vemoizer.models.MODELS``):
+#:
+#: - parakeet: ``model.safetensors`` (MLX conversion of the Parakeet TDT)
+#: - canary: ``model.safetensors`` (mlx-q8 MLX conversion)
+#: - whisper-finnish / whisper-turbo: ``weights.safetensors`` (MLX
+#:   whisper conversions)
+#: - pyannote: subfolder-local PyTorch/NumPy blobs (``embedding/``,
+#:   ``plda/``, ``segmentation/``)
+#:
+#: ``*`` in a path is a one-level wildcard (``Path.glob``-style, single
+#: segment) so a partial snapshot carrying only ``embedding/`` does not
+#: count as complete for the pyannote model.
+_EXPECTED_WEIGHT_FILES: dict[str, tuple[str, ...]] = {
+    "mlx-community/parakeet-tdt-0.6b-v3": ("model.safetensors",),
+    "Mediform/canary-1b-v2-mlx-q8": ("model.safetensors",),
+    "FredrikKarlssonSpeech/whisper-large-finnish-v3-mlx": ("weights.safetensors",),
+    "mlx-community/whisper-large-v3-turbo": ("weights.safetensors",),
+    "pyannote/speaker-diarization-community-1": (
+        "embedding/*.bin",
+        "plda/*.npz",
+        "segmentation/*.bin",
+    ),
+}
+
+
+def clear_memo() -> None:
+    """Clear the per-process snapshot-completeness memo (for tests)."""
+    _COMPLETE_SNAPSHOTS.clear()
+
+
+def snapshot_locally_complete(
+    repo_id: str, revision: str, cache_dir: str | Path | None = None
+) -> bool:
+    """True when the pinned snapshot is provably complete in the local cache.
+
+    Conservative by design: any missing directory, missing weights file,
+    dangling symlink, or ``*.incomplete`` blob file means *not complete*
+    (the real download then runs with progress bars — the safe direction).
+    The probe touches only the local filesystem; it never talks to the hub.
+
+    Only ``False`` results are memoized, per
+    ``(repo_id, revision, resolved storage root)``; a ``True`` is re-verified
+    on every call (cheap filesystem reads) so a failed real download can
+    never leave a poisoned ``True`` behind.
+    """
+    key = (repo_id, revision, str(_storage_root(cache_dir)))
+    if _COMPLETE_SNAPSHOTS.get(key) is False:
+        return False
+    try:
+        complete = _snapshot_is_complete(repo_id, revision, cache_dir)
+    except Exception:  # noqa: BLE001 - any probe failure keeps the bars on
+        complete = False
+    if not complete:
+        _COMPLETE_SNAPSHOTS[key] = False
+    return complete
+
+
+def _storage_root(cache_dir: str | Path | None) -> Path:
+    """The cache directory under which ``models--<org>--<repo>`` lives.
+
+    When ``cache_dir`` is None this reads ``HF_HUB_CACHE`` (not ``HF_HOME``):
+    that is the root ``snapshot_download`` itself uses for its default
+    destination (``huggingface_hub.constants.HF_HUB_CACHE``, which defaults
+    to ``$HF_HOME/hub`` but is independently overridable), so the probe looks
+    exactly where a real download would land. ``models.cache_dir()`` (which
+    derives ``$HF_HOME/hub``) is only used for cache *size reporting* and
+    may differ from ``HF_HUB_CACHE`` if that env var is set independently; a
+    probe that used it could miss a warm cache (or, worse, see one the
+    download would never write).
+    """
+    if cache_dir is not None:
+        return Path(cache_dir)
+    from huggingface_hub import constants
+
+    return Path(constants.HF_HUB_CACHE)
+
+
+def _storage_folder(repo_id: str, cache_dir: str | Path | None) -> Path:
+    try:
+        from huggingface_hub.file_download import repo_folder_name
+    except ImportError:
+        # huggingface_hub is a hard dependency; this branch is only reached
+        # in tests where a fake module object is installed in sys.modules
+        # without a real file_download submodule.
+        parts = ["models", *repo_id.split("/")]
+        return _storage_root(cache_dir) / ("--".join(parts))
+
+    return _storage_root(cache_dir) / repo_folder_name(
+        repo_id=repo_id, repo_type="model"
+    )
+
+
+def _snapshot_is_complete(
+    repo_id: str, revision: str, cache_dir: str | Path | None
+) -> bool:
+    """Conservative filesystem completeness check for a pinned snapshot.
+
+    Complete only when ALL of the following hold:
+
+    1. the snapshot directory for the pinned revision SHA exists;
+    2. every expected weight pattern (per :data:`_EXPECTED_WEIGHT_FILES`, or
+       the generic fallback) matches at least one non-empty file — a partial
+       snapshot carrying only some of a model's weights is incomplete;
+    3. every entry in the snapshot directory (recursively) resolves —
+       no dangling symlink into ``blobs/``;
+    4. the repo's ``blobs`` directory has no ``*.incomplete`` file;
+    5. any sharded-weights index present (``*.safetensors.index.json`` /``
+       pytorch_model.bin.index.json``) names only shards that exist and are
+       non-empty.
+
+    All five checks are required: a missing snapshot dir (cold cache), a
+    partial snapshot (refs + config.json only or only some of a model's
+    weights), a dangling symlink, an interrupted download (``*.incomplete``
+    blob), a zero-byte weight file, or a missing shard all report *not
+    complete*.
+    """
+    folder = _storage_folder(repo_id, cache_dir)
+    snapshot_dir = folder / "snapshots" / revision
+    # Check 1: pinned snapshot dir must exist.
+    if not snapshot_dir.is_dir():
+        return False
+    # Check 4: no interrupted-download marker blobs.
+    blobs = folder / "blobs"
+    if blobs.is_dir() and any(blobs.glob("*.incomplete")):
+        return False
+    # Check 3: every entry in the snapshot tree must resolve.
+    if not _all_entries_resolve(snapshot_dir):
+        return False
+    # Check 2: every expected weight pattern must match a non-empty file.
+    if not _has_expected_weight_files(repo_id, snapshot_dir):
+        return False
+    # Check 5: sharded weights index, if present, names only real shards.
+    return _shards_complete(snapshot_dir)
+
+
+def _all_entries_resolve(snapshot_dir: Path) -> bool:
+    """True when every entry under *snapshot_dir* resolves to a real file.
+
+    A symlink whose target does not exist (e.g. a removed or still-being-
+    written blob) fails the check; the walk never follows symlinks (so a
+    symlink cycle cannot hang the probe).
+    """
+    for root, dirs, files in os.walk(snapshot_dir):
+        for name in (*dirs, *files):
+            entry = Path(root) / name
+            try:
+                if not entry.exists():
+                    return False
+            except OSError:  # pragma: no cover - race with a concurrent cleanup
+                return False
+    return True
+
+
+def _expected_weights_for(repo_id: str) -> tuple[str, ...]:
+    """Expected weight-file patterns for *repo_id*.
+
+    For the five registry models the patterns come from
+    :data:`_EXPECTED_WEIGHT_FILES`; for any other repo a generic set of
+    weight-file suffixes is used (so the probe works for future registry
+    additions without a per-model entry, while still requiring at least
+    one real weight file).
+    """
+    patterns = _EXPECTED_WEIGHT_FILES.get(repo_id)
+    if patterns is not None:
+        return patterns
+    return ("*.safetensors", "*.bin", "*.npz", "*.pt")
+
+
+def _has_expected_weight_files(repo_id: str, snapshot_dir: Path) -> bool:
+    """True when the snapshot carries the model's expected weights.
+
+    For the five registry models (in :data:`_EXPECTED_WEIGHT_FILES`) every
+    expected pattern must match at least one non-empty file — a partial
+    snapshot (e.g. pyannote carrying only ``embedding/``) is incomplete.
+    For any other repo the generic fallback requires at least one non-empty
+    weights file (a ``st_size > 0`` match of any weight suffix).
+    """
+    patterns = _expected_weights_for(repo_id)
+    if repo_id in _EXPECTED_WEIGHT_FILES:
+        # Explicit table: every expected pattern must match a non-empty file.
+        return all(_any_nonempty_match(snapshot_dir, p) for p in patterns)
+    # Generic fallback: at least one non-empty weights file.
+    return any(_any_nonempty_match(snapshot_dir, p) for p in patterns)
+
+
+def _any_nonempty_match(snapshot_dir: Path, pattern: str) -> bool:
+    """True when *pattern* matches at least one non-empty, resolvable file.
+
+    ``embedding/*.bin`` matches any single segment under ``embedding/``;
+    a plain name matches that file only. A dangling symlink or a zero-byte
+    file does not count.
+    """
+    segments = pattern.split("/")
+    for i, seg in enumerate(segments):
+        if "*" in seg:
+            parent = snapshot_dir
+            if i > 0:
+                parent = parent.joinpath(*segments[:i])
+            return _any_glob_nonempty(parent, seg)
+    # No wildcard segment: the pattern is a plain path under the snapshot.
+    candidate = snapshot_dir.joinpath(*segments)
+    try:
+        return candidate.is_file() and candidate.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _any_glob_nonempty(parent: Path, glob_seg: str) -> bool:
+    """True when *glob_seg* matches at least one non-empty file under *parent*."""
+    if not parent.is_dir():
+        return False
+    for path in parent.glob(glob_seg):
+        try:
+            if path.is_file() and path.stat().st_size > 0:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _shards_complete(snapshot_dir: Path) -> bool:
+    """True when every shard named by a sharded-weights index exists non-empty.
+
+    When the snapshot carries a ``*.safetensors.index.json`` or
+    ``pytorch_model.bin.index.json``, every file named in its ``weight_map``
+    values must exist under the snapshot and be non-empty. When no index is
+    present this check is a no-op (the explicit-pattern / generic-fallback
+    checks in :func:`_has_expected_weight_files` already apply).
+    """
+    for index in snapshot_dir.glob("*.safetensors.index.json"):
+        if not _index_shards_complete(snapshot_dir, index):
+            return False
+    for index in snapshot_dir.glob("pytorch_model.bin.index.json"):
+        if not _index_shards_complete(snapshot_dir, index):
+            return False
+    return True
+
+
+def _index_shards_complete(snapshot_dir: Path, index: Path) -> bool:
+    """True when every shard named by *index* exists non-empty under *snapshot_dir*.
+
+    Shard names are validated BY NAME before any filesystem touch: an
+    absolute name (``Path.__truediv__`` drops the base) or a ``..`` name
+    would make the probe stat files OUTSIDE the snapshot dir — a false
+    'complete' could silence a real download. Legitimate relative subfolder
+    names (``sub/model-00001-of-00002.safetensors``) stay allowed. NOTE:
+    containment is deliberately checked by name, not via
+    ``Path.resolve()`` — real HF caches store blobs in a sibling ``blobs/``
+    dir and the snapshot entries are symlinks into it, so resolved paths
+    legitimately live outside the snapshot dir.
+    """
+    try:
+        data = json.loads(index.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    weight_map = data.get("weight_map")
+    if not isinstance(weight_map, dict):
+        return False
+    for shard_name in weight_map.values():
+        if not _is_safe_shard_name(shard_name):
+            return False
+        shard = snapshot_dir / shard_name
+        try:
+            if not shard.is_file() or shard.stat().st_size <= 0:
+                return False
+        except OSError:
+            return False
+    return True
+
+
+def _is_safe_shard_name(name: object) -> bool:
+    """True when *name* is a relative, traversal-free POSIX shard path.
+
+    Rejects by name (never touching the filesystem): non-``str`` values,
+    absolute names (drive, UNC, or plain POSIX absolute — checked via
+    ``PurePosixPath`` AND ``PureWindowsPath`` so Windows forms are rejected
+    even on macOS), ``..`` parts, NUL bytes, and backslash escape tricks
+    (on POSIX, ``\\`` is a legal filename character and is NOT a path
+    separator, so a name like ``sub\\x.safetensors`` would resolve into a
+    subfolder — reject it to keep the check platform-independent).
+    """
+    if not isinstance(name, str) or not name:
+        return False
+    if "\\" in name or "\x00" in name:
+        return False
+    posix = PurePosixPath(name)
+    windows = PureWindowsPath(name)
+    if posix.is_absolute() or windows.is_absolute():
+        return False
+    return ".." not in posix.parts and ".." not in windows.parts

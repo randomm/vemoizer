@@ -47,7 +47,7 @@ from typing import Any
 import mlx.core as mx
 import numpy as np
 
-from .models import get_model
+from .models import get_model, resolve_model_path
 from .spans import Span
 from .transcriber import TranscriptionResult
 
@@ -183,12 +183,8 @@ class WhisperReDecodeTranscriber:
         start = time.perf_counter()
         try:
             import mlx_whisper
-            from huggingface_hub import snapshot_download
 
-            local_path = snapshot_download(
-                MODEL_ID,
-                revision=MODEL_REVISION,
-            )
+            local_path = resolve_model_path(MODEL_ID, MODEL_REVISION)
             self._model_path = local_path
             self._mlx_whisper = mlx_whisper
             self._loaded = True

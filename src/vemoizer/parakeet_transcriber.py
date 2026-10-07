@@ -22,6 +22,7 @@ from typing import Any
 import mlx.core as mx
 import numpy as np
 
+from .models import resolve_model_path
 from .transcriber import TranscriptionResult
 
 logger = logging.getLogger(__name__)
@@ -62,14 +63,10 @@ class ParakeetTranscriber:
             logger.info("Loading Parakeet model: %s@%s", MODEL_ID, MODEL_REVISION)
             start = time.time()
             try:
-                from huggingface_hub import snapshot_download
                 from parakeet_mlx import from_pretrained
 
                 # Revision-pinned: never load from the bare repo ID (invariant #4).
-                local_path = snapshot_download(
-                    MODEL_ID,
-                    revision=MODEL_REVISION,
-                )
+                local_path = resolve_model_path(MODEL_ID, MODEL_REVISION)
                 self.model = from_pretrained(local_path)
             except Exception as e:  # noqa: BLE001 - logged; model-load guard
                 logger.error("Failed to load Parakeet model: %s", e)

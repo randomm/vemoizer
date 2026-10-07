@@ -45,10 +45,12 @@ from typing import TYPE_CHECKING, Any
 import mlx.core as mx
 import numpy as np
 
-from .echo_filter import echo_vocabulary, filter_echo_segments
-from .models import get_model
+from .echo_filter import echo_vocabulary
+from .lang_filter import filter_language_lines
+from .models import get_model, resolve_model_path
 from .selfheal import heal
 from .transcriber import TranscriptionResult
+from .whisper_windows import process_window_raws
 
 if TYPE_CHECKING:
     from .progress import ProgressDisplay
@@ -115,10 +117,9 @@ class WhisperTranscriber:
             start = time.time()
             try:
                 import mlx_whisper
-                from huggingface_hub import snapshot_download
 
                 # Revision-pinned: never load from the bare repo ID (invariant #4).
-                self._model_path = snapshot_download(MODEL_ID, revision=MODEL_REVISION)
+                self._model_path = resolve_model_path(MODEL_ID, MODEL_REVISION)
                 self._mlx_whisper = mlx_whisper
                 # Marker: the real weights live in mlx-whisper's ModelHolder
                 # cache once the first transcribe runs.
@@ -183,17 +184,16 @@ class WhisperTranscriber:
             "hallucination_silence_threshold": 2.0,
             "initial_prompt": self._initial_prompt,
         }
-        # In mlx-whisper 0.4.3 verbose=False ENABLES the real tqdm bar and
-        # SUPPRESSES the per-segment print (inverted vs upstream whisper);
-        # the contract test in tests/test_mlx_whisper_contract.py pins
-        # both. Under an active display the shim owns the bar, so the
-        # effective verbose is forced to False (even over a caller's
-        # verbose=True) — the per-segment print must never go to stdout
-        # while the display is live. With no active display the caller's
-        # own verbose (or the library default, None) is left intact.
+        # verbose=False (issue #147): in mlx-whisper 0.4.3 this ENABLES the
+        # tqdm bar (the shim intercepts it when a display is active; tqdm
+        # auto-suppresses in non-TTY contexts) and SUPPRESSES the per-segment
+        # print. It does NOT suppress the per-window "Detected language: X"
+        # line (``if verbose is not None:`` is True for False), so that line
+        # is filtered by :func:`filter_language_lines` around the decode loop
+        # below. The contract test in tests/test_mlx_whisper_contract.py pins
+        # the inverted verbose semantics.
         options.update(kwargs)
-        if display is not None and not display.disable:
-            options["verbose"] = False
+        options["verbose"] = False
 
         window_frames = int(WINDOW_SECONDS * SAMPLE_RATE)
         raws: list[dict[str, Any]] = []
@@ -225,7 +225,10 @@ class WhisperTranscriber:
         # Per-window protocol: declare each main-loop window so the shim's
         # factory hands its bar to the display (any other bar created before
         # the next mark is a re-entrant call and gets a no-op bar instead).
-        with shim_cm:
+        # filter_language_lines (issue #147) suppresses the per-window
+        # "Detected language: X" print from stdout; it is scoped to the
+        # decode loop and restores sys.stdout on every exit path.
+        with shim_cm, filter_language_lines():
             for index, offset in enumerate(range(0, len(audio), window_frames)):
                 mark_window(offset / SAMPLE_RATE)
                 raw = self._mlx_whisper.transcribe(
@@ -245,94 +248,13 @@ class WhisperTranscriber:
         transcribe_time = time.time() - start
         audio_duration = len(audio) / SAMPLE_RATE
 
-        words: list[dict[str, Any]] = []
-        segments: list[dict[str, Any]] = []
-        all_window_texts: list[str] = []  # accumulate text across all windows
-        for index, raw in enumerate(raws):
-            offset_s = index * WINDOW_SECONDS
-            window_texts: list[str] = []  # per-window text (issue #109)
-            # Echo backstop (issue #109): whisper can continue the glossary
-            # prompt instead of transcribing. The filter_echo_segments call
-            # below (the single source of truth for the strict drop) returns
-            # the segments to keep and the words on the recording timeline;
-            # this loop only builds the per-window text and the output
-            # segments/words entries from the kept segments.
-            kept_segments, kept_words = filter_echo_segments(
-                raw.get("segments") or [], offset_s, self._echo_terms
-            )
-            # A non-empty window that decoded to zero segments (malformed
-            # payload, or the model hearing nothing) would otherwise flow
-            # into the fail-open path in decode_meeting indistinguishable
-            # from a model failure; make the degradation observable.
-            if not raw.get("segments"):
-                # Per-window, this fires once a window's worth of audio
-                # produced nothing; a long mostly-silent recording would
-                # spam a warning per window, so the routine case stays at
-                # debug (a fully empty decode still surfaces through the
-                # fail-open path in decode_meeting).
-                logger.debug(
-                    "whisper window %d (offset %.0fs) returned no segments; "
-                    "transcript may be incomplete",
-                    index,
-                    offset_s,
-                )
-            # Build the per-segment entries from the kept segments. The
-            # words list is taken wholesale from kept_words (already shifted
-            # onto the recording timeline by the filter); the per-segment
-            # confidence keys are copied from the original segment dicts.
-            for seg in kept_segments:
-                text = str(seg.get("text", "")).strip()
-                if not text:
-                    continue
-                window_texts.append(text)
-                entry: dict[str, Any] = {
-                    "start": float(seg.get("start", 0.0)) + offset_s,
-                    "end": float(seg.get("end", 0.0)) + offset_s,
-                    "text": text,
-                }
-                # Per-segment confidence feeds the suspect-region flagging;
-                # discarding it (the old behaviour) threw away whisper's own
-                # signal about hallucination and garble.
-                for key in ("avg_logprob", "no_speech_prob", "compression_ratio"):
-                    if seg.get(key) is not None:
-                        entry[key] = float(seg[key])
-                segments.append(entry)
-            # Words come from the filter's kept_words (already on the
-            # recording timeline); no per-segment word loop needed here.
-            words.extend(kept_words)
-            # Per-window text: the filtered segments' text. Fallback to
-            # raw["text"] only when the window has NO segments (malformed
-            # payload shape the debug log above anticipates). When segments
-            # existed but were ALL filtered as echoes, window_texts is empty
-            # and we do NOT fall back — the echo must not resurrect in the
-            # headline text (issue #109, the all-echo window shape).
-            if not window_texts and not raw.get("segments"):
-                window_texts.append(str(raw.get("text", "")).strip())
-            all_window_texts.extend(window_texts)
-
-        result: TranscriptionResult = {
-            # Built from all windows' filtered segments (with the raw["text"]
-            # fallback above for zero-segment windows), not raw["text"] alone
-            # — the raw string contains echo-segment text that was already
-            # dropped.
-            "text": " ".join(t for t in all_window_texts if t).strip(),
-            "words": words,
-            "segments": segments,
-            "transcribe_time": transcribe_time,
-            "audio_duration": audio_duration,
-            "rtf": transcribe_time / audio_duration if audio_duration > 0 else 0.0,
-        }
-        # Language detection is redundant across windows (same model, same
-        # audio); take the first non-empty one.
-        languages = {str(raw["language"]) for raw in raws if raw.get("language")}
-        if len(languages) == 1:
-            result["language"] = next(iter(languages))
-        elif languages:
-            logger.warning(
-                "window language disagreement %s; not attributing a run "
-                "language (per-slice language from decode B wins downstream)",
-                sorted(languages),
-            )
+        result: TranscriptionResult = process_window_raws(
+            raws,
+            offset_s_per_window=WINDOW_SECONDS,
+            echo_terms=self._echo_terms,
+            transcribe_time=transcribe_time,
+            audio_duration=audio_duration,
+        )
         return result
 
     def cleanup(self) -> None:
@@ -443,11 +365,14 @@ def decode_meeting(
             list(result.get("words") or []), slices, language=result.get("language")
         )
         rtf = result.get("rtf") or 0.0
+        lang_summary = result.get("language_summary")
+        lang_suffix = f", languages: {lang_summary}" if lang_summary else ""
         logger.info(
-            "decode A (whisper): %d chars, %d words, %.1fx realtime",
+            "decode A (whisper): %d chars, %d words, %.1fx realtime%s",
             len(result.get("text", "")),
             len(result.get("words") or []),
             1.0 / rtf if rtf else 0.0,
+            lang_suffix,
         )
         return result
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary

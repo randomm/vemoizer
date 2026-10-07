@@ -102,6 +102,14 @@ def test_transcribe_file_real_glossary_at_terms_end_to_end(
     _patch_llm_stage(monkeypatch, seen)
     cfg = _llm_config(tmp_path)
 
+    # The transcribe_file call with profile="meeting" runs the real
+    # preflight (which calls models_cached -> cache_size) and may trigger
+    # a model_cache probe that memoizes a negative result against the real
+    # HF cache. Clear the memo so it does not leak into subsequent tests.
+    import vemoizer.model_cache as _mc
+
+    _mc.clear_memo()
+
     result = pipeline.transcribe_file(
         "/nonexistent.m4a",
         config_path=str(cfg),
