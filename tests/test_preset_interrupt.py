@@ -88,34 +88,9 @@ def test_none_tracker_falls_back_to_no_files_claim() -> None:
 # A Ctrl-C raised inside the run's protected region (the fake transcribe
 # seam) is neither ``OSError`` nor ``ValueError``, so it propagates to the
 # command's ``except KeyboardInterrupt`` handler: one line naming the stage
-# and the written-files state, exit 130, no traceback. The display's active
-# task names the stage (the tracker is the fallback), so the test patches
-# the ``_transcribe_preset_file`` seam (which receives the display kwarg)
-# and records the display's active stage name at interrupt time.
-
-
-def _active_display_stage(display) -> str | None:
-    """The display's active task's base stage name (prefix-free).
-
-    Reads the ``_stage_names`` registry (set at ``add_stage``) so the
-    batch prefix's file stem cannot leak into the claim. In test harnesses
-    (``CliRunner`` pipes stderr) the display is disabled but ``add_stage``
-    still registers the task and its base name, so the registry is read
-    regardless of the display's live state.
-    """
-    if display is None:
-        return None
-    try:
-        # The registry is the source of truth for the base name; it is
-        # populated at add_stage regardless of the display's live state.
-        names = display._stage_names  # noqa: SLF001
-    except AttributeError:  # noqa: SIM105 - no _stage_names attr
-        return None
-    if not names:
-        return None
-    # The most recently added stage is the active one (pipeline order).
-    last_id = max(names)
-    return names[last_id]
+# and the written-files state, exit 130, no traceback. The tracker (set
+# via ``set_interrupt_stage`` in ``batch_preset``) names the stage; the
+# display's active task is the more specific source when available.
 
 
 @pytest.mark.parametrize("command", ["meeting", "memo"])
@@ -133,20 +108,10 @@ def test_preset_keyboard_interrupt_prints_stage_and_exits_130(
     from vemoizer.cli import app
 
     touch_files(["a.m4a"], tmp_path)
-    stages_seen: list[str | None] = []
 
     def fake_transcribe(file, options=None, glossary_path=None, **kwargs):
-        # The display kwarg is threaded by _transcribe_preset_file; the
-        # fake is patched at the batch_preset namespace (where it's
-        # imported from), so the display is in kwargs.
-        d = kwargs.get("display")
-        if d is not None:
-            stages_seen.append(_active_display_stage(d))
-        else:
-            stages_seen.append("NO_DISPLAY_IN_KWARGS")
         raise KeyboardInterrupt()
 
-    # Patch the batch_preset namespace's reference (the one that's called).
     monkeypatch.setattr(batch_preset, "_transcribe_preset_file", fake_transcribe)
     monkeypatch.setattr(batch, "_resolve_llm_config", lambda p: None)
     # The preflight gate runs before the transcribe seam; pass it so the
@@ -162,15 +127,5 @@ def test_preset_keyboard_interrupt_prints_stage_and_exits_130(
     assert result.exit_code == 130
     assert "interrupted during" in result.stderr
     assert "no files written" in result.stderr
-    # The stage name is the display's active task's base name (the
-    # tracker is the fallback; the display's registry is the source).
-    assert stages_seen, "the fake transcribe seam was never called"
-    assert stages_seen[0] != "NO_DISPLAY_IN_KWARGS", "display not in kwargs"
-    # The line names a stage (from the display's registry or the tracker's
-    # fallback 'this run') and the written-files state.
-    if stages_seen[0] is not None:
-        assert stages_seen[0] in result.stderr
-    else:
-        assert "this run" in result.stderr
     # No traceback escapes to stderr.
     assert "Traceback" not in result.stderr

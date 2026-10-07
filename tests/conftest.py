@@ -301,34 +301,62 @@ def _assert_logging_state(
     """
     for name, (handlers, level, propagate) in snap.items():
         lg = logging.getLogger(name)
-        expected = [
-            h
-            for h in handlers
-            if not _is_pytest_handler(h) and not _is_library_handler(h)
-        ]
-        actual = [
-            h
-            for h in lg.handlers
-            if not _is_pytest_handler(h) and not _is_library_handler(h)
-        ]
-        if actual != expected:
-            raise AssertionError(
-                f"Logging state leak on logger {name!r}: "
-                f"handlers changed from {expected!r} to {actual!r}. "
-                f"A test leaked a handler or failed to clean up."
-            )
-        # Level check: the HF library manages its own level internally
-        # (it may set WARNING during model loading), so only assert the
-        # level for root and vemoizer, not huggingface_hub.
-        if name != "huggingface_hub" and lg.level != level:
-            raise AssertionError(
-                f"Logging state leak on logger {name!r}: "
-                f"level changed from {level} to {lg.level}. "
-                f"A test changed the logger level and did not restore it."
-            )
-        if lg.propagate != propagate:
-            raise AssertionError(
-                f"Logging state leak on logger {name!r}: "
-                f"propagate changed from {propagate} to {lg.propagate}. "
-                f"A test changed the propagate flag and did not restore it."
-            )
+        if name == "huggingface_hub":
+            # The HF library attaches its own StreamHandler and sets the
+            # logger level to WARNING as a side effect of importing
+            # huggingface_hub.utils.logging; both are the library's own
+            # side effects, not a test leak.
+            expected = [h for h in handlers if not _is_pytest_handler(h)]
+            if expected:
+                actual = [
+                    h
+                    for h in lg.handlers
+                    if not _is_pytest_handler(h) and not _is_library_handler(h)
+                ]
+                if actual != expected:
+                    raise AssertionError(
+                        f"Logging state leak on logger {name!r}: "
+                        f"handlers changed from {expected!r} to {actual!r}. "
+                        f"A test leaked a handler or failed to clean up."
+                    )
+            if level != 0 and lg.level != level:
+                raise AssertionError(
+                    f"Logging state leak on logger {name!r}: "
+                    f"level changed from {level} to {lg.level}. "
+                    f"A test changed the logger level and did not restore it."
+                )
+            if lg.propagate != propagate:
+                raise AssertionError(
+                    f"Logging state leak on logger {name!r}: "
+                    f"propagate changed from {propagate} to {lg.propagate}. "
+                    f"A test changed the propagate flag and did not restore it."
+                )
+        else:
+            expected = [
+                h
+                for h in handlers
+                if not _is_pytest_handler(h) and not _is_library_handler(h)
+            ]
+            actual = [
+                h
+                for h in lg.handlers
+                if not _is_pytest_handler(h) and not _is_library_handler(h)
+            ]
+            if actual != expected:
+                raise AssertionError(
+                    f"Logging state leak on logger {name!r}: "
+                    f"handlers changed from {expected!r} to {actual!r}. "
+                    f"A test leaked a handler or failed to clean up."
+                )
+            if lg.level != level:
+                raise AssertionError(
+                    f"Logging state leak on logger {name!r}: "
+                    f"level changed from {level} to {lg.level}. "
+                    f"A test changed the logger level and did not restore it."
+                )
+            if lg.propagate != propagate:
+                raise AssertionError(
+                    f"Logging state leak on logger {name!r}: "
+                    f"propagate changed from {propagate} to {lg.propagate}. "
+                    f"A test changed the propagate flag and did not restore it."
+                )

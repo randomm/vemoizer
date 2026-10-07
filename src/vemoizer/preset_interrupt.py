@@ -26,6 +26,7 @@ __all__ = [
     "begin_interrupt_tracking",
     "handle_interrupt",
     "note_written_files",
+    "set_interrupt_stage",
 ]
 
 #: Matches a live decode task's batch prefix (``[1/3] stem · decode``);
@@ -83,6 +84,17 @@ def note_written_files(tracker: InterruptTracker | None, paths: list[Any]) -> No
     state. ``None`` (a run with no tracker) is a no-op."""
     if tracker is not None:
         tracker.note_written_files(paths)
+
+
+def set_interrupt_stage(tracker: InterruptTracker | None, stage: str) -> None:
+    """Name the stage the run is entering (called at the stage's seam).
+
+    The public seam for batch_preset and other modules that need to name
+    the active stage without reaching into the tracker's private API.
+    ``None`` (a run with no tracker) is a no-op.
+    """
+    if tracker is not None:
+        tracker.set_stage(stage)
 
 
 def handle_interrupt(
