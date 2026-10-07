@@ -393,6 +393,8 @@ def transcribe_file(
     if diarize:
         logger.info("diarization: starting")
         diarize_start = time.monotonic()
+        if tracker is not None:
+            tracker.set_stage("diarize")
         diarize_task: TaskID | None = (
             display.add_stage("diarize") if display is not None else None
         )
@@ -405,6 +407,14 @@ def transcribe_file(
             len(speaker_segments) if speaker_segments is not None else "no",
             format_duration(time.monotonic() - diarize_start),
         )
+
+    # Set the tracker stage to 'repair' before the LLM tail (the repair
+    # stage is the next stage that will run; notes follows within the
+    # tail, and llm_tail._run_notes sets the tracker to 'notes' itself).
+    if llm_config is not None and repair and tracker is not None:
+        tracker.set_stage("repair")
+    if llm_config is not None and not repair and tracker is not None:
+        tracker.set_stage("notes")
 
     # Fail loud (issue #73/#78): decode A's total failure (None) must not
     # look like a successful empty transcript — an "error" key is the only

@@ -8,8 +8,9 @@ unambiguous: the run is done and its files are on disk.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest import mock
 
 import pytest
@@ -148,7 +149,8 @@ def _run_preset_plain(
 
     def fake_transcribe(file, options=None, glossary_path=None, **kwargs):
         if callable(result_per_file):
-            return result_per_file(file)
+            fn = cast(Callable[[Any], Any], result_per_file)
+            return fn(file)
         return result_per_file
 
     monkeypatch.setattr(batch_preset_module, "_transcribe_preset_file", fake_transcribe)

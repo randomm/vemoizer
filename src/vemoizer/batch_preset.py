@@ -188,7 +188,7 @@ def _run_preset_groups(
         and exit_code == 0
         and len(written) == len(files) * len(PRESET_FORMATS)
     ):
-        _print_final_line(len(written))
+        _print_final_line(len(written), quiet=quiet)
     # End-of-meeting naming hook (issue #95): the prompt is the last
     # interactive output; the hook never alters the run's exit code.
     if command == "meeting":
@@ -373,6 +373,7 @@ def run_preset(
                         effective_glossary,
                         notify_failed=True,
                         display=display,
+                        tracker=tracker,
                     )
                     if result is None:
                         exit_code = 1

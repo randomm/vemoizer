@@ -34,6 +34,7 @@ def _transcribe_preset_file(
     glossary_path: str | None,
     notify_failed: bool = False,
     display: ProgressDisplay | None = None,
+    tracker: Any = None,
 ) -> dict[str, Any] | None:
     """One guarded preset transcribe (the per-file loop's fail-loud core).
 
@@ -65,6 +66,7 @@ def _transcribe_preset_file(
             display=display,
             language=None if options.language == "auto" else options.language,
             preprocess=options.preprocess,
+            tracker=tracker,
         )
     except (KeyboardInterrupt, SystemExit):
         raise
