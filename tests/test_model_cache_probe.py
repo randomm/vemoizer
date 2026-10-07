@@ -47,6 +47,8 @@ def _blobs_dir(tmp_path: Path, repo_id: str = REPO_ID) -> Path:
 def _write_file(dirpath: Path, name: str, size: int = 16) -> Path:
     path = dirpath / name
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        path.unlink()  # a re-write must produce a *new* file (size > 0)
     path.write_bytes(b"0" * size)
     return path
 
@@ -188,7 +190,7 @@ def test_true_is_not_memoized_so_download_failure_cannot_poison(tmp_path: Path) 
 
 
 def test_clear_memo_forgets_negatives() -> None:
-    model_cache._COMPLETE_SNAPSHOTS[("x/y", "z")] = False
+    model_cache._COMPLETE_SNAPSHOTS[("x/y", "z", "/some/cache")] = False
     model_cache.clear_memo()
     assert model_cache._COMPLETE_SNAPSHOTS == {}
 
@@ -305,3 +307,198 @@ def test_offline_mode_error_surfaces_same_message_as_main(tmp_path: Path) -> Non
     assert "not cached" in msg or "not in the local cache" in msg
     # The message must NOT be a generic "failed to download" fallback.
     assert "failed to download model" not in msg
+
+
+# -- adversarial false-positive hardening (FIX 2) -----------------------------
+# The probe must fail toward KEEPING the bars. Each layout below was a false
+# positive (counted complete) that would have silenced a real multi-GB
+# download; every one must now report incomplete.
+
+
+def _py_snapshot(
+    tmp_path: Path, repo_id: str, revision: str, parts: dict[str, int] | list[str]
+) -> Path:
+    """A pinned pyannote-layout snapshot for *repo_id* built from *parts*.
+
+    *parts* maps a snapshot-relative path to a byte size (a dict) or lists
+    bare file names at the snapshot root. Each call uses a distinct repo so
+    its folder is created once and the negative memo never poisons it.
+    """
+    snap = _snapshot_dir(tmp_path, revision, repo_id)
+    if isinstance(parts, dict):
+        for rel, size in parts.items():
+            _write_file(snap, rel, size)
+    else:
+        for name in parts:
+            _write_file(snap, name)
+    return snap
+
+
+def _probe_fresh(repo_id: str, revision: str, cache_dir: Path) -> bool:
+    """Probe with a cleared memo (the negative memo is per-process and would
+    otherwise poison a re-probe after the cache state changes in-test)."""
+    model_cache.clear_memo()
+    return _probe(repo_id, revision, cache_dir)
+
+
+def test_pyannote_partial_snapshot_is_incomplete(tmp_path: Path) -> None:
+    """(a) ``any()`` over the pyannote patterns is a false positive: a
+    snapshot carrying only ``embedding/`` (or only ``plda/``) must NOT count
+    as complete — every expected pattern must match a non-empty file."""
+    # The in-table pyannote model: a partial snapshot carrying only
+    # embedding/ (the old ``any()`` accepted this) is incomplete.
+    py_repo = "pyannote/speaker-diarization-community-1"
+    _py_snapshot(
+        tmp_path, py_repo, PINNED_REVISION, {"embedding/pytorch_model.bin": 16}
+    )
+    assert _probe_fresh(py_repo, PINNED_REVISION, tmp_path) is False
+    # A complete snapshot (all three subfolders present, the real layout)
+    # for a fresh in-table repo is complete (a fresh cache dir, fresh memo).
+    full_cache = tmp_path / "full-cache"
+    full_cache.mkdir()
+    _py_snapshot(
+        full_cache,
+        py_repo,
+        PINNED_REVISION,
+        {
+            "embedding/pytorch_model.bin": 16,
+            "plda/plda.npz": 16,
+            "segmentation/pytorch_model.bin": 16,
+        },
+    )
+    assert _probe_fresh(py_repo, PINNED_REVISION, full_cache) is True
+
+
+def test_zero_byte_weight_file_is_incomplete(tmp_path: Path) -> None:
+    """(b) a zero-byte weights file must not count: require ``st_size > 0``."""
+    _snapshot_dir(tmp_path, PINNED_REVISION)
+    _write_file(
+        _folder(tmp_path, REPO_ID) / "snapshots" / PINNED_REVISION,
+        "model.safetensors",
+        size=0,
+    )
+    assert _probe_fresh(REPO_ID, PINNED_REVISION, tmp_path) is False
+    # A non-empty weights file is complete (distinct repo).
+    _snapshot_dir(tmp_path, PINNED_REVISION, "org/nonempty")
+    _write_file(
+        _folder(tmp_path, "org/nonempty") / "snapshots" / PINNED_REVISION,
+        "model.safetensors",
+        size=16,
+    )
+    assert _probe_fresh("org/nonempty", PINNED_REVISION, tmp_path) is True
+
+
+def test_sharded_weights_all_shards_must_exist_nonempty(tmp_path: Path) -> None:
+    """(c) a ``*.safetensors.index.json`` names every shard in its
+    ``weight_map``: all listed shards must exist and be non-empty."""
+    import json as _json
+
+    # One shard named by the index; present non-empty -> complete.
+    repo = "org/sharded"
+    snap = _snapshot_dir(tmp_path, PINNED_REVISION, repo)
+    _write_file(snap, "model-00001-of-00002.safetensors", size=16)
+    (snap / "model.safetensors.index.json").write_text(
+        _json.dumps({"weight_map": {"w1": "model-00001-of-00002.safetensors"}})
+    )
+    assert _probe_fresh(repo, PINNED_REVISION, tmp_path) is True
+
+    # A named shard missing -> incomplete (distinct repo).
+    repo2 = "org/sharded-missing"
+    snap2 = _snapshot_dir(tmp_path, PINNED_REVISION, repo2)
+    _write_file(snap2, "model-00001-of-00002.safetensors", size=16)
+    (snap2 / "model.safetensors.index.json").write_text(
+        _json.dumps(
+            {
+                "weight_map": {
+                    "w1": "model-00001-of-00002.safetensors",
+                    "w2": "model-00002-of-00002.safetensors",
+                }
+            }
+        )
+    )
+    assert _probe_fresh(repo2, PINNED_REVISION, tmp_path) is False
+
+    # A named shard present but empty -> incomplete (distinct repo).
+    repo3 = "org/sharded-empty"
+    snap3 = _snapshot_dir(tmp_path, PINNED_REVISION, repo3)
+    _write_file(snap3, "model-00001-of-00002.safetensors", size=16)
+    _write_file(snap3, "model-00002-of-00002.safetensors", size=0)
+    (snap3 / "model.safetensors.index.json").write_text(
+        _json.dumps(
+            {
+                "weight_map": {
+                    "w1": "model-00001-of-00002.safetensors",
+                    "w2": "model-00002-of-00002.safetensors",
+                }
+            }
+        )
+    )
+    assert _probe_fresh(repo3, PINNED_REVISION, tmp_path) is False
+
+
+def test_pytorch_index_shards_must_exist_nonempty(tmp_path: Path) -> None:
+    """(c) the ``pytorch_model.bin.index.json`` form is checked the same way."""
+    import json as _json
+
+    # A named shard present non-empty -> complete.
+    repo = "org/pt-index"
+    snap = _snapshot_dir(tmp_path, PINNED_REVISION, repo)
+    _write_file(snap, "pytorch_model-00001-of-00002.bin", size=16)
+    (snap / "pytorch_model.bin.index.json").write_text(
+        _json.dumps({"weight_map": {"w1": "pytorch_model-00001-of-00002.bin"}})
+    )
+    assert _probe_fresh(repo, PINNED_REVISION, tmp_path) is True
+
+    # A named shard missing -> incomplete (distinct repo).
+    repo2 = "org/pt-index-missing"
+    snap2 = _snapshot_dir(tmp_path, PINNED_REVISION, repo2)
+    _write_file(snap2, "pytorch_model-00001-of-00002.bin", size=16)
+    (snap2 / "pytorch_model.bin.index.json").write_text(
+        _json.dumps(
+            {
+                "weight_map": {
+                    "w1": "pytorch_model-00001-of-00002.bin",
+                    "w2": "pytorch_model-00002-of-00002.bin",
+                }
+            }
+        )
+    )
+    assert _probe_fresh(repo2, PINNED_REVISION, tmp_path) is False
+
+
+def test_generic_fallback_requires_nonempty_weight_file(tmp_path: Path) -> None:
+    """(c) the generic fallback (repo not in the table) requires at least one
+    NON-EMPTY weights file, not merely the presence of a zero-byte one."""
+    # Generic repo: a zero-byte weight file is NOT complete.
+    repo = "org/generic-zero"
+    _snapshot_dir(tmp_path, PINNED_REVISION, repo)
+    _write_file(
+        _folder(tmp_path, repo) / "snapshots" / PINNED_REVISION,
+        "weights.safetensors",
+        size=0,
+    )
+    assert _probe_fresh(repo, PINNED_REVISION, tmp_path) is False
+    # A non-empty generic weight file is complete (distinct repo).
+    repo2 = "org/generic-nonzero"
+    _snapshot_dir(tmp_path, PINNED_REVISION, repo2)
+    _write_file(
+        _folder(tmp_path, repo2) / "snapshots" / PINNED_REVISION,
+        "weights.safetensors",
+        size=16,
+    )
+    assert _probe_fresh(repo2, PINNED_REVISION, tmp_path) is True
+
+
+def test_memo_key_includes_storage_root(tmp_path: Path) -> None:
+    """(d) the memo is keyed by (repo_id, revision, resolved storage root):
+    the same (repo, revision) probed against two different cache dirs must
+    be independent, so a negative result for one cache does not poison a
+    separate cache that holds a complete snapshot."""
+    other_cache = tmp_path / "other"
+    other_cache.mkdir(parents=True)
+    # Probe repo+revision against the empty default tmp_path: incomplete.
+    assert _probe(REPO_ID, PINNED_REVISION, tmp_path) is False
+    # Lay out a complete snapshot in a SECOND cache and probe it: it must be
+    # complete (not poisoned by the first cache's negative memo).
+    _complete_snapshot(other_cache, REPO_ID)
+    assert _probe(REPO_ID, PINNED_REVISION, other_cache) is True

@@ -7,33 +7,36 @@ the cold-cache download with its progress bar.
 
 The probe is a **conservative, filesystem-only completeness check** (no
 ``snapshot_download``, no network): it reports a snapshot as complete only
-when the pinned revision's snapshot directory exists and holds at least one
-real weights file for that model type (per
-:data:`_EXPECTED_WEIGHT_FILES`), every entry in the snapshot directory
-resolves to a real file, and the repo's blob directory has no
-``*.incomplete`` file. Anything missing, partial, or unreadable counts as
+when the pinned revision's snapshot directory exists and every expected
+weight pattern (per :data:`_EXPECTED_WEIGHT_FILES`, or the generic
+fallback) matches at least one non-empty file, every entry in the snapshot
+directory resolves to a real file, the repo's blob directory has no
+``*.incomplete`` file, and any sharded-weights index names only non-empty
+shards. Anything missing, partial, or unreadable counts as
 *not complete* — the caller then runs the real download with progress bars
 enabled (the safe direction: a silent multi-GB fetch would look like a
 hang).
 
-The result is memoized per ``(repo_id, revision)``; only ``False`` results
-are cached (a failed probe is re-checked on the next call, and a failed
-real download never poisons the memo with ``True``).
+The result is memoized per ``(repo_id, revision, resolved storage root)``;
+only ``False`` results are cached (a failed probe is re-checked on the next
+call, and a failed real download never poisons the memo with ``True``).
 """
 
 from __future__ import annotations
 
+import json
 import os
-from collections.abc import Generator
 from pathlib import Path
 
 __all__ = ["snapshot_locally_complete", "clear_memo"]
 
 #: Per-process memo of "pinned snapshot resolvable from local cache" probes,
-#: keyed by ``(repo_id, revision)``. Only negative results are cached: a
-#: failed probe is re-checked on the next call, and a ``True`` is never
-#: cached across a failed real download.
-_COMPLETE_SNAPSHOTS: dict[tuple[str, str], bool] = {}
+#: keyed by ``(repo_id, revision, resolved storage root)``. Only negative
+#: results are cached: a failed probe is re-checked on the next call, and a
+#: ``True`` is never cached across a failed real download. The resolved
+#: storage root is part of the key because the probe result depends on which
+#: cache directory is consulted, not only on the pinned repo/revision.
+_COMPLETE_SNAPSHOTS: dict[tuple[str, str, str], bool] = {}
 
 #: Minimal weight-file expectations per registry model, derived from the
 #: actual pinned snapshots in the local HF cache (the single source of
@@ -77,11 +80,12 @@ def snapshot_locally_complete(
     (the real download then runs with progress bars — the safe direction).
     The probe touches only the local filesystem; it never talks to the hub.
 
-    Only ``False`` results are memoized, per ``(repo_id, revision)``; a
-    ``True`` is re-verified on every call (cheap filesystem reads) so a
-    failed real download can never leave a poisoned ``True`` behind.
+    Only ``False`` results are memoized, per
+    ``(repo_id, revision, resolved storage root)``; a ``True`` is re-verified
+    on every call (cheap filesystem reads) so a failed real download can
+    never leave a poisoned ``True`` behind.
     """
-    key = (repo_id, revision)
+    key = (repo_id, revision, str(_storage_root(cache_dir)))
     if _COMPLETE_SNAPSHOTS.get(key) is False:
         return False
     try:
@@ -125,15 +129,21 @@ def _snapshot_is_complete(
     Complete only when ALL of the following hold:
 
     1. the snapshot directory for the pinned revision SHA exists;
-    2. it contains at least one real weights file for the model type
-       (per :data:`_EXPECTED_WEIGHT_FILES`);
+    2. every expected weight pattern (per :data:`_EXPECTED_WEIGHT_FILES`, or
+       the generic fallback) matches at least one non-empty file — a partial
+       snapshot carrying only some of a model's weights is incomplete;
     3. every entry in the snapshot directory (recursively) resolves —
        no dangling symlink into ``blobs/``;
-    4. the repo's ``blobs`` directory has no ``*.incomplete`` file.
+    4. the repo's ``blobs`` directory has no ``*.incomplete`` file;
+    5. any sharded-weights index present (``*.safetensors.index.json`` /``
+       pytorch_model.bin.index.json``) names only shards that exist and are
+       non-empty.
 
-    All four checks are required: a missing snapshot dir (cold cache), a
-    partial snapshot (refs + config.json only), a dangling symlink, or an
-    interrupted download (``*.incomplete`` blob) all report *not complete*.
+    All five checks are required: a missing snapshot dir (cold cache), a
+    partial snapshot (refs + config.json only or only some of a model's
+    weights), a dangling symlink, an interrupted download (``*.incomplete``
+    blob), a zero-byte weight file, or a missing shard all report *not
+    complete*.
     """
     folder = _storage_folder(repo_id, cache_dir)
     snapshot_dir = folder / "snapshots" / revision
@@ -147,8 +157,11 @@ def _snapshot_is_complete(
     # Check 3: every entry in the snapshot tree must resolve.
     if not _all_entries_resolve(snapshot_dir):
         return False
-    # Check 2: at least one real weights file for this model type.
-    return _has_expected_weight_file(repo_id, snapshot_dir)
+    # Check 2: every expected weight pattern must match a non-empty file.
+    if not _has_expected_weight_files(repo_id, snapshot_dir):
+        return False
+    # Check 5: sharded weights index, if present, names only real shards.
+    return _shards_complete(snapshot_dir)
 
 
 def _all_entries_resolve(snapshot_dir: Path) -> bool:
@@ -184,28 +197,92 @@ def _expected_weights_for(repo_id: str) -> tuple[str, ...]:
     return ("*.safetensors", "*.bin", "*.npz", "*.pt")
 
 
-def _has_expected_weight_file(repo_id: str, snapshot_dir: Path) -> bool:
-    """True when at least one expected weights file resolves under the snapshot."""
-    for pattern in _expected_weights_for(repo_id):
-        if _any_match(snapshot_dir, pattern):
-            return True
+def _has_expected_weight_files(repo_id: str, snapshot_dir: Path) -> bool:
+    """True when the snapshot carries the model's expected weights.
+
+    For the five registry models (in :data:`_EXPECTED_WEIGHT_FILES`) every
+    expected pattern must match at least one non-empty file — a partial
+    snapshot (e.g. pyannote carrying only ``embedding/``) is incomplete.
+    For any other repo the generic fallback requires at least one non-empty
+    weights file (a ``st_size > 0`` match of any weight suffix).
+    """
+    patterns = _expected_weights_for(repo_id)
+    if repo_id in _EXPECTED_WEIGHT_FILES:
+        # Explicit table: every expected pattern must match a non-empty file.
+        return all(_any_nonempty_match(snapshot_dir, p) for p in patterns)
+    # Generic fallback: at least one non-empty weights file.
+    return any(_any_nonempty_match(snapshot_dir, p) for p in patterns)
+
+
+def _any_nonempty_match(snapshot_dir: Path, pattern: str) -> bool:
+    """True when *pattern* matches at least one non-empty, resolvable file.
+
+    ``embedding/*.bin`` matches any single segment under ``embedding/``;
+    a plain name matches that file only. A dangling symlink or a zero-byte
+    file does not count.
+    """
+    segments = pattern.split("/")
+    for i, seg in enumerate(segments):
+        if "*" in seg:
+            parent = snapshot_dir
+            if i > 0:
+                parent = parent.joinpath(*segments[:i])
+            return _any_glob_nonempty(parent, seg)
+    # No wildcard segment: the pattern is a plain path under the snapshot.
+    candidate = snapshot_dir.joinpath(*segments)
+    try:
+        return candidate.is_file() and candidate.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _any_glob_nonempty(parent: Path, glob_seg: str) -> bool:
+    """True when *glob_seg* matches at least one non-empty file under *parent*."""
+    if not parent.is_dir():
+        return False
+    for path in parent.glob(glob_seg):
+        try:
+            if path.is_file() and path.stat().st_size > 0:
+                return True
+        except OSError:
+            continue
     return False
 
 
-def _any_match(snapshot_dir: Path, pattern: str) -> bool:
-    """``Path.glob``-style match for a one-level wildcard pattern.
+def _shards_complete(snapshot_dir: Path) -> bool:
+    """True when every shard named by a sharded-weights index exists non-empty.
 
-    ``embedding/*.bin`` matches any single segment under ``embedding/``;
-    a plain name matches that file only. Each matched path must resolve
-    (a dangling symlink to a weight file does not count).
+    When the snapshot carries a ``*.safetensors.index.json`` or
+    ``pytorch_model.bin.index.json``, every file named in its ``weight_map``
+    values must exist under the snapshot and be non-empty. When no index is
+    present this check is a no-op (the explicit-pattern / generic-fallback
+    checks in :func:`_has_expected_weight_files` already apply).
     """
-    parts = pattern.split("/")
-    if len(parts) == 1:
-        matches: Generator[Path, None, None] = snapshot_dir.glob(parts[0])
-        return any(p.is_file() for p in matches)
-    head, wildcard = "/".join(parts[:-1]), parts[-1]
-    parent = snapshot_dir / head
-    if not parent.is_dir():
+    for index in snapshot_dir.glob("*.safetensors.index.json"):
+        if not _index_shards_complete(snapshot_dir, index):
+            return False
+    for index in snapshot_dir.glob("pytorch_model.bin.index.json"):
+        if not _index_shards_complete(snapshot_dir, index):
+            return False
+    return True
+
+
+def _index_shards_complete(snapshot_dir: Path, index: Path) -> bool:
+    """True when every shard named by *index* exists non-empty under *snapshot_dir*."""
+    try:
+        data = json.loads(index.read_text())
+    except (OSError, json.JSONDecodeError):
         return False
-    matches = parent.glob(wildcard)
-    return any(p.is_file() for p in matches)
+    weight_map = data.get("weight_map")
+    if not isinstance(weight_map, dict):
+        return False
+    for shard_name in weight_map.values():
+        if not isinstance(shard_name, str):
+            return False
+        shard = snapshot_dir / shard_name
+        try:
+            if not shard.is_file() or shard.stat().st_size <= 0:
+                return False
+        except OSError:
+            return False
+    return True
