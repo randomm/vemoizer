@@ -29,6 +29,11 @@ from vemoizer.ingest import IngestError
 from vemoizer.naming_hook import ask_naming_hook
 from vemoizer.output.naming import nfc_stem_and_suffix
 from vemoizer.preset_file_transcribe import _transcribe_preset_file
+from vemoizer.preset_final import (
+    print_final_line,
+    print_wrote_lines,
+    run_went_full,
+)
 from vemoizer.preset_interrupt import (
     note_written_files,
     set_interrupt_stage,
@@ -36,11 +41,6 @@ from vemoizer.preset_interrupt import (
 from vemoizer.presets import RunOptions, resolve_options
 from vemoizer.progress import ProgressDisplay
 from vemoizer.progress_wiring import _close_run_display
-from vemoizer.preset_final import (
-    print_final_line,
-    print_wrote_lines,
-    run_went_full,
-)
 from vemoizer.run_log import file_log
 from vemoizer.sidecar import resolve_run_glossary_files
 
@@ -180,10 +180,7 @@ def _run_preset_groups(
     # prompt so neither is overdrawn by the live rich Progress.
     _close_run_display(display)
     print_wrote_lines(written, quiet)
-    # The single final line (issue #148): the only place "complete"
-    # appears, gated on the run having succeeded for ALL files — a partial
-    # pair or a failed check means some file's files are missing, so the
-    # successful groups' "wrote" lines still print but "complete" does not.
+    # Final line (issue #148): only when the run went full for ALL files.
     if not quiet and run_went_full(written, files, exit_code):
         print_final_line(len(written), quiet=quiet)
     # End-of-meeting naming hook (issue #95): the prompt is the last
@@ -464,10 +461,7 @@ def run_preset(
         if command == "meeting":
             _close_run_display(display)
         print_wrote_lines(written, quiet)
-        # The single final line (issue #148): the only place "complete"
-        # appears, gated on the run having succeeded for ALL files; a
-        # partial pair or a failed check keeps the successful files' "wrote"
-        # lines but suppresses "complete"; --quiet suppresses both.
+        # Final line (issue #148): only when the run went full for ALL files.
         if run_went_full(written, files, exit_code):
             print_final_line(len(written), quiet=quiet)
         # End-of-meeting naming hook (issue #95): memo never prompts;

@@ -33,8 +33,8 @@ import pytest
 from _cli_helpers import isolate_home, touch_files
 
 from vemoizer.batch_preset import run_preset
+from vemoizer.preset_final import run_went_full
 from vemoizer.progress import ProgressDisplay
-from vemoizer.preset_final import print_final_line, print_wrote_lines, run_went_full
 
 _EXPECTED_STAGES = ["decode", "diarize", "repair", "notes"]
 
@@ -137,9 +137,7 @@ def _run_meeting(
         mock.patch(
             "vemoizer.batch_preset.print_wrote_lines", _wrote_lines_recorder(record)
         ),
-        mock.patch(
-            "vemoizer.batch_preset.run_went_full", _gate_recorder(record)
-        ),
+        mock.patch("vemoizer.batch_preset.run_went_full", _gate_recorder(record)),
         mock.patch(
             "vemoizer.batch_preset.print_final_line", _final_line_recorder(record)
         ),

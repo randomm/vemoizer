@@ -19,9 +19,7 @@ from vemoizer.batch_output import PRESET_FORMATS
 __all__ = ["print_final_line", "print_wrote_lines", "run_went_full"]
 
 
-def run_went_full(
-    written: list[str], files: list, exit_code: int
-) -> bool:
+def run_went_full(written: list[str], files: list, exit_code: int) -> bool:
     """Whether the run succeeded for **all** files (the final-line gate).
 
     The gate is the run having exited 0 *and* every expected output pair
@@ -30,9 +28,7 @@ def run_went_full(
     line is printed even though some files did write.
     """
     return bool(
-        written
-        and exit_code == 0
-        and len(written) == len(files) * len(PRESET_FORMATS)
+        written and exit_code == 0 and len(written) == len(files) * len(PRESET_FORMATS)
     )
 
 

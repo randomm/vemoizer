@@ -371,22 +371,32 @@ def test_notes_budget_exhausted_before_reduce_returns_none_with_warning() -> Non
     client = MagicMock()
     client.complete = MagicMock(side_effect=slow_complete)
 
-    import vemoizer.notes as notes_module
+    # Capture the warning with a real logging handler (type-safe, no
+    # monkeypatching of the bound ``logger.warning`` method).
+    import logging as _logging
 
-    warnings: list[str] = []
-    orig_warning = notes_module.logger.warning
-    notes_module.logger.warning = lambda msg, *a, **kw: warnings.append(msg % a if a else msg)
+    captured: list[str] = []
+
+    class _Capture(_logging.Handler):
+        def emit(self, record: _logging.LogRecord) -> None:
+            captured.append(record.getMessage())
+
+    logger = _logging.getLogger("vemoizer.notes")
+    handler = _Capture(level=_logging.WARNING)
+    logger.addHandler(handler)
     try:
         notes = generate_notes(client, long_text, budget=budget)
     finally:
-        notes_module.logger.warning = orig_warning
+        logger.removeHandler(handler)
 
     # The reduce call must NOT have fired (budget exhausted after last map).
     assert reduce_fired[0] is False, "reduce call must not fire after budget exhaustion"
     assert notes is None
     # Exactly one budget warning (from the reduce gate, not the loop).
-    budget_warnings = [w for w in warnings if "budget" in w]
-    assert len(budget_warnings) == 1, f"expected 1 budget warning, got {budget_warnings}"
+    budget_warnings = [w for w in captured if "budget" in w]
+    assert len(budget_warnings) == 1, (
+        f"expected 1 budget warning, got {budget_warnings}"
+    )
 
 
 def test_notes_budget_none_runs_to_completion() -> None:
