@@ -19,7 +19,7 @@ import logging
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from rich.progress import TaskID
@@ -59,6 +59,9 @@ from .vad import load_model as load_vad_model
 from .whisper_transcriber import decode_meeting
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from .preset_interrupt import InterruptTracker
 
 
 def _speech_slices(audio: np.ndarray) -> list[tuple[int, np.ndarray]]:
@@ -233,6 +236,7 @@ def transcribe_file(
     display: ProgressDisplay | None = None,
     language: str | None = None,
     preprocess: str | None = None,
+    tracker: InterruptTracker | None = None,
 ) -> dict:
     """Run the full consensus pipeline over one audio file.
 
@@ -453,6 +457,8 @@ def transcribe_file(
         generate_notes_fn=generate_notes,
         repair_paragraphs_fn=repair_paragraphs,
         llm_client_cls=LLMClient,
+        display=display,
+        tracker=tracker,
     )
     logger.info(
         "transcribe: done in %s — %d chars, %d segments",

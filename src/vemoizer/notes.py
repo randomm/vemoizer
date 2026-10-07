@@ -233,7 +233,8 @@ def generate_notes(
     try:
         if len(text) <= SINGLE_CALL_CHARS:
             if _budget_exhausted():
-                return _budget_exhausted_response(budget)
+                _log_notes_budget_expired(budget)
+                return None
             raw = client.complete(system, f"Transcript:\n{text}")
             return _finish(_parse_notes(raw), text) if raw else None
 
@@ -241,7 +242,8 @@ def generate_notes(
         chunks = _chunk_text(text)
         for i, chunk in enumerate(chunks, start=1):
             if _budget_exhausted():
-                return _budget_exhausted_response(budget)
+                _log_notes_budget_expired(budget)
+                return None
             part = client.complete(
                 _MAP_SYSTEM_PROMPT,
                 f"Portion {i}/{len(chunks)}:\n{chunk}",
@@ -250,8 +252,6 @@ def generate_notes(
                 summaries.append(part.strip())
         if not summaries:
             return None
-        if _budget_exhausted():
-            return _budget_exhausted_response(budget)
         joined = "\n\n".join(
             f"osayhteenveto {i}: {s}" for i, s in enumerate(summaries, start=1)
         )
@@ -266,15 +266,14 @@ def generate_notes(
         return None
 
 
-def _budget_exhausted_response(budget: StageBudget | None) -> dict[str, Any] | None:
-    """The fail-open response when the notes stage's wall-clock budget expires.
+def _log_notes_budget_expired(budget: StageBudget | None) -> None:
+    """Log one warning so a hung stage is distinguishable from a slow one.
 
-    Returns ``None`` (the caller ships the transcript without notes) and
-    logs one warning so a hung stage is distinguishable from a slow one.
+    The stage has already returned ``None`` (the caller ships the transcript
+    without notes) — the warning is the whole work.
     """
     logger.warning(
         "notes stopped: wall-clock budget expired after %ss; "
         "transcript ships without notes",
         f"{budget.elapsed():.0f}" if budget else "?",
     )
-    return None

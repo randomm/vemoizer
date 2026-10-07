@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 import typer
 
@@ -26,9 +27,21 @@ from vemoizer.cli_support import (
     warn_on_battery as _warn_on_battery,
 )
 from vemoizer.preset_interrupt import (
+    InterruptTracker,
     begin_interrupt_tracking,
     handle_interrupt,
 )
+from vemoizer.progress import ProgressDisplay
+
+
+def _preset_interrupt_handler(
+    tracker: InterruptTracker, display: ProgressDisplay | None
+) -> NoReturn:
+    """The Ctrl-C contract shared by both preset commands (issue #148):
+    one line naming the stage the run was in, exit 130 (the SIGINT
+    convention), no traceback."""
+    typer.echo(handle_interrupt(tracker, display), err=True)
+    raise typer.Exit(code=130) from None
 
 
 def register_presets(app: typer.Typer) -> None:
@@ -146,7 +159,7 @@ def register_presets(app: typer.Typer) -> None:
                 err=True,
             )
             raise typer.Exit(code=2)
-        begin_interrupt_tracking(display)
+        tracker = begin_interrupt_tracking()
         try:
             exit_code = run_preset(
                 files,
@@ -162,12 +175,10 @@ def register_presets(app: typer.Typer) -> None:
                 no_group=no_group,
                 display=display,
                 preprocess=lowered_preprocess,
+                tracker=tracker,
             )
         except KeyboardInterrupt:
-            # issue #148: one line naming the stage the run was in, no
-            # traceback, exit 130 (the SIGINT convention).
-            typer.echo(handle_interrupt(display), err=True)
-            raise typer.Exit(code=130) from None
+            _preset_interrupt_handler(tracker, display)
         except ValueError as e:
             # Unknown --language value (resolve_options validates against
             # LANGUAGE_VALUES, issue #108): clean exit 2, never a traceback.
@@ -251,7 +262,7 @@ def register_presets(app: typer.Typer) -> None:
                 err=True,
             )
             raise typer.Exit(code=2)
-        begin_interrupt_tracking(display)
+        tracker = begin_interrupt_tracking()
         try:
             exit_code = run_preset(
                 files,
@@ -262,12 +273,10 @@ def register_presets(app: typer.Typer) -> None:
                 quiet=quiet,
                 display=display,
                 preprocess=lowered_preprocess,
+                tracker=tracker,
             )
         except KeyboardInterrupt:
-            # issue #148: one line naming the stage the run was in, no
-            # traceback, exit 130 (the SIGINT convention).
-            typer.echo(handle_interrupt(display), err=True)
-            raise typer.Exit(code=130) from None
+            _preset_interrupt_handler(tracker, display)
         except ValueError as e:
             # Unknown [meeting] language value (resolve_options validates
             # against LANGUAGE_VALUES, issue #108): clean exit 2, never a

@@ -162,7 +162,9 @@ def _parse_llm_section(section: dict[str, Any]) -> LLMConfig | None:
     # The stage budgets are optional (issue #148): absent -> the dataclass
     # field default (the safe 600 s); present -> must be a positive finite
     # number, else the section is malformed (return None). A typo'd
-    # 0/negative budget is rejected here, not silently applied.
+    # 0/negative budget is rejected here, not silently applied. The valid
+    # values are collected as we validate (one pass over the same keys).
+    budget_kwargs: dict[str, float] = {}
     for budget_key in ("repair_budget_seconds", "notes_budget_seconds"):
         if budget_key in section:
             budget = section[budget_key]
@@ -173,29 +175,15 @@ def _parse_llm_section(section: dict[str, Any]) -> LLMConfig | None:
                 or not math.isfinite(float(budget))
             ):
                 return None
+            budget_kwargs[budget_key] = float(budget)
 
     return LLMConfig(
         base_url=base_url.rstrip("/"),
         model=model.strip(),
         api_key_env=api_key_env,
         timeout_seconds=float(timeout),
-        **_stage_budget_kwargs(section),
+        **budget_kwargs,
     )
-
-
-def _stage_budget_kwargs(section: dict[str, Any]) -> dict[str, float]:
-    """The ``repair_budget_seconds``/``notes_budget_seconds`` kwargs (issue #148).
-
-    Only present keys are passed (the dataclass default, the safe 600 s,
-    applies otherwise). Callers must validate the keys first (a present but
-    malformed value makes ``_parse_llm_section`` return ``None``); this
-    helper trusts the value is positive-finite when present.
-    """
-    kwargs: dict[str, float] = {}
-    for key in ("repair_budget_seconds", "notes_budget_seconds"):
-        if key in section:
-            kwargs[key] = float(section[key])
-    return kwargs
 
 
 def _strict_load_raw(path: Path) -> tuple[LLMConfig, dict[str, Any]]:

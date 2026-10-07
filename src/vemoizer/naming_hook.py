@@ -39,26 +39,28 @@ import typer
 from vemoizer.names_cli import _stdout_isatty
 from vemoizer.speaker_clips import talk_share
 
-__all__ = ["_eligible_sidecars", "_stdout_isatty", "ask_naming_hook"]
+__all__ = [
+    "_eligible_sidecars",
+    "_stdout_isatty",
+    "_written_json_names",
+    "ask_naming_hook",
+]
 
 
-def _eligible_sidecars(written: list[str]) -> tuple[list[Path], bool]:
+def _written_json_names(written: list[str]) -> list[str]:
+    """The written ``*.json`` sidecar names (a quick, read-free check)."""
+    return [name for name in written if name.endswith(".json")]
+
+
+def _eligible_sidecars(written: list[str]) -> list[Path]:
     """The written ``*.json`` sidecars (resolved against ``Path.cwd()``)
     whose on-disk ``paragraphs`` list carries 2+ distinct speaker
-    labels, and whether *any* ``*.json`` name was in the written list
-    at all.
+    labels.
 
     Missing, unreadable, malformed, or single-label sidecars are skipped
-    silently. The boolean distinguishes "no ``.json`` in the written
-    list at all" (a mystery a user cannot guess — the partial-pair /
-    write-failure case) from "a sidecar exists but has <2 speaker
-    labels" (a legitimate no-op)."""
+    silently."""
     eligible: list[Path] = []
-    json_in_written = False
-    for name in written:
-        if not name.endswith(".json"):
-            continue
-        json_in_written = True
+    for name in _written_json_names(written):
         path = Path.cwd() / name
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -71,7 +73,7 @@ def _eligible_sidecars(written: list[str]) -> tuple[list[Path], bool]:
             continue
         if len(talk_share(paragraphs)) >= 2:
             eligible.append(path)
-    return eligible, json_in_written
+    return eligible
 
 
 def _narrate_skip(reason: str, *, quiet: bool) -> None:
@@ -126,9 +128,9 @@ def ask_naming_hook(
 
     from vemoizer.names_cli import run_names
 
-    eligible, json_in_written = _eligible_sidecars(written_sidecars)
+    eligible = _eligible_sidecars(written_sidecars)
     if not eligible:
-        if not json_in_written:
+        if not _written_json_names(written_sidecars):
             # No ``.json`` in the written list at all (partial pair /
             # write failure): a mystery the user cannot guess — narrate it
             # (issue #148). A sidecar that exists but is unreadable or

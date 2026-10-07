@@ -19,6 +19,7 @@ per-call timeout can no longer hold the run forever.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from .llm import LLMClient
@@ -55,6 +56,7 @@ def repair_paragraphs(
     glossary: list[str] | None = None,
     *,
     budget: StageBudget | None = None,
+    progress_cb: Callable[[int, int], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Repair each paragraph's text; guarded, fail-open, metadata preserved.
 
@@ -64,10 +66,12 @@ def repair_paragraphs(
     the stage stops calling the model: every paragraph processed so far
     keeps its (possibly repaired) text, every remaining paragraph ships
     with its original text, and one warning is logged (invariant #5: fail
-    open — the transcript is never lost). A throttled INFO heartbeat (at
-    most every ``PROGRESS_INTERVAL_S``) marks progress so a hung stage is
-    distinguishable from a slow one in the run log; it carries only the
-    count and elapsed time (no transcript text — privacy contract).
+    open — the transcript is never lost). *progress_cb* (issue #148) is
+    called once per processed paragraph with ``(done, total)`` — the
+    caller threads it to the stage's determinate display task. A
+    throttled INFO heartbeat (at most every ``PROGRESS_INTERVAL_S``)
+    marks progress in the run log; it carries only the count and elapsed
+    time (no transcript text — privacy contract).
     """
     system = _REPAIR_SYSTEM_PROMPT
     if glossary:
@@ -84,12 +88,14 @@ def repair_paragraphs(
     processed = 0
     last_heartbeat = 0.0
     budget_exhausted = False
-    for para in paragraphs:
+    break_idx = 0
+    for idx, para in enumerate(paragraphs):
         # Budget gate before the call: a stalled connection that keeps
         # resetting the per-call timeout is cut off here, at the loop
         # boundary, so the stage can no longer hold the run forever.
         if budget is not None and budget.exhausted():
             budget_exhausted = True
+            break_idx = idx
             break
         original = str(para.get("text", "")).strip()
         if not original:
@@ -113,6 +119,8 @@ def repair_paragraphs(
                 logger.info("repair rejected by guard (kept original paragraph)")
         repaired.append({**para, "text": text})
         processed += 1
+        if progress_cb is not None:
+            progress_cb(processed, total)
         if budget is not None:
             now = budget.elapsed()
             if now - last_heartbeat >= PROGRESS_INTERVAL_S:
@@ -125,7 +133,9 @@ def repair_paragraphs(
                 )
     if budget_exhausted:
         # Remaining paragraphs ship un-repaired (fail-open, invariant #5).
-        for para in paragraphs[len(repaired) :]:
+        # The backfill range starts at the first unprocessed paragraph —
+        # a future early-``continue`` that skips an append cannot shift the slice.
+        for para in paragraphs[break_idx:]:
             repaired.append(dict(para))
         logger.warning(
             "repair stopped at %d/%d paragraphs (wall-clock budget %ss); "

@@ -68,7 +68,7 @@ def _patch_llm_stage(monkeypatch, seen: dict) -> None:
     """The repair/notes seams (the ``pipeline`` namespace is what
     ``apply_llm_tail`` receives via the ``*_fn`` / ``llm_client_cls`` args)."""
 
-    def fake_repair(client, paragraphs, glossary=None, budget=None):
+    def fake_repair(client, paragraphs, glossary=None, budget=None, progress_cb=None):
         seen.setdefault("repair_calls", []).append(glossary)
         return paragraphs
 

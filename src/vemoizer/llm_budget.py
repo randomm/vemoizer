@@ -20,7 +20,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-__all__ = ["StageBudget", "make_budget"]
+__all__ = ["StageBudget"]
 
 
 class StageBudget:
@@ -47,9 +47,12 @@ class StageBudget:
         return self._total
 
     def elapsed(self) -> float:
-        """Seconds of wall clock consumed so far (always >= 0)."""
-        if self._total is None:
-            return 0.0
+        """Seconds of wall clock consumed so far (always >= 0).
+
+        A pure clock read — the real elapsed time regardless of whether a
+        budget cap is set. Only :meth:`exhausted` and :meth:`remaining`
+        are budget-aware.
+        """
         return max(0.0, self._clock() - self._start)
 
     def remaining(self) -> float:
@@ -68,10 +71,3 @@ class StageBudget:
         if self._total is None or self._total <= 0:
             return False
         return self.elapsed() >= self._total
-
-
-def make_budget(
-    total_seconds: float | None, clock: Callable[[], float] = time.monotonic
-) -> StageBudget:
-    """Build a :class:`StageBudget`; ``None``/``<=0`` total means no cap."""
-    return StageBudget(total_seconds, clock=clock)
