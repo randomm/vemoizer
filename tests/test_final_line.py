@@ -23,7 +23,9 @@ import vemoizer.grouping_decode as grouping_decode_module
 import vemoizer.notify as notify_module
 import vemoizer.pipeline as pipeline_module
 import vemoizer.preflight as preflight_module
+from vemoizer.batch_output import PRESET_FORMATS
 from vemoizer.cli import app
+from vemoizer.preset_final import run_went_full
 from vemoizer.preset_interrupt import begin_interrupt_tracking
 
 runner = CliRunner()
@@ -420,3 +422,68 @@ class TestFinalLineGatedOnSuccess:
         echoes = record.get("echoes", [])
         assert any(e.startswith("wrote ") for e in echoes), echoes
         assert all("complete" not in e for e in echoes), echoes
+
+    def test_group_single_pair_success_prints_complete(self, tmp_path, monkeypatch):
+        """Group path: 3 files yield 3 groups (the zero-byte fixtures force
+        a break at every boundary) and every group writes a full pair ->
+        exit 0, the final "complete" line DOES print. The old gate
+        (``len(files) * len(PRESET_FORMATS)`` = 6) would still pass here,
+        so this pins the plain-per-group arithmetic; the merged-group case
+        (2 files -> 1 pair, old gate expected 4, actual 2) is the real
+        regression this fix addresses and is asserted in the unit test
+        below."""
+        files = touch_files(["a.m4a", "b.m4a", "c.m4a"], tmp_path)
+        record: dict[str, Any] = {}
+
+        def fake_echo(msg, err: bool = False, **kw):
+            if not err:
+                record.setdefault("echoes", []).append(str(msg))
+
+        def full_write_seam(result, first_stem, out_dir, *, date_str=None):
+            # A full pair (md + json) for each group.
+            return [f"2025-01-01 {first_stem}.md", f"2025-01-01 {first_stem}.json"]
+
+        _patch_group_seams(monkeypatch, tmp_path)
+        tracker = begin_interrupt_tracking()
+        with (
+            mock.patch.object(
+                batch_preset_module, "_write_preset_output", full_write_seam
+            ),
+            mock.patch.object(batch_preset_module.typer, "echo", fake_echo),
+        ):
+            code = batch_preset_module.run_preset(
+                list(files),
+                command="meeting",
+                config_path=None,
+                glossary_path=None,
+                quiet=False,
+                yes=True,
+                tracker=tracker,
+                display=None,
+            )
+        assert code == 0
+        echoes = record.get("echoes", [])
+        # 3 groups -> 3 full pairs -> 6 "wrote" lines.
+        wrote = [e for e in echoes if e.startswith("wrote ")]
+        assert len(wrote) == 6, echoes
+        # The final line prints (the gate counted groups, not files).
+        complete_lines = [e for e in echoes if "complete" in e]
+        assert len(complete_lines) == 1, echoes
+        assert complete_lines[0] == "\u2713 complete — wrote 6 file(s)", echoes
+
+
+def test_run_went_full_group_gate_unit() -> None:
+    """The group-path gate counts groups (pairs written), not files: the
+    real regression case is 2 files merged into ONE group -> one pair (2
+    files written), where the old ``len(files) * len(PRESET_FORMATS)`` = 4
+    gate wrongly failed (2 != 4) and suppressed the line. The fixed gate
+    (``expected_pairs`` = written // formats = 1) passes."""
+    # 2 files, 1 merged group -> one full pair written (2 files).
+    written_2files_1group = ["a.md", "a.json"]
+    assert run_went_full(written_2files_1group, 1, 0) is True
+    # The old (buggy) arithmetic would have failed this:
+    assert 2 * len(PRESET_FORMATS) != 2
+    # A mixed batch (1 merged group full + 1 standalone partial) fails the
+    # gate: 3 groups, 1 partial pair -> 5 files != 3 * 2 = 6.
+    written_mixed = ["a.md", "a.json", "b.md", "c.md", "c.json"]
+    assert run_went_full(written_mixed, 3, 1) is False

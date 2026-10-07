@@ -12,8 +12,6 @@ stays as the idempotent backstop (issue #143).
 
 from __future__ import annotations
 
-import typer
-
 from vemoizer.output.naming import nfc
 from vemoizer.progress import ProgressDisplay
 
@@ -46,27 +44,6 @@ def _close_run_display(display: ProgressDisplay | None) -> None:
     """
     if display is not None:
         display.close()
-
-
-def _print_final_line(n_files: int, *, quiet: bool) -> None:
-    """The single final line of the run, after the ``wrote`` lines
-    (issue #148).
-
-    The one place the word ``complete`` appears: per-stage markers are
-    ``✓ <stage>`` (``decode ✓``, ``diarize ✓`` …), so ``complete`` on the
-    final line is unambiguous — the run is done and its files are on
-    disk. ``--quiet`` suppresses it (the quiet contract already covers
-    the ``wrote`` lines it would follow).
-
-    Printed with a plain ``typer.echo`` and **no** rich markup: ``[green]``
-    in the string would print verbatim, because ``typer.echo`` does not
-    render rich markup (issue #148 FIX 2) — the brackets would leak to the
-    terminal. Plain text is what the operator sees and what the tests
-    assert.
-    """
-    if quiet:
-        return
-    typer.echo(f"\u2713 complete — wrote {n_files} file(s)")
 
 
 def set_batch_prefix(

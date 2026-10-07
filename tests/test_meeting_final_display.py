@@ -87,9 +87,13 @@ def _wrote_lines_recorder(record: dict[str, Any]):
 
 
 def _gate_recorder(record: dict[str, Any]):
-    def fake_gate(written: list[str], files: list, exit_code: int) -> bool:
-        record["gate"] = {"written": written, "files": files, "exit_code": exit_code}
-        return run_went_full(written, files, exit_code)
+    def fake_gate(written: list[str], expected_pairs: int, exit_code: int) -> bool:
+        record["gate"] = {
+            "written": written,
+            "expected_pairs": expected_pairs,
+            "exit_code": exit_code,
+        }
+        return run_went_full(written, expected_pairs, exit_code)
 
     return fake_gate
 

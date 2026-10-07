@@ -19,16 +19,21 @@ from vemoizer.batch_output import PRESET_FORMATS
 __all__ = ["print_final_line", "print_wrote_lines", "run_went_full"]
 
 
-def run_went_full(written: list[str], files: list, exit_code: int) -> bool:
-    """Whether the run succeeded for **all** files (the final-line gate).
+def run_went_full(written: list[str], expected_pairs: int, exit_code: int) -> bool:
+    """Whether the run succeeded for **all** inputs (the final-line gate).
 
-    The gate is the run having exited 0 *and* every expected output pair
-    being fully written (``len(written) == len(files) * len(PRESET_FORMATS)``).
-    A partial pair or a failed check fails the gate, so no ``complete``
-    line is printed even though some files did write.
+    ``expected_pairs`` is the number of output pairs the run is expected to
+    write — one per file in the plain per-file path, one per *group* in the
+    M3 grouping path (a merged group writes a single pair, not one per file).
+    The gate is the run having exited 0 *and* every expected pair being fully
+    written (``len(written) == expected_pairs * len(PRESET_FORMATS)``). A
+    partial pair or a failed check fails the gate, so no ``complete`` line is
+    printed even though some outputs did write.
     """
     return bool(
-        written and exit_code == 0 and len(written) == len(files) * len(PRESET_FORMATS)
+        written
+        and exit_code == 0
+        and len(written) == expected_pairs * len(PRESET_FORMATS)
     )
 
 
