@@ -37,6 +37,38 @@ def _clear_snapshot_memo():
     _model_cache_mod.clear_memo()
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_hf_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Point every cache probe at a fresh EMPTY per-test tmp cache dir.
+
+    The warm-cache silencing probe
+    (:func:`vemoizer.model_cache.snapshot_locally_complete`) and the
+    ``HF_HUB_CACHE`` constant both resolve to a real HF cache when
+    nothing is set. On a machine with the five models cached, a test that
+    forgets to point the probe at ``tmp_path`` would read the operator's real
+    cache (false "complete" → warm-cache path exercised); on a CI runner with
+    an empty cache the same test fails (the probe finds nothing). Both
+    directions break the suite.
+
+    This fixture makes the suite environment-independent: every test starts
+    with an EMPTY cache at ``tmp_path / "hf-cache"`` and the
+    ``huggingface_hub.constants.HF_HUB_CACHE`` module attribute (the seam the
+    probe reads when ``cache_dir`` is None) monkeypatched to point at it. No
+    test can read the operator's real HF cache; a test that needs a warm
+    cache lays out a complete snapshot under that dir (or passes ``cache_dir``
+    explicitly) and the probe finds it.
+    """
+    empty_cache = tmp_path / "hf-cache"
+    empty_cache.mkdir()
+    try:
+        import huggingface_hub.constants as _hf_constants
+    except ImportError:  # pragma: no cover - huggingface_hub is a hard dep
+        yield empty_cache
+        return
+    monkeypatch.setattr(_hf_constants, "HF_HUB_CACHE", str(empty_cache))
+    yield empty_cache
+
+
 # Hermetic CLI help output: typer.rich_utils reads GITHUB_ACTIONS / FORCE_COLOR /
 # PY_COLORS at IMPORT time (rich_utils.py, lines 77-84) to force a coloured
 # terminal, and NO_COLOR/TERM/COLUMNS affect rich's Console sizing. GitHub

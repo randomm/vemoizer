@@ -189,7 +189,10 @@ def test_load_failure_latches_and_raises(tmp_path: Path) -> None:
     assert dl.call_count == 1
 
 
-def test_warm_cache_load_silences_progress_bars(tmp_path: Path) -> None:
+def test_warm_cache_load_silences_progress_bars(
+    tmp_path: Path,
+    _hermetic_hf_cache: Path,
+) -> None:
     """A locally-complete snapshot is resolved silently (no HF bars) on the
     meeting decode path — the load goes through the shared models seam
     (issue #147), so a warm-cache `vemoizer meeting` run prints no
@@ -199,7 +202,9 @@ def test_warm_cache_load_silences_progress_bars(tmp_path: Path) -> None:
 
     from vemoizer import model_cache
 
-    folder = tmp_path / repo_folder_name(repo_id=MODEL_ID, repo_type="model")
+    # Lay out a complete snapshot under the hermetic empty cache dir (the
+    # autouse fixture points the probe there via HF_HUB_CACHE).
+    folder = _hermetic_hf_cache / repo_folder_name(repo_id=MODEL_ID, repo_type="model")
     snap = folder / "snapshots" / MODEL_REVISION
     snap.mkdir(parents=True)
     for pattern in model_cache._expected_weights_for(MODEL_ID):
