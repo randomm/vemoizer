@@ -161,29 +161,26 @@ class LLMClient:
         """
         try:
             if deadline_s is None:
+                # No deadline: the old single ``post`` — identical
+                # behaviour to main (issue #148 FIX 3: no production
+                # branch for mock-only code paths).
                 resp = self._get_client().post(url, json=body, headers=headers)
-                content: Any = getattr(resp, "content", None)
-                if not isinstance(content, (bytes, str)):
-                    # Not a real bytes body (test double, or a mock that
-                    # auto-created a MagicMock for ``content``): parse
-                    # the response's JSON view instead.
-                    content = resp.json()
+                if resp.status_code >= 400:
+                    resp.raise_for_status()
+                data = resp.json()
             else:
                 content = self._read_streamed(url, body, headers, deadline_s, monotonic)
-            data = json.loads(content) if isinstance(content, (bytes, str)) else content
-        except (httpx.HTTPError, ValueError, TypeError, OSError):
+                data = json.loads(content)
+        except (httpx.HTTPError, ValueError, OSError):
             # httpx.HTTPError covers RequestError, TimeoutException
             # (incl. LLMCallDeadlineExceeded, a TimeoutException
             # subclass), HTTPStatusError. ValueError covers
-            # json.JSONDecodeError (a ValueError); TypeError covers
-            # json.loads on a non-str/bytes response body (e.g. a mock
-            # returning an object) — any other JSON read failure.
-            # OSError covers network-level failures that
-            # httpx does not wrap into its own hierarchy (e.g. DNS,
-            # socket, file-descriptor exhaustion on the Client
-            # constructor itself). The fail-open contract is "never
-            # raises" — the caller's un-adjudicated text is returned on
-            # ANY failure, not just the expected ones.
+            # json.JSONDecodeError (a ValueError); OSError covers
+            # network-level failures that httpx does not wrap into its
+            # own hierarchy (e.g. DNS, socket, file-descriptor
+            # exhaustion on the Client constructor itself). The fail-open
+            # contract is "never raises" — the caller's un-adjudicated text
+            # is returned on ANY failure, not just the expected ones.
             return None
 
         choices = data.get("choices") if isinstance(data, dict) else None
