@@ -35,7 +35,12 @@ from vemoizer.preset_interrupt import (
 )
 from vemoizer.presets import RunOptions, resolve_options
 from vemoizer.progress import ProgressDisplay
-from vemoizer.progress_wiring import _close_run_display, _print_final_line
+from vemoizer.progress_wiring import _close_run_display
+from vemoizer.preset_final import (
+    print_final_line,
+    print_wrote_lines,
+    run_went_full,
+)
 from vemoizer.run_log import file_log
 from vemoizer.sidecar import resolve_run_glossary_files
 
@@ -174,21 +179,13 @@ def _run_preset_groups(
     # Issue #143: close the display before the wrote lines and the naming
     # prompt so neither is overdrawn by the live rich Progress.
     _close_run_display(display)
-    for name in written:
-        if not quiet:
-            typer.echo(f"wrote {name}")
-    # The single final line (issue #148): the only place "complete" appears.
-    # Gated on the run having succeeded for ALL files (exit 0 and every
-    # expected pair fully written): a partial pair or a failed check means
-    # some file's files are missing, so nothing may read "complete" — the
-    # successful groups' "wrote" lines still print above.
-    if (
-        not quiet
-        and written
-        and exit_code == 0
-        and len(written) == len(files) * len(PRESET_FORMATS)
-    ):
-        _print_final_line(len(written), quiet=quiet)
+    print_wrote_lines(written, quiet)
+    # The single final line (issue #148): the only place "complete"
+    # appears, gated on the run having succeeded for ALL files — a partial
+    # pair or a failed check means some file's files are missing, so the
+    # successful groups' "wrote" lines still print but "complete" does not.
+    if not quiet and run_went_full(written, files, exit_code):
+        print_final_line(len(written), quiet=quiet)
     # End-of-meeting naming hook (issue #95): the prompt is the last
     # interactive output; the hook never alters the run's exit code.
     if command == "meeting":
@@ -466,21 +463,13 @@ def run_preset(
         # naming prompt (meeting only); close() is idempotent.
         if command == "meeting":
             _close_run_display(display)
-        for name in written:
-            if not quiet:
-                typer.echo(f"wrote {name}")
+        print_wrote_lines(written, quiet)
         # The single final line (issue #148): the only place "complete"
-        # appears. Gated on the run having succeeded for ALL files (exit 0
-        # and every expected pair fully written): a partial pair or a
-        # failed check means some file's files are missing, so nothing may
-        # read "complete" — the successful files' "wrote" lines still
-        # print above; --quiet suppresses the line.
-        if (
-            written
-            and exit_code == 0
-            and len(written) == len(files) * len(PRESET_FORMATS)
-        ):
-            _print_final_line(len(written), quiet=quiet)
+        # appears, gated on the run having succeeded for ALL files; a
+        # partial pair or a failed check keeps the successful files' "wrote"
+        # lines but suppresses "complete"; --quiet suppresses both.
+        if run_went_full(written, files, exit_code):
+            print_final_line(len(written), quiet=quiet)
         # End-of-meeting naming hook (issue #95): memo never prompts;
         # the hook never alters the run's exit code.
         if command == "meeting":

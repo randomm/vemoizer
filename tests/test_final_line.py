@@ -88,6 +88,23 @@ class TestFinalLine:
         complete_idx = result.stdout.index("complete")
         assert complete_idx > wrote_idx
 
+    def test_final_line_carries_no_literal_markup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The final line prints PLAIN text — rich markup like ``[green]``
+        would print verbatim through ``typer.echo`` (issue #148 FIX 2)."""
+        _fake_transcribe_rich(monkeypatch, _two_label_paragraphs())
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        touch_files(["a.m4a"], tmp_path)
+
+        result = runner.invoke(app, ["meeting", "a.m4a", "--yes"], input="y\n")
+        assert result.exit_code == 0
+        final_line = next(s for s in result.stdout.splitlines() if "complete" in s)
+        assert "[green]" not in result.stdout
+        assert "[" not in final_line, final_line
+        assert "complete" in final_line
+        assert "wrote 2 file(s)" in final_line
+
     def test_quiet_suppresses_final_line(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

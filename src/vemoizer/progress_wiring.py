@@ -57,10 +57,16 @@ def _print_final_line(n_files: int, *, quiet: bool) -> None:
     final line is unambiguous — the run is done and its files are on
     disk. ``--quiet`` suppresses it (the quiet contract already covers
     the ``wrote`` lines it would follow).
+
+    Printed with a plain ``typer.echo`` and **no** rich markup: ``[green]``
+    in the string would print verbatim, because ``typer.echo`` does not
+    render rich markup (issue #148 FIX 2) — the brackets would leak to the
+    terminal. Plain text is what the operator sees and what the tests
+    assert.
     """
     if quiet:
         return
-    typer.echo(f"[green]✓ complete — wrote {n_files} file(s)")
+    typer.echo(f"\u2713 complete — wrote {n_files} file(s)")
 
 
 def set_batch_prefix(

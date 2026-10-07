@@ -34,6 +34,7 @@ from _cli_helpers import isolate_home, touch_files
 
 from vemoizer.batch_preset import run_preset
 from vemoizer.progress import ProgressDisplay
+from vemoizer.preset_final import print_final_line, print_wrote_lines, run_went_full
 
 _EXPECTED_STAGES = ["decode", "diarize", "repair", "notes"]
 
@@ -65,6 +66,32 @@ def _echo_recorder(record: dict[str, Any]):
             record.setdefault("echoes", []).append(str(msg))
 
     return fake_echo
+
+
+def _final_line_recorder(record: dict[str, Any]):
+    def fake_final_line(n_files: int, *, quiet: bool) -> None:
+        if quiet:
+            return
+        record.setdefault("echoes", []).append(f"✓ complete — wrote {n_files} file(s)")
+
+    return fake_final_line
+
+
+def _wrote_lines_recorder(record: dict[str, Any]):
+    def fake_wrote_lines(written: list[str], quiet: bool) -> None:
+        if not quiet:
+            for name in written:
+                record.setdefault("echoes", []).append(f"wrote {name}")
+
+    return fake_wrote_lines
+
+
+def _gate_recorder(record: dict[str, Any]):
+    def fake_gate(written: list[str], files: list, exit_code: int) -> bool:
+        record["gate"] = {"written": written, "files": files, "exit_code": exit_code}
+        return run_went_full(written, files, exit_code)
+
+    return fake_gate
 
 
 def _run_meeting(
@@ -107,6 +134,15 @@ def _run_meeting(
         mock.patch.object(notify_module, "notify_result", lambda *a, **kw: None),
         mock.patch.object(naming_hook_module.typer, "echo", _echo_recorder(record)),
         mock.patch("vemoizer.batch_preset.typer.echo", _echo_recorder(record)),
+        mock.patch(
+            "vemoizer.batch_preset.print_wrote_lines", _wrote_lines_recorder(record)
+        ),
+        mock.patch(
+            "vemoizer.batch_preset.run_went_full", _gate_recorder(record)
+        ),
+        mock.patch(
+            "vemoizer.batch_preset.print_final_line", _final_line_recorder(record)
+        ),
     ):
         return run_preset(
             [f],
@@ -154,7 +190,11 @@ def test_meeting_stage_markers_and_single_complete_line(
     wrote_idx = echoes.index(next(s for s in echoes if s.startswith("wrote ")))
     final_idx = echoes.index(final_lines[0])
     assert final_idx > wrote_idx
-    assert final_lines[0] == "[green]\u2713 complete — wrote 2 file(s)"
+    # The final line is PLAIN text (issue #148 FIX 2): rich markup like
+    # ``[green]`` would print verbatim through ``typer.echo``. The count
+    # and position are what matter; no square brackets may leak.
+    assert final_lines[0] == "\u2713 complete — wrote 2 file(s)"
+    assert "[" not in final_lines[0]
     assert all(s.startswith("wrote ") for s in echoes[: wrote_idx + 1])
 
     # (3) Display closed before the wrote lines and before the prompt.
