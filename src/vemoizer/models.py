@@ -245,7 +245,6 @@ def resolve_model_path(
     unchanged (offline mode, gated repos, …).
     """
     from huggingface_hub import snapshot_download
-    from huggingface_hub.utils import disable_progress_bars
 
     from .model_cache import snapshot_locally_complete
 
@@ -256,6 +255,18 @@ def resolve_model_path(
     if snapshot_locally_complete(repo_id, revision, cache_dir):
         # Warm cache: no network call, and no "Fetching" / "Download
         # complete" / "Reconstruction" progress bars (issue #147).
+        try:
+            from huggingface_hub.utils import disable_progress_bars
+        except ImportError:
+            # In tests that install a fake ``huggingface_hub`` module object
+            # in ``sys.modules`` without a real ``utils`` submodule, fall
+            # back to a no-op context manager so the warm-cache path still
+            # works.
+            import contextlib
+
+            def disable_progress_bars() -> Any:
+                return contextlib.nullcontext()
+
         with disable_progress_bars():
             return str(snapshot_download(repo_id, **all_kwargs))
     return str(snapshot_download(repo_id, **all_kwargs))
@@ -285,6 +296,7 @@ def pull_all(cache_dir: str | None = None) -> dict[str, str]:
 
 def pull_models(
     models: tuple[ModelSpec, ...] = MODELS,
+    cache_dir: str | None = None,
 ) -> list[PulledModel]:
     """Pre-download every model, revision-pinned, idempotent.
 
@@ -303,7 +315,9 @@ def pull_models(
     for spec in models:
         start = time.monotonic()
         try:
-            local_path = resolve_model_path(spec.repo_id, spec.revision)
+            local_path = resolve_model_path(
+                spec.repo_id, spec.revision, cache_dir=cache_dir
+            )
             results.append(
                 PulledModel(spec, str(local_path), None, time.monotonic() - start)
             )

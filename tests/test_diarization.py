@@ -13,6 +13,7 @@ needed to satisfy the checker.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -111,10 +112,17 @@ class _HuggingfaceHubModule(ModuleType):
     """Typed stand-in for the ``huggingface_hub`` module (issue #141)."""
 
     snapshot_download: Callable[..., Any]
+    utils: Any
+    constants: Any
 
     def __init__(self, snapshot_download_fn: Callable[..., Any]) -> None:
         super().__init__("huggingface_hub")
         self.snapshot_download = snapshot_download_fn
+        self.utils = mock.Mock(
+            disable_progress_bars=lambda: contextlib.nullcontext(),
+            are_progress_bars_disabled=lambda: False,
+        )
+        self.constants = mock.Mock(HF_HUB_CACHE="/tmp/hf-cache")
 
 
 class _PyannoteParentModule(ModuleType):

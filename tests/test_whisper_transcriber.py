@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -169,7 +170,12 @@ def test_transcribe_empty_audio_short_circuits() -> None:
     assert mock.transcribe.call_count == 0
 
 
-def test_load_failure_latches_and_raises() -> None:
+def test_load_failure_latches_and_raises(tmp_path: Path) -> None:
+    from huggingface_hub.file_download import repo_folder_name
+
+    # Cold cache: no snapshot dir for the pinned revision.
+    folder = tmp_path / repo_folder_name(repo_id=MODEL_ID, repo_type="model")
+    folder.mkdir(parents=True)
     with patch(
         "huggingface_hub.snapshot_download", side_effect=RuntimeError("offline")
     ) as dl:
@@ -178,16 +184,28 @@ def test_load_failure_latches_and_raises() -> None:
             t.transcribe(_audio(1.0))
         with pytest.raises(RuntimeError):
             t.transcribe(_audio(1.0))
-    # The local-only probe (fails) + the real download (fails) latch the load.
-    assert dl.call_count == 2
+    # The conservative probe (fails) latches the load; the real download
+    # (which also fails) is never retried.
+    assert dl.call_count == 1
 
 
-def test_warm_cache_load_silences_progress_bars() -> None:
+def test_warm_cache_load_silences_progress_bars(tmp_path: Path) -> None:
     """A locally-complete snapshot is resolved silently (no HF bars) on the
     meeting decode path — the load goes through the shared models seam
     (issue #147), so a warm-cache `vemoizer meeting` run prints no
     "Fetching" / "Download" / "Reconstruction" bars."""
     from huggingface_hub import utils as hf_utils
+    from huggingface_hub.file_download import repo_folder_name
+
+    from vemoizer import model_cache
+
+    folder = tmp_path / repo_folder_name(repo_id=MODEL_ID, repo_type="model")
+    snap = folder / "snapshots" / MODEL_REVISION
+    snap.mkdir(parents=True)
+    for pattern in model_cache._expected_weights_for(MODEL_ID):
+        weight = snap / pattern.replace("*", "weights")
+        weight.parent.mkdir(parents=True, exist_ok=True)
+        weight.write_bytes(b"0" * 16)
 
     mock = _mock_whisper({})
     seen: list[bool] = []
@@ -205,8 +223,8 @@ def test_warm_cache_load_silences_progress_bars() -> None:
         result = t.transcribe(np.zeros(16_000, dtype=np.float32))
         assert not hf_utils.are_progress_bars_disabled()  # no leaked disable
     assert result["text"] == ""
-    # Local-only probe (bars on) + one silent real call (bars off).
-    assert seen == [False, True]
+    # The probe no longer calls snapshot_download: exactly one silent call.
+    assert seen == [True]
 
 
 # -- slice_records_from_words --------------------------------------------

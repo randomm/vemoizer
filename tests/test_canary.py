@@ -12,6 +12,7 @@ paths are exercised with tiny in-memory tensors and a small real architecture.
 from __future__ import annotations
 
 import base64
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -666,15 +667,35 @@ def test_load_is_idempotent_under_concurrency() -> None:
         inst = CanaryTranscriber()
         inst._load_model()
         inst._load_model()  # second call must be a no-op
-        # One local-only probe + one real download; the memo keeps repeat
-        # loads probe-free.
-        assert mock_dl.call_count == 2
+        # The conservative probe no longer calls snapshot_download: exactly
+        # one real download call.
+        assert mock_dl.call_count == 1
 
 
-def test_warm_cache_load_silences_progress_bars() -> None:
+def test_warm_cache_load_silences_progress_bars(tmp_path: Path, monkeypatch) -> None:
     """A locally-complete snapshot is resolved silently on the decode B load
     path (issue #147): no HF progress bars on a warm-cache run."""
     from huggingface_hub import utils as hf_utils
+
+    from vemoizer import model_cache
+
+    model_cache.clear_memo()  # isolate from prior tests
+
+    from huggingface_hub.file_download import repo_folder_name
+
+    folder = tmp_path / repo_folder_name(repo_id=MODEL_ID, repo_type="model")
+    snap = folder / "snapshots" / MODEL_REVISION
+    snap.mkdir(parents=True)
+    for pattern in model_cache._expected_weights_for(MODEL_ID):
+        weight = snap / pattern.replace("*", "weights")
+        weight.parent.mkdir(parents=True, exist_ok=True)
+        weight.write_bytes(b"0" * 16)
+    # Point the probe at the tmp cache (the transcriber calls
+    # resolve_model_path with cache_dir=None, which reads
+    # huggingface_hub.constants.HF_HUB_CACHE at call time).
+    import huggingface_hub.constants as _hf_constants
+
+    monkeypatch.setattr(_hf_constants, "HF_HUB_CACHE", str(tmp_path))
 
     seen: list[bool] = []
 
@@ -690,7 +711,8 @@ def test_warm_cache_load_silences_progress_bars() -> None:
         inst = CanaryTranscriber()
         inst.transcribe(np.zeros(16_000, dtype=np.float32))
         assert not hf_utils.are_progress_bars_disabled()  # no leaked disable
-    assert seen == [False, True]  # probe (bars on) + silent real call
+    # The probe no longer calls snapshot_download: exactly one silent call.
+    assert seen == [True]
 
 
 def test_direct_safetensors_load_not_via_mlx_audio() -> None:

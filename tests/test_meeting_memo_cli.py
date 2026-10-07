@@ -61,6 +61,10 @@ def test_memo_help_lists_flags() -> None:
 
 def test_meeting_forwards_profile_meeting_and_diarize(tmp_path, monkeypatch) -> None:
     """meeting uses profile=meeting and diarize=True by default."""
+    import vemoizer.model_cache as _mc
+
+    _mc.clear_memo()  # isolate probe memo from prior tests
+
     import vemoizer.pipeline as pipeline_module
 
     seen: dict = {}

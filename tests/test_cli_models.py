@@ -108,7 +108,7 @@ def test_models_pull_help_describes_download() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_pull_calls_snapshot_download_per_model_with_full_sha() -> None:
+def test_pull_calls_snapshot_download_per_model_with_full_sha(tmp_path: Path) -> None:
     """Every model is pulled with its full-SHA revision as a kwarg."""
     calls: list[tuple[str, str | None]] = []
 
@@ -123,18 +123,15 @@ def test_pull_calls_snapshot_download_per_model_with_full_sha() -> None:
         result = runner.invoke(app, ["models", "pull"])
 
     assert result.exit_code == 0
-    # Each model gets a local-only probe + one real call = 2 calls per model.
-    assert len(calls) == 2 * 5
-    # Both the probe and the real call carry the pinned revision.
+    # The conservative probe no longer calls snapshot_download: exactly one
+    # real call per model.
+    assert len(calls) == len(models_mod.MODELS)
     for i, spec in enumerate(models_mod.MODELS):
-        probe_repo, probe_rev = calls[2 * i]
-        real_repo, real_rev = calls[2 * i + 1]
-        assert probe_repo == spec.repo_id
-        assert probe_rev == spec.revision
+        real_repo, real_rev = calls[i]
         assert real_repo == spec.repo_id
         assert real_rev == spec.revision
-        assert len(probe_rev) == 40
-        assert all(c in "0123456789abcdef" for c in probe_rev)
+        assert len(real_rev) == 40
+        assert all(c in "0123456789abcdef" for c in real_rev)
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +191,10 @@ def test_render_pull_report_stages_and_sizes() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_pull_warm_cache_no_redownload() -> None:
+def test_pull_warm_cache_no_redownload(tmp_path: Path) -> None:
+
+    for spec in models_mod.MODELS:
+        _make_cache_in(tmp_path, spec.repo_id, spec.revision)
     with (
         _patch_download(return_value="/fake/cache") as mock_dl,
         patch.object(models_mod, "cache_size", return_value=_empty_sizes()),
@@ -202,8 +202,23 @@ def test_pull_warm_cache_no_redownload() -> None:
         result = runner.invoke(app, ["models", "pull"])
 
     assert result.exit_code == 0
-    # Each model gets a local-only probe + one real call = 2 calls per model.
-    assert mock_dl.call_count == 2 * 5
+    # The conservative probe no longer calls snapshot_download: exactly one
+    # (silent) real call per model.
+    assert mock_dl.call_count == 5
+
+
+def _make_cache_in(cache: Path, repo_id: str, revision: str) -> None:
+    from huggingface_hub.file_download import repo_folder_name
+
+    from vemoizer import model_cache as _mc
+
+    folder = cache / repo_folder_name(repo_id=repo_id, repo_type="model")
+    snap = folder / "snapshots" / revision
+    snap.mkdir(parents=True)
+    for pattern in _mc._expected_weights_for(repo_id):
+        weight = snap / pattern.replace("*", "weights")
+        weight.parent.mkdir(parents=True, exist_ok=True)
+        weight.write_bytes(b"0" * 16)
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +289,7 @@ def test_pull_generic_error_not_raw() -> None:
     assert "secret-internal-traceback" not in result.stdout
 
 
-def test_pull_partial_failure_continues_to_remaining_models() -> None:
+def test_pull_partial_failure_continues_to_remaining_models(tmp_path: Path) -> None:
     call_count = {"n": 0}
 
     def flaky_download(repo_id, revision=None):
@@ -289,8 +304,9 @@ def test_pull_partial_failure_continues_to_remaining_models() -> None:
     ):
         result = runner.invoke(app, ["models", "pull"])
 
-    # Each model gets a local-only probe + one real call = 2 calls per model.
-    assert mock_dl.call_count == 2 * 5
+    # The conservative probe no longer calls snapshot_download: exactly one
+    # real call per model.
+    assert mock_dl.call_count == 5
     assert result.exit_code == 1
     assert "FAILED" in result.stdout
 

@@ -309,9 +309,9 @@ def test_load_failure_latches_instead_of_retrying_per_span() -> None:
     assert first.ok is False
     assert second.ok is False
     assert transcriber._load_failed is True
-    # The local-only probe (which fails) + the real download (which also
-    # fails) latch the load; per-span retry stays off.
-    assert download.call_count == 2
+    # The conservative probe (which fails) latches the load; the real
+    # download is attempted exactly once and per-span retry stays off.
+    assert download.call_count == 1
 
 
 def test_construction_does_not_download() -> None:
