@@ -149,6 +149,64 @@ class TestLoadConfig:
         # Passing a directory (not a file) must fail open, not raise.
         assert load_config(CONFIG_DIR) is None
 
+    # -- stage budgets (issue #148) ---------------------------------------
+    #
+    # The [llm] table gains two optional keys: repair_budget_seconds and
+    # notes_budget_seconds. Absent -> the safe 600 s default; present ->
+    # must be a positive finite number, else the section is malformed.
+    # These are tested against the raw TOML parser (the config fixtures
+    # pre-date the budget keys; a direct section-parse avoids fixture churn).
+
+    def _section(self, extra: str) -> LLMConfig | None:
+        import tomllib
+
+        from vemoizer.llm_config import _parse_llm_section
+
+        raw = tomllib.loads(
+            "[llm]\n"
+            'base_url = "http://localhost"\n'
+            'model = "m"\n'
+            'api_key_env = "K"\n'
+            "timeout_seconds = 10\n" + extra
+        )
+        return _parse_llm_section(raw["llm"])
+
+    def test_budget_keys_absent_use_safe_default(self) -> None:
+        cfg = self._section("")
+        assert cfg is not None
+        assert cfg.repair_budget_seconds == 600.0
+        assert cfg.notes_budget_seconds == 600.0
+
+    def test_budget_keys_present_are_parsed(self) -> None:
+        cfg = self._section(
+            "repair_budget_seconds = 120\nnotes_budget_seconds = 42.5\n"
+        )
+        assert cfg is not None
+        assert cfg.repair_budget_seconds == 120.0
+        assert cfg.notes_budget_seconds == 42.5
+
+    def test_repair_budget_zero_is_malformed(self) -> None:
+        assert self._section("repair_budget_seconds = 0\n") is None
+
+    def test_notes_budget_negative_is_malformed(self) -> None:
+        assert self._section("notes_budget_seconds = -5\n") is None
+
+    def test_repair_budget_bool_is_malformed(self) -> None:
+        # TOML bools are a distinct type; a true/false budget is a typo.
+        assert self._section("repair_budget_seconds = true\n") is None
+
+    def test_notes_budget_inf_is_malformed(self) -> None:
+        # 1e400 overflows to float("inf"); an infinite budget is a typo.
+        assert self._section("notes_budget_seconds = 1e400\n") is None
+
+    def test_budget_only_repair_present_notes_defaults(self) -> None:
+        # One budget key present, the other absent: the absent one keeps
+        # the default, the present one is used.
+        cfg = self._section("repair_budget_seconds = 90\n")
+        assert cfg is not None
+        assert cfg.repair_budget_seconds == 90.0
+        assert cfg.notes_budget_seconds == 600.0
+
 
 class TestBuildRequest:
     """Request shape: URL, body, headers. No hardcoding regression."""

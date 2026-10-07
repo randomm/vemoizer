@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from rich.progress import TaskID
 
 from .assembly import Candidate, _adjudicate, _b_text_in_span, _find_spans
 from .audio_contract import SAMPLE_RATE
@@ -388,8 +389,13 @@ def transcribe_file(
     if diarize:
         logger.info("diarization: starting")
         diarize_start = time.monotonic()
+        diarize_task: TaskID | None = (
+            display.add_stage("diarize") if display is not None else None
+        )
         speaker_segments = run_diarization_stage(audio, speakers)
         diarization_ran = speaker_segments is not None
+        if diarize_task is not None and display is not None:
+            display.finish(diarize_task)
         logger.info(
             "diarization: %s speaker segments in %s",
             len(speaker_segments) if speaker_segments is not None else "no",

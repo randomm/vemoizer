@@ -75,6 +75,11 @@ def _run_preset_groups(
     over the meeting write seam — one dated ``.md`` + ``.json`` pair per
     group in the CWD — and lets ``run_batch``'s single-file and
     ``--no-group`` short-circuits keep the per-file behaviour.
+
+    Ctrl-C (issue #148): a ``KeyboardInterrupt`` raised inside this
+    function propagates through ``run_preset``'s ``except`` chain untouched
+    (it is neither ``OSError`` nor ``ValueError``), so the command-level
+    handler names the stage this seam was in.
     """
     from vemoizer.batch import run_batch
     from vemoizer.presets import replace
@@ -137,6 +142,9 @@ def _run_preset_groups(
             Path.cwd(),
             date_str=_mtime_date_str(first),
         )
+        from vemoizer.preset_interrupt import note_written_files
+
+        note_written_files(pair)
         written.extend(pair)
         # A partial pair (fewer paths than the preset's formats — e.g.
         # the .json write failed) means this group's run failed; the error
@@ -183,7 +191,9 @@ def _run_preset_groups(
     # (meeting only — memo never prompts) is enforced at this call
     # site; the hook never alters the run's exit code.
     if command == "meeting":
-        ask_naming_hook(written, yes=yes, input_fn=input_fn, tty_isatty=tty_isatty)
+        ask_naming_hook(
+            written, yes=yes, quiet=quiet, input_fn=input_fn, tty_isatty=tty_isatty
+        )
     return max(code, exit_code)
 
 
@@ -337,8 +347,10 @@ def run_preset(
         # the file's own modification date (issue #87); the fallback stem
         # is the FIRST file's stem (deterministic, unchanged since #82).
         from vemoizer.caffeinate import caffeinate_context
+        from vemoizer.preset_interrupt import _set_interrupt_stage
         from vemoizer.progress_wiring import set_batch_prefix
 
+        _set_interrupt_stage("decoding")
         first_stem, _ = nfc_stem_and_suffix(files[0])
         exit_code = 0
         written: list[str] = []
@@ -441,6 +453,9 @@ def run_preset(
                         Path.cwd(),
                         date_str=_mtime_date_str(file),
                     )
+                    from vemoizer.preset_interrupt import note_written_files
+
+                    note_written_files(pair)
                     written.extend(pair)
                     if len(pair) < len(PRESET_FORMATS):
                         # A partial pair (e.g. the .json write failed) means
@@ -478,7 +493,9 @@ def run_preset(
         # (the command guard lives in the hook's call site), and the
         # hook never alters the run's exit code.
         if command == "meeting":
-            ask_naming_hook(written, yes=yes, input_fn=input_fn, tty_isatty=tty_isatty)
+            ask_naming_hook(
+                written, yes=yes, quiet=quiet, input_fn=input_fn, tty_isatty=tty_isatty
+            )
         return exit_code
     except OSError as e:
         # Temp-glossary write failure: clean error, non-zero exit, no

@@ -15,6 +15,7 @@ from typing import Any
 
 from .glossary import apply_corrections_to_notes
 from .llm import LLMClient, LLMConfig
+from .llm_budget import StageBudget
 from .notes import generate_notes
 from .progress import format_duration
 from .repair import repair_paragraphs
@@ -34,13 +35,22 @@ def _run_repair(
     llm_client_cls=None,
 ) -> None:
     """LLM repair pass over the final paragraphs (fixes phonetic ASR garble;
-    guarded against invention inside ``repair_paragraphs``)."""
+    guarded against invention inside ``repair_paragraphs``).
+
+    A wall-clock budget (``repair_budget_seconds``) bounds the whole loop:
+    on expiry the stage fails open — the remaining paragraphs ship
+    un-repaired and one warning is logged (invariant #5).
+    """
     fn = repair_paragraphs_fn or repair_paragraphs
     client_cls = llm_client_cls or LLMClient
+    budget = StageBudget(llm_config.repair_budget_seconds)
     repair_client = client_cls(llm_config)
     try:
         result["paragraphs"] = fn(
-            repair_client, result["paragraphs"], glossary=glossary or None
+            repair_client,
+            result["paragraphs"],
+            glossary=glossary or None,
+            budget=budget,
         )
     finally:
         repair_client.close()
@@ -54,10 +64,16 @@ def _run_notes(
     generate_notes_fn=None,
     llm_client_cls=None,
 ) -> None:
-    """Generate the Markdown summary; a failure warns, never aborts."""
+    """Generate the Markdown summary; a failure warns, never aborts.
+
+    A wall-clock budget (``notes_budget_seconds``) bounds the call set:
+    on expiry the stage fails open — the transcript ships without notes
+    and one warning is logged (invariant #5).
+    """
     fn = generate_notes_fn or generate_notes
     client_cls = llm_client_cls or LLMClient
     notes_start = time.monotonic()
+    budget = StageBudget(llm_config.notes_budget_seconds)
     client = client_cls(llm_config)
     try:
         notes = fn(
@@ -65,6 +81,7 @@ def _run_notes(
             result["text"],
             paragraphs=result.get("paragraphs"),
             glossary=glossary or None,
+            budget=budget,
         )
     finally:
         client.close()

@@ -7,15 +7,20 @@ existing ``run_names`` flow on each written sidecar that has 2+ labelled
 speakers.
 
 Every guard fires BEFORE any ``input_fn`` call, so memo, ``--yes``,
-piped/CI (non-TTY stdin or stdout) and runs with no eligible sidecar are
-complete no-ops — no prompt, no output, no change to the run's exit
-code (the hook never alters it; the call sites take ``max(code, exit)``).
+piped/CI (non-TTY stdin or stdout) and runs with no eligible sidecar
+skip without prompting and without changing the run's exit code (the
+hook never alters it; the call sites take ``max(code, exit)``).
+On any skip the hook prints one short reason line —
+``skipping speaker naming: <reason>`` (issue #148) — unless ``--quiet``
+is set (both call sites thread the run's ``--quiet`` flag through), so a
+missing prompt is never a mystery:
 
-Eligibility is computed from the sidecars on disk (suffix-based scan of
-the written names: ``*.json`` resolved against ``Path.cwd()``), never
-from the in-memory transcribe result. Missing, unreadable, non-dict, or
-non-list-``paragraphs`` sidecars are skipped silently; a sidecar with a
-pre-existing ``speaker_names`` is still eligible.
+- a ``--yes`` run (``not requested``), a piped/CI run (``not an
+  interactive terminal``), and a TTY run that wrote no ``.json``
+  sidecar at all (``no speaker labels in this run`` — a partial pair /
+  write failure) each get the line;
+- a sidecar with <2 speaker labels is a legitimate no-op, not a
+  mystery, and prints nothing.
 
 ``_stdout_isatty`` is re-exported from :mod:`vemoizer.names_cli` (the
 single source of truth, issue #95 d3) so the hook's stdout-TTY gate is
@@ -37,15 +42,23 @@ from vemoizer.speaker_clips import talk_share
 __all__ = ["_eligible_sidecars", "_stdout_isatty", "ask_naming_hook"]
 
 
-def _eligible_sidecars(written: list[str]) -> list[Path]:
+def _eligible_sidecars(written: list[str]) -> tuple[list[Path], bool]:
     """The written ``*.json`` sidecars (resolved against ``Path.cwd()``)
     whose on-disk ``paragraphs`` list carries 2+ distinct speaker
-    labels. Missing, unreadable, malformed, or single-label sidecars are
-    skipped silently."""
+    labels, and whether *any* ``*.json`` name was in the written list
+    at all.
+
+    Missing, unreadable, malformed, or single-label sidecars are skipped
+    silently. The boolean distinguishes "no ``.json`` in the written
+    list at all" (a mystery a user cannot guess — the partial-pair /
+    write-failure case) from "a sidecar exists but has <2 speaker
+    labels" (a legitimate no-op)."""
     eligible: list[Path] = []
+    json_in_written = False
     for name in written:
         if not name.endswith(".json"):
             continue
+        json_in_written = True
         path = Path.cwd() / name
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -58,23 +71,40 @@ def _eligible_sidecars(written: list[str]) -> list[Path]:
             continue
         if len(talk_share(paragraphs)) >= 2:
             eligible.append(path)
-    return eligible
+    return eligible, json_in_written
+
+
+def _narrate_skip(reason: str, *, quiet: bool) -> None:
+    """Print the one-line skip narrative for a *reason* (issue #148),
+    unless ``--quiet``."""
+    if quiet:
+        return
+    typer.echo(f"skipping speaker naming: {reason}")
 
 
 def ask_naming_hook(
     written_sidecars: list[str],
     *,
     yes: bool,
+    quiet: bool = False,
     input_fn: Callable[[str], str] | None = None,
     tty_isatty: Callable[[], bool] | None = None,
 ) -> int:
     """The end-of-meeting naming hook.
 
-    Skips (returns immediately, no output) when: *yes* is set (``--yes``
-    is a complete no-op for the hook), stdin or stdout is not a TTY, or
-    no written sidecar is eligible. Otherwise prompts once; a stripped
-    answer starting with ``y``/``Y`` runs :func:`vemoizer.names_cli.run_names`
-    on each eligible sidecar in order.
+    Skips (returns immediately) when: *yes* is set (``--yes`` is a
+    complete no-op for the hook), stdin or stdout is not a TTY, or no
+    written sidecar is eligible. On a skip the hook prints one short
+    ``skipping speaker naming: <reason>`` line unless *quiet* is set
+    (issue #148) — for a ``--yes`` run (``not requested``), a non-
+    interactive terminal (``not an interactive terminal``), and a run
+    that wrote no ``.json`` sidecar at all (``no speaker labels in this
+    run``, e.g. a partial pair / failed write) — so a missing prompt is
+    never a mystery. A sidecar that simply has <2 speaker labels is a
+    legitimate no-op and prints nothing. Otherwise prompts once; a
+    stripped answer starting with ``y``/``Y`` runs
+    :func:`vemoizer.names_cli.run_names` on each eligible sidecar in
+    order.
 
     Per-sidecar failures never touch the exit code: any ``Exception``
     or ``SystemExit`` (e.g. a ``sys.exit()`` inside the names flow) prints
@@ -84,17 +114,26 @@ def ask_naming_hook(
     ``0`` — the caller ``max``es it with the run's own code.
     """
     if yes:
+        _narrate_skip("not requested", quiet=quiet)
         return 0
     isatty = tty_isatty if tty_isatty is not None else sys.stdin.isatty
     if not isatty():
+        _narrate_skip("not an interactive terminal", quiet=quiet)
         return 0
     if not _stdout_isatty():
+        _narrate_skip("not an interactive terminal", quiet=quiet)
         return 0
 
     from vemoizer.names_cli import run_names
 
-    eligible = _eligible_sidecars(written_sidecars)
+    eligible, json_in_written = _eligible_sidecars(written_sidecars)
     if not eligible:
+        if not json_in_written:
+            # No ``.json`` in the written list at all (partial pair /
+            # write failure): a mystery the user cannot guess — narrate it
+            # (issue #148). A sidecar that exists but is unreadable or
+            # has <2 labels is a legitimate no-op and stays silent.
+            _narrate_skip("no speaker labels in this run", quiet=quiet)
         return 0
 
     ask = input_fn if input_fn is not None else input

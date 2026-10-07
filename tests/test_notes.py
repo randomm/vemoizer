@@ -10,7 +10,21 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
+from vemoizer.llm_budget import StageBudget
 from vemoizer.notes import _chunk_text, generate_notes
+
+
+class _FakeClock:
+    """A controllable ``time.monotonic`` stand-in for the budget loop."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
 
 
 def _client(responses: list[str | None]) -> MagicMock:
@@ -279,3 +293,72 @@ def test_owner_prefix_is_skipped_when_item_already_starts_with_owner() -> None:
     notes = generate_notes(_client([payload]), transcript)
     assert notes is not None
     assert notes["action_items"] == ["Tuomas laittaa pyynnöt eteenpäin"]
+
+
+# -- wall-clock budget (issue #148) ---------------------------------------
+#
+# A stalled connection that keeps resetting the per-call httpx timeout
+# would otherwise hold the notes stage (which makes 1..N+1 sequential
+# calls) forever. The budget bounds the whole call set: on expiry the
+# stage returns None (fail-open) and the transcript ships without notes.
+
+
+def test_notes_budget_exhausted_returns_none_before_reduce() -> None:
+    """A long transcript map-reduces (N map calls + 1 reduce). A tiny
+    budget that expires after the first map call makes the loop return
+    None before the reduce — the transcript ships without notes."""
+    clock = _FakeClock()
+    budget = StageBudget(10.0, clock=clock)
+    long_text = ("sana " * 5_000).strip()  # ~25K -> several chunks (map-reduce)
+
+    def slow_complete(system, user, max_tokens=2048):
+        clock.advance(10.0)  # each call burns the full remaining budget
+        if "osayhteenveto" in user:
+            return _notes_json(summary="koottu")  # reduce
+        return "yhden osan tiivistelmä"  # map
+
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=slow_complete)
+    notes = generate_notes(client, long_text, budget=budget)
+    # The budget expired mid-loop -> fail-open to None (no notes).
+    assert notes is None
+    # The reduce call must NOT have fired (the budget cut the loop off
+    # before it could reach the reduce). Only map calls ran.
+    for call in client.complete.call_args_list:
+        assert "osayhteenveto" not in call.args[1]
+
+
+def test_notes_budget_none_runs_to_completion() -> None:
+    """No budget (None) -> the notes stage runs its full map-reduce and
+    returns parsed notes."""
+    long_text = ("sana " * 5_000).strip()
+
+    def fake_complete(system, user, max_tokens=2048):
+        if "osayhteenveto" in user:
+            return _notes_json(summary="koottu")
+        return "yhden osan tiivistelmä"
+
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=fake_complete)
+    notes = generate_notes(client, long_text, budget=None)
+    assert notes is not None
+    assert notes["summary"] == "koottu"
+
+
+def test_notes_budget_exhausted_on_single_call_path_returns_none() -> None:
+    """Even the short single-call path is budget-gated: an already-expired
+    budget returns None before any client.complete call.
+
+    The budget is constructed at clock 0, then the clock advances past the
+    budget (simulating time passing before the first ``exhausted()`` check).
+    """
+    clock = _FakeClock()
+    budget = StageBudget(10.0, clock=clock)
+    clock.advance(100.0)  # 100 s passes before the stage's first gate check
+    assert budget.exhausted()  # 100s elapsed > 10s budget
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=[_notes_json()])
+    notes = generate_notes(client, "lyhyt transkripti", budget=budget)
+    assert notes is None
+    # The budget gate fired before any call was made.
+    assert client.complete.call_count == 0

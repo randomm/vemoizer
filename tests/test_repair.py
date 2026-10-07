@@ -11,7 +11,21 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from vemoizer.llm_budget import StageBudget
 from vemoizer.repair import repair_paragraphs
+
+
+class _FakeClock:
+    """A controllable ``time.monotonic`` stand-in for the budget loop."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
 
 
 def _client(replies):
@@ -88,3 +102,102 @@ def test_repair_prompt_maps_glossary_near_misses() -> None:
     repair_paragraphs(client, [_para("teksti")], glossary=["Flagship-hanke"])
     assert "foneettisesti lähellä" in seen["system"]
     assert "Flagship-hanke" in seen["system"]
+
+
+# -- wall-clock budget (issue #148) ---------------------------------------
+#
+# A stalled connection that keeps resetting the per-call httpx timeout
+# would otherwise hold the run forever. The stage-level budget bounds the
+# whole loop: on expiry the stage stops calling, ships the remaining
+# paragraphs un-repaired (fail-open, invariant #5), and logs one warning.
+# The clock is a fake so the test is deterministic — no real sleep, no
+# network.
+
+
+def test_budget_exhausted_stops_loop_and_ships_originals() -> None:
+    """Once the budget is spent, the loop stops and the remaining
+    paragraphs ship with their ORIGINAL text (fail-open)."""
+    clock = _FakeClock()
+    # 4 paragraphs, each 'repair call' burns 10 s of wall time. Budget is
+    # 25 s. The budget is checked at the TOP of the loop, before the call:
+    #   para 1: elapsed 0  < 25 -> call  -> elapsed 10
+    #   para 2: elapsed 10 < 25 -> call  -> elapsed 20
+    #   para 3: elapsed 20 < 25 -> call  -> elapsed 30
+    #   para 4: elapsed 30 >= 25 -> STOP (budget exhausted)
+    # So 3 calls; the 4th paragraph ships un-repaired.
+    clock.now = 0.0
+    budget = StageBudget(25.0, clock=clock)
+
+    # Each reply is a high-similarity fix (a single extra letter) that the
+    # no-invention guard accepts — so the repaired text is visibly different
+    # from the original, while the budget gate still cuts the loop off.
+    def slow_complete(system, user, max_tokens=2048):
+        clock.advance(10.0)  # each call burns 10 s of wall clock
+        return user + "x"
+
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=slow_complete)
+    paras = [_para(f"lause {i}") for i in range(4)]
+
+    out = repair_paragraphs(client, paras, budget=budget)
+
+    assert len(out) == 4  # all paragraphs present in the output
+    # Exactly 3 calls made; the 4th was cut off by the budget gate.
+    assert client.complete.call_count == 3
+    # The first three were repaired (high-similarity +x); the last kept
+    # its original text verbatim.
+    assert out[0]["text"] == "lause 0x"
+    assert out[1]["text"] == "lause 1x"
+    assert out[2]["text"] == "lause 2x"
+    assert out[3]["text"] == "lause 3"  # untouched original
+    assert out[3]["text"] != "lause 3x"
+
+
+def test_budget_none_never_exhausted() -> None:
+    """No budget (None) -> the stage runs to completion, every paragraph
+    gets a call."""
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=["a korjattu", "b korjattu"])
+    out = repair_paragraphs(client, [_para("a"), _para("b")], budget=None)
+    assert client.complete.call_count == 2
+    assert len(out) == 2
+
+
+def test_budget_zero_never_exhausted_disables_cap() -> None:
+    """A 0-second budget is the 'no cap' fail-open case, not an immediate
+    abort — the stage runs to completion."""
+    clock = _FakeClock()
+    budget = StageBudget(0.0, clock=clock)
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=["a korjattu", "b korjattu"])
+    out = repair_paragraphs(client, [_para("a"), _para("b")], budget=budget)
+    assert client.complete.call_count == 2
+    assert len(out) == 2
+
+
+def test_repair_emits_throttled_heartbeat(caplog) -> None:
+    """The loop logs a throttled INFO heartbeat (count + elapsed, no
+    transcript text) so a hung stage is distinguishable from a slow one."""
+    clock = _FakeClock()
+    budget = StageBudget(1000.0, clock=clock)  # generous budget
+
+    def slow_complete(system, user, max_tokens=2048):
+        clock.advance(10.0)  # push past PROGRESS_INTERVAL_S (5.0)
+        return user
+
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=slow_complete)
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="vemoizer.repair"):
+        repair_paragraphs(client, [_para("eka"), _para("toka")], budget=budget)
+
+    heartbeats = [
+        r.getMessage() for r in caplog.records if r.getMessage().startswith("repair:")
+    ]
+    # At least one heartbeat fired (elapsed crossed the 5 s interval).
+    assert any("1/2 paragraphs" in h or "2/2 paragraphs" in h for h in heartbeats)
+    # Privacy: the heartbeat carries only count + elapsed, never the text.
+    for h in heartbeats:
+        assert "eka" not in h
+        assert "toka" not in h

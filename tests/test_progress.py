@@ -142,6 +142,25 @@ def test_update_stage_text(
     display.close()
 
 
+def test_finish_uses_stage_name_not_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """finish() renders "✓ <stage_name>" not "✓ complete" (issue #148).
+
+    The word "complete" is reserved for the run's final line; each stage
+    gets its own marker ("decode ✓", "diarize ✓", "repair ✓", "notes ✓").
+    """
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
+    display = ProgressDisplay()
+    display.start()
+    task_id = display.add_stage("diarize")
+    display.finish(task_id)
+    desc = display._progress.tasks[task_id].description
+    assert desc == "[green]✓ diarize", f"Expected stage-name marker, got: {desc!r}"
+    assert "complete" not in desc
+    display.close()
+
+
 # ---------------------------------------------------------------------------
 # Stderr stays empty when disabled (the non-TTY guarantee)
 # ---------------------------------------------------------------------------
@@ -210,7 +229,7 @@ def test_prefix_active_stage_skips_finished_tasks(
     display.finish(task_id, 1.0)
     display.prefix_active_stage("[1/2] a · ")
     desc = display._progress.tasks[task_id].description
-    assert desc == "[green]✓ complete", (
+    assert desc == "[green]✓ decode", (
         f"Expected unchanged description after finish, got: {desc!r}"
     )
     display.close()

@@ -75,6 +75,24 @@ def _write_sidecar(tmp_path: Path, name: str, paragraphs: list[dict]) -> str:
     return name
 
 
+def _capture_echo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, list[dict[str, Any]]]:
+    """Patch ``naming_hook.typer.echo`` into a recorder; return the record.
+
+    ``stdout`` = calls without ``err=True``; ``stderr`` = calls with it.
+    Used to assert on the hook's own printed lines (skip-reason narration,
+    warnings, "naming cancelled") independent of the CLI-level runner.
+    """
+    record: dict[str, list[dict[str, Any]]] = {"stdout": [], "stderr": []}
+
+    def fake_echo(msg, err: bool = False, **kw: Any) -> None:
+        record["stderr" if err else "stdout"].append({"msg": msg, "kw": kw})
+
+    monkeypatch.setattr(naming_hook.typer, "echo", fake_echo)
+    return record
+
+
 def _stub_run_names(monkeypatch: pytest.MonkeyPatch, return_val: int = 0) -> list:
     """Monkeypatch vemoizer.names_cli.run_names with a recorder.
 
@@ -532,6 +550,182 @@ class TestHookFailureInjection:
         assert calls[0].name == "A.json"
 
 
+# --- Skip-reason narration (issue #148) --------------------------------------
+
+
+class TestSkipNarration:
+    """Issue #148: every skip fires exactly one ``skipping speaker
+    naming: <reason>`` line unless *quiet* is set, and the <2-label
+    sidecar stays silent (a legitimate no-op, not a mystery)."""
+
+    def test_yes_narrates_not_requested(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        _write_sidecar(tmp_path, "a.json", _two_label_paragraphs())
+        rec = _capture_echo(monkeypatch)
+
+        rc = naming_hook.ask_naming_hook(
+            ["a.json"], yes=True, input_fn=lambda p: "y", tty_isatty=lambda: True
+        )
+        assert rc == 0
+        assert [m["msg"] for m in rec["stdout"]] == [
+            "skipping speaker naming: not requested"
+        ]
+
+    def test_yes_quiet_prints_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        _write_sidecar(tmp_path, "a.json", _two_label_paragraphs())
+        rec = _capture_echo(monkeypatch)
+
+        rc = naming_hook.ask_naming_hook(
+            ["a.json"],
+            yes=True,
+            quiet=True,
+            input_fn=lambda p: "y",
+            tty_isatty=lambda: True,
+        )
+        assert rc == 0
+        assert rec["stdout"] == []
+
+    def test_non_tty_stdin_narrates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        _write_sidecar(tmp_path, "a.json", _two_label_paragraphs())
+        rec = _capture_echo(monkeypatch)
+
+        rc = naming_hook.ask_naming_hook(
+            ["a.json"], yes=False, input_fn=lambda p: "y", tty_isatty=lambda: False
+        )
+        assert rc == 0
+        assert [m["msg"] for m in rec["stdout"]] == [
+            "skipping speaker naming: not an interactive terminal"
+        ]
+
+    def test_non_tty_stdout_narrates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        monkeypatch.setattr(naming_hook, "_stdout_isatty", lambda: False)
+        _write_sidecar(tmp_path, "a.json", _two_label_paragraphs())
+        rec = _capture_echo(monkeypatch)
+
+        rc = naming_hook.ask_naming_hook(
+            ["a.json"], yes=False, input_fn=lambda p: "y", tty_isatty=lambda: True
+        )
+        assert rc == 0
+        assert [m["msg"] for m in rec["stdout"]] == [
+            "skipping speaker naming: not an interactive terminal"
+        ]
+
+    def test_quiet_non_tty_prints_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        _write_sidecar(tmp_path, "a.json", _two_label_paragraphs())
+        rec = _capture_echo(monkeypatch)
+
+        rc = naming_hook.ask_naming_hook(
+            ["a.json"],
+            yes=False,
+            quiet=True,
+            input_fn=lambda p: "y",
+            tty_isatty=lambda: False,
+        )
+        assert rc == 0
+        assert rec["stdout"] == []
+
+    def test_no_sidecar_at_all_narrates_no_labels(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """TTY run, only a .md written (partial pair): narrate."""
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        monkeypatch.setattr(naming_hook, "_stdout_isatty", lambda: True)
+        rec = _capture_echo(monkeypatch)
+
+        rc = naming_hook.ask_naming_hook(
+            ["2025-01-01 T.md"],
+            yes=False,
+            input_fn=lambda p: "y",
+            tty_isatty=lambda: True,
+        )
+        assert rc == 0
+        assert [m["msg"] for m in rec["stdout"]] == [
+            "skipping speaker naming: no speaker labels in this run"
+        ]
+
+    def test_no_sidecar_missing_file_stays_silent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """TTY run, .json listed but absent on disk: legitimate no-op,
+        stays silent (a sidecar name was in the written list — not a
+        partial-pair mystery)."""
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        monkeypatch.setattr(naming_hook, "_stdout_isatty", lambda: True)
+        rec = _capture_echo(monkeypatch)
+
+        rc = naming_hook.ask_naming_hook(
+            ["2025-01-01 Missing.json"],
+            yes=False,
+            input_fn=lambda p: "y",
+            tty_isatty=lambda: True,
+        )
+        assert rc == 0
+        assert rec["stdout"] == []
+
+    def test_no_sidecar_quiet_prints_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        monkeypatch.setattr(naming_hook, "_stdout_isatty", lambda: True)
+        rec = _capture_echo(monkeypatch)
+
+        rc = naming_hook.ask_naming_hook(
+            ["2025-01-01 T.md"],
+            yes=False,
+            quiet=True,
+            input_fn=lambda p: "y",
+            tty_isatty=lambda: True,
+        )
+        assert rc == 0
+        assert rec["stdout"] == []
+
+    def test_one_label_sidecar_stays_silent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A sidecar with <2 labels is a legitimate no-op: no line."""
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        monkeypatch.setattr(naming_hook, "_stdout_isatty", lambda: True)
+        _write_sidecar(tmp_path, "one.json", _one_label_paragraphs())
+        rec = _capture_echo(monkeypatch)
+
+        rc = naming_hook.ask_naming_hook(
+            ["one.json"], yes=False, input_fn=lambda p: "y", tty_isatty=lambda: True
+        )
+        assert rc == 0
+        assert rec["stdout"] == []
+
+    def test_zero_label_sidecar_stays_silent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        monkeypatch.setattr(naming_hook, "_stdout_isatty", lambda: True)
+        _write_sidecar(tmp_path, "nolabels.json", _no_label_paragraphs())
+        rec = _capture_echo(monkeypatch)
+
+        rc = naming_hook.ask_naming_hook(
+            ["nolabels.json"],
+            yes=False,
+            input_fn=lambda p: "y",
+            tty_isatty=lambda: True,
+        )
+        assert rc == 0
+        assert rec["stdout"] == []
+
+
 # --- Integration tests through run_preset ------------------------------------
 
 
@@ -548,10 +742,10 @@ class TestIntegrationCommandGuard:
         assert len(calls) == 0
         assert "Name the speakers now?" not in result.stdout
 
-    def test_meeting_with_yes_no_hook(
+    def test_meeting_with_yes_narrates_not_requested(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        """--yes: the hook is a complete no-op."""
+        """--yes: the hook skips, narrates one reason line, no run_names."""
         _fake_transcribe_rich(monkeypatch, _two_label_paragraphs())
         calls = _stub_run_names(monkeypatch)
         isolate_home(monkeypatch, tmp_path, tmp_path)
@@ -561,6 +755,53 @@ class TestIntegrationCommandGuard:
         assert result.exit_code == 0
         assert len(calls) == 0
         assert "Name the speakers now?" not in result.stdout
+        assert result.stdout.count("skipping speaker naming: not requested") == 1
+
+    def test_meeting_yes_quiet_suppresses_narration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """--yes --quiet: no skip-reason line (quiet threaded from CLI)."""
+        _fake_transcribe_rich(monkeypatch, _two_label_paragraphs())
+        calls = _stub_run_names(monkeypatch)
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        touch_files(["a.m4a"], tmp_path)
+
+        result = runner.invoke(
+            app, ["meeting", "a.m4a", "--yes", "--quiet"], input="y\n"
+        )
+        assert result.exit_code == 0
+        assert len(calls) == 0
+        assert "skipping speaker naming" not in result.stdout
+
+
+class TestIntegrationPartialPair:
+    def test_partial_pair_no_json_narrates_no_labels(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A partial pair (only .md written, no .json): exit code 1, no
+        prompt. The skip-reason line is the non-TTY reason (CliRunner
+        pipes stdin), not the no-sidecar reason — the latter is covered
+        by unit tests (TestSkipNarration.test_no_sidecar_at_all_*)."""
+        import vemoizer.batch_preset as batch_preset
+        from vemoizer.batch_output import _write_preset_output as real_write
+
+        def partial_write(result, first_stem, out_dir, *, date_str=None):
+            paths = real_write(result, first_stem, out_dir, date_str=date_str)
+            return [p for p in paths if p.endswith(".md")]
+
+        monkeypatch.setattr(batch_preset, "_write_preset_output", partial_write)
+        _fake_transcribe_rich(monkeypatch, _two_label_paragraphs())
+        calls = _stub_run_names(monkeypatch)
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        touch_files(["a.m4a"], tmp_path)
+
+        result = runner.invoke(app, ["meeting", "a.m4a"], input="y\n")
+        assert result.exit_code == 1
+        assert len(calls) == 0
+        assert "Name the speakers now?" not in result.stdout
+        # Under CliRunner, stdin is a pipe (non-TTY), so the non-TTY guard
+        # fires before the no-sidecar guard.
+        assert "skipping speaker naming: not an interactive terminal" in result.stdout
 
 
 class TestIntegrationTranscriptionFailure:
@@ -573,31 +814,6 @@ class TestIntegrationTranscriptionFailure:
             raise RuntimeError("boom")
 
         monkeypatch.setattr(pipeline_module, "transcribe_file", fake_raise)
-        calls = _stub_run_names(monkeypatch)
-        isolate_home(monkeypatch, tmp_path, tmp_path)
-        touch_files(["a.m4a"], tmp_path)
-
-        result = runner.invoke(app, ["meeting", "a.m4a"], input="y\n")
-        assert result.exit_code == 1
-        assert len(calls) == 0
-        assert "Name the speakers now?" not in result.stdout
-
-
-class TestIntegrationPartialPair:
-    def test_partial_pair_no_json_no_prompt(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        """A partial pair (only .md written, no .json): no eligible
-        sidecar, no prompt. Exit code is 1 (write failure)."""
-        import vemoizer.batch_preset as batch_preset
-        from vemoizer.batch_output import _write_preset_output as real_write
-
-        def partial_write(result, first_stem, out_dir, *, date_str=None):
-            paths = real_write(result, first_stem, out_dir, date_str=date_str)
-            return [p for p in paths if p.endswith(".md")]
-
-        monkeypatch.setattr(batch_preset, "_write_preset_output", partial_write)
-        _fake_transcribe_rich(monkeypatch, _two_label_paragraphs())
         calls = _stub_run_names(monkeypatch)
         isolate_home(monkeypatch, tmp_path, tmp_path)
         touch_files(["a.m4a"], tmp_path)

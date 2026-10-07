@@ -22,15 +22,33 @@ import typer
 
 LLM_CONFIG_SECTION: str = "llm"
 
+#: Default TOTAL wall-clock allowance for the repair and notes stages
+#: (issue #148). A stalled connection that keeps resetting the per-call
+#: timeout would otherwise hold the run forever; these budgets bound the
+#: stage as a whole (per invariant #5 the stage fails open on expiry).
+DEFAULT_REPAIR_BUDGET_S: float = 600.0
+DEFAULT_NOTES_BUDGET_S: float = 600.0
+
 
 @dataclass(frozen=True)
 class LLMConfig:
-    """Parsed ``[llm]`` section. base_url, model, api_key_env, timeout_seconds."""
+    """Parsed ``[llm]`` section.
+
+    ``base_url``, ``model``, ``api_key_env`` and ``timeout_seconds`` are
+    required (the per-call timeout is a per-read bound). The two stage
+    budgets (``repair_budget_seconds``, ``notes_budget_seconds``) are the
+    TOTAL wall-clock allowance for the repair and notes stages respectively
+    (issue #148): they cap a stage whose per-call timeout keeps resetting on
+    a stalled connection. Both default to 600 s (10 min) when absent and
+    fail open — the stage just runs to its natural end.
+    """
 
     base_url: str
     model: str
     api_key_env: str
     timeout_seconds: float
+    repair_budget_seconds: float = DEFAULT_REPAIR_BUDGET_S
+    notes_budget_seconds: float = DEFAULT_NOTES_BUDGET_S
 
 
 def load_config(path: Path | str) -> LLMConfig | None:
@@ -68,7 +86,14 @@ _KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
     {LLM_CONFIG_SECTION, "people", "meeting"}
 )
 _KNOWN_LLM_KEYS: frozenset[str] = frozenset(
-    {"base_url", "model", "api_key_env", "timeout_seconds"}
+    {
+        "base_url",
+        "model",
+        "api_key_env",
+        "timeout_seconds",
+        "repair_budget_seconds",
+        "notes_budget_seconds",
+    }
 )
 #: Known ``[meeting]`` keys for strict validation (issue #108): the single
 #: ``language`` override — a typo (e.g. ``langugae``) is warned, not fatal.
@@ -133,12 +158,44 @@ def _parse_llm_section(section: dict[str, Any]) -> LLMConfig | None:
         # into a ConfigError (the section is malformed, not a 10^400-second
         # timeout) (issue #82 review).
         return None
+
+    # The stage budgets are optional (issue #148): absent -> the dataclass
+    # field default (the safe 600 s); present -> must be a positive finite
+    # number, else the section is malformed (return None). A typo'd
+    # 0/negative budget is rejected here, not silently applied.
+    for budget_key in ("repair_budget_seconds", "notes_budget_seconds"):
+        if budget_key in section:
+            budget = section[budget_key]
+            if (
+                not isinstance(budget, (int, float))
+                or isinstance(budget, bool)
+                or budget <= 0
+                or not math.isfinite(float(budget))
+            ):
+                return None
+
     return LLMConfig(
         base_url=base_url.rstrip("/"),
         model=model.strip(),
         api_key_env=api_key_env,
         timeout_seconds=float(timeout),
+        **_stage_budget_kwargs(section),
     )
+
+
+def _stage_budget_kwargs(section: dict[str, Any]) -> dict[str, float]:
+    """The ``repair_budget_seconds``/``notes_budget_seconds`` kwargs (issue #148).
+
+    Only present keys are passed (the dataclass default, the safe 600 s,
+    applies otherwise). Callers must validate the keys first (a present but
+    malformed value makes ``_parse_llm_section`` return ``None``); this
+    helper trusts the value is positive-finite when present.
+    """
+    kwargs: dict[str, float] = {}
+    for key in ("repair_budget_seconds", "notes_budget_seconds"):
+        if key in section:
+            kwargs[key] = float(section[key])
+    return kwargs
 
 
 def _strict_load_raw(path: Path) -> tuple[LLMConfig, dict[str, Any]]:

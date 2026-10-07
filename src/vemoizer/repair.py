@@ -9,7 +9,11 @@ passes a no-invention guard, and anything the guard rejects (ballooned
 length, low similarity = paraphrase) ships as the original.
 
 Fail-open like every LLM stage (invariant #5): no config, no key, any
-error — the paragraphs pass through untouched.
+error — the paragraphs pass through untouched. A per-stage wall-clock
+budget (issue #148) additionally bounds the whole loop: on expiry the
+stage stops calling the model, ships the remaining paragraphs un-repaired,
+and logs one warning — so a stalled connection that keeps resetting the
+per-call timeout can no longer hold the run forever.
 """
 
 from __future__ import annotations
@@ -18,6 +22,8 @@ import logging
 from typing import Any
 
 from .llm import LLMClient
+from .llm_budget import StageBudget
+from .progress import PROGRESS_INTERVAL_S, format_duration
 from .slice_align import slice_similarity
 
 logger = logging.getLogger(__name__)
@@ -47,12 +53,21 @@ def repair_paragraphs(
     client: LLMClient,
     paragraphs: list[dict[str, Any]],
     glossary: list[str] | None = None,
+    *,
+    budget: StageBudget | None = None,
 ) -> list[dict[str, Any]]:
     """Repair each paragraph's text; guarded, fail-open, metadata preserved.
 
     Returns new paragraph dicts — timing and speaker labels untouched;
     only ``text`` changes, and only when the repair passes the
-    no-invention guard.
+    no-invention guard. When *budget* is present and exhausts mid-loop,
+    the stage stops calling the model: every paragraph processed so far
+    keeps its (possibly repaired) text, every remaining paragraph ships
+    with its original text, and one warning is logged (invariant #5: fail
+    open — the transcript is never lost). A throttled INFO heartbeat (at
+    most every ``PROGRESS_INTERVAL_S``) marks progress so a hung stage is
+    distinguishable from a slow one in the run log; it carries only the
+    count and elapsed time (no transcript text — privacy contract).
     """
     system = _REPAIR_SYSTEM_PROMPT
     if glossary:
@@ -63,9 +78,19 @@ def repair_paragraphs(
             "'Flagship'). Jos sama sana esiintyy lähikappaleissa sekä oikein "
             "että vääristyneenä, käytä oikeaa muotoa."
         )
+    total = len(paragraphs)
     repaired: list[dict[str, Any]] = []
     fixed = 0
+    processed = 0
+    last_heartbeat = 0.0
+    budget_exhausted = False
     for para in paragraphs:
+        # Budget gate before the call: a stalled connection that keeps
+        # resetting the per-call timeout is cut off here, at the loop
+        # boundary, so the stage can no longer hold the run forever.
+        if budget is not None and budget.exhausted():
+            budget_exhausted = True
+            break
         original = str(para.get("text", "")).strip()
         if not original:
             repaired.append(dict(para))
@@ -87,6 +112,28 @@ def repair_paragraphs(
             else:
                 logger.info("repair rejected by guard (kept original paragraph)")
         repaired.append({**para, "text": text})
+        processed += 1
+        if budget is not None:
+            now = budget.elapsed()
+            if now - last_heartbeat >= PROGRESS_INTERVAL_S:
+                last_heartbeat = now
+                logger.info(
+                    "repair: %d/%d paragraphs (elapsed %s)",
+                    processed,
+                    total,
+                    format_duration(now),
+                )
+    if budget_exhausted:
+        # Remaining paragraphs ship un-repaired (fail-open, invariant #5).
+        for para in paragraphs[len(repaired) :]:
+            repaired.append(dict(para))
+        logger.warning(
+            "repair stopped at %d/%d paragraphs (wall-clock budget %ss); "
+            "remaining paragraphs ship un-repaired",
+            processed,
+            total,
+            format_duration(budget.elapsed()) if budget else "?",
+        )
     if fixed:
         logger.info("repair: %d/%d paragraphs corrected", fixed, len(paragraphs))
     return repaired

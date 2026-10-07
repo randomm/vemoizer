@@ -180,6 +180,10 @@ class ProgressDisplay:
         # strip the previous prefix precisely instead of inferring it from
         # content (a stem containing ` · ` would otherwise be corrupted).
         self._prefixes: dict[TaskID, str] = {}
+        # Base stage name per task id, so finish() can render a
+        # per-stage marker ("decode ✓") instead of the generic
+        # "✓ complete" that read as the whole run being done (issue #148).
+        self._stage_names: dict[TaskID, str] = {}
         self._console = Console(
             stderr=True,
             no_color=not is_tty,
@@ -192,10 +196,6 @@ class ProgressDisplay:
             transient=False,
         )
         self._started = False
-        # Exact batch prefix last applied per task id, so a re-prefix can
-        # strip the previous prefix precisely instead of inferring it from
-        # content (a stem containing ` · ` would otherwise be corrupted).
-        self._prefixes: dict[TaskID, str] = {}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -233,16 +233,26 @@ class ProgressDisplay:
     def add_stage(self, description: str, total: float | None = None) -> TaskID:
         """Register a pipeline stage and return its task id."""
         self.start()
-        return self._progress.add_task(description, total=total)
+        task_id = self._progress.add_task(description, total=total)
+        self._stage_names[task_id] = description
+        return task_id
 
     def advance(self, task_id: TaskID, advance: float = 1) -> None:
         """Advance a stage's progress counter."""
         self._progress.advance(task_id, advance)
 
     def finish(self, task_id: TaskID, total: float | None = None) -> None:
-        """Mark a stage complete (optional explicit total to end on)."""
+        """Mark a stage complete (optional explicit total to end on).
+
+        The completion marker uses the stage's base name (``decode``,
+        ``diarize``, ``repair``, ``notes``) so each stage gets its own
+        ``✓ decode`` / ``✓ diarize`` / … marker (issue #148) instead of
+        the generic ``✓ complete`` that read as the whole run being done.
+        The word ``complete`` now appears only in the run's final line.
+        """
         self._progress.update(task_id, completed=total)
-        self._progress.update(task_id, description="[green]✓ complete")
+        name = self._stage_names.get(task_id, "")
+        self._progress.update(task_id, description=f"[green]✓ {name}")
         self._progress.stop_task(task_id)
 
     def update_text(self, task_id: TaskID, description: str) -> None:

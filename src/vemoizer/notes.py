@@ -9,7 +9,10 @@ never raises.
 Long transcripts (a 64-minute memo is ~48K chars) are map-reduced: each
 chunk is summarized separately, then the notes are drawn from the joined
 part-summaries. The chunk budget keeps every request comfortably inside
-common context windows without a tokenizer dependency.
+common context windows without a tokenizer dependency. A per-stage
+wall-clock budget (issue #148) bounds the whole call set: on expiry the
+map-reduce loop stops and returns ``None`` (fail-open) — the transcript
+ships without notes, never lost.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ import re
 from typing import Any
 
 from .llm import LLMClient
+from .llm_budget import StageBudget
 from .textnorm import textnorm
 
 logger = logging.getLogger(__name__)
@@ -198,6 +202,7 @@ def generate_notes(
     *,
     paragraphs: list[dict[str, Any]] | None = None,
     glossary: list[str] | None = None,
+    budget: StageBudget | None = None,
 ) -> dict[str, Any] | None:
     """Structured notes for *transcript*, or ``None`` (fail-open).
 
@@ -206,7 +211,10 @@ def generate_notes(
     ``glossary`` terms are offered as the canonical spellings for names
     the recognizer may have garbled. Short inputs go to the model whole;
     long ones are map-reduced. Never raises — any failure returns
-    ``None`` and the caller ships the transcript without notes.
+    ``None`` and the caller ships the transcript without notes. When
+    *budget* is present and exhausts mid-loop (the map-reduce calls), the
+    stage stops and returns ``None`` (fail-open, invariant #5) — the
+    transcript ships without notes rather than hanging.
     """
     text = transcript.strip()
     if paragraphs:
@@ -218,14 +226,22 @@ def generate_notes(
     system = _NOTES_SYSTEM_PROMPT
     if glossary:
         system += " Sanasto (oikeat kirjoitusasut): " + ", ".join(glossary) + "."
+
+    def _budget_exhausted() -> bool:
+        return budget is not None and budget.exhausted()
+
     try:
         if len(text) <= SINGLE_CALL_CHARS:
+            if _budget_exhausted():
+                return _budget_exhausted_response(budget)
             raw = client.complete(system, f"Transcript:\n{text}")
             return _finish(_parse_notes(raw), text) if raw else None
 
         summaries: list[str] = []
         chunks = _chunk_text(text)
         for i, chunk in enumerate(chunks, start=1):
+            if _budget_exhausted():
+                return _budget_exhausted_response(budget)
             part = client.complete(
                 _MAP_SYSTEM_PROMPT,
                 f"Portion {i}/{len(chunks)}:\n{chunk}",
@@ -234,6 +250,8 @@ def generate_notes(
                 summaries.append(part.strip())
         if not summaries:
             return None
+        if _budget_exhausted():
+            return _budget_exhausted_response(budget)
         joined = "\n\n".join(
             f"osayhteenveto {i}: {s}" for i, s in enumerate(summaries, start=1)
         )
@@ -246,3 +264,17 @@ def generate_notes(
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
         logger.warning("notes generation failed: %s", e)
         return None
+
+
+def _budget_exhausted_response(budget: StageBudget | None) -> dict[str, Any] | None:
+    """The fail-open response when the notes stage's wall-clock budget expires.
+
+    Returns ``None`` (the caller ships the transcript without notes) and
+    logs one warning so a hung stage is distinguishable from a slow one.
+    """
+    logger.warning(
+        "notes stopped: wall-clock budget expired after %ss; "
+        "transcript ships without notes",
+        f"{budget.elapsed():.0f}" if budget else "?",
+    )
+    return None

@@ -25,6 +25,10 @@ from vemoizer.cli_support import (
 from vemoizer.cli_support import (
     warn_on_battery as _warn_on_battery,
 )
+from vemoizer.preset_interrupt import (
+    begin_interrupt_tracking,
+    handle_interrupt,
+)
 
 
 def register_presets(app: typer.Typer) -> None:
@@ -142,6 +146,7 @@ def register_presets(app: typer.Typer) -> None:
                 err=True,
             )
             raise typer.Exit(code=2)
+        begin_interrupt_tracking(display)
         try:
             exit_code = run_preset(
                 files,
@@ -158,6 +163,11 @@ def register_presets(app: typer.Typer) -> None:
                 display=display,
                 preprocess=lowered_preprocess,
             )
+        except KeyboardInterrupt:
+            # issue #148: one line naming the stage the run was in, no
+            # traceback, exit 130 (the SIGINT convention).
+            typer.echo(handle_interrupt(display), err=True)
+            raise typer.Exit(code=130) from None
         except ValueError as e:
             # Unknown --language value (resolve_options validates against
             # LANGUAGE_VALUES, issue #108): clean exit 2, never a traceback.
@@ -241,6 +251,7 @@ def register_presets(app: typer.Typer) -> None:
                 err=True,
             )
             raise typer.Exit(code=2)
+        begin_interrupt_tracking(display)
         try:
             exit_code = run_preset(
                 files,
@@ -252,6 +263,11 @@ def register_presets(app: typer.Typer) -> None:
                 display=display,
                 preprocess=lowered_preprocess,
             )
+        except KeyboardInterrupt:
+            # issue #148: one line naming the stage the run was in, no
+            # traceback, exit 130 (the SIGINT convention).
+            typer.echo(handle_interrupt(display), err=True)
+            raise typer.Exit(code=130) from None
         except ValueError as e:
             # Unknown [meeting] language value (resolve_options validates
             # against LANGUAGE_VALUES, issue #108): clean exit 2, never a
