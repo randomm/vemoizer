@@ -344,6 +344,51 @@ def test_notes_budget_exhausted_returns_none_before_reduce() -> None:
         assert "osayhteenveto" not in call.args[1]
 
 
+def test_notes_budget_exhausted_before_reduce_returns_none_with_warning() -> None:
+    """The map loop's last call exhausts the budget exactly, so the reduce
+    call fires after the loop with an exhausted budget. The reduce must be
+    gated: the stage returns None without spending the reduce call, with
+    one warning (issue #148 FIX 4).
+
+    Budget = N*10 (N = number of chunks); each map call burns 10 s, so the
+    budget is exactly exhausted after the last map call. Without the reduce
+    gate the reduce would be called; with it, the stage returns None."""
+    from vemoizer.notes import _chunk_text
+
+    clock = _FakeClock()
+    long_text = ("sana " * 5_000).strip()  # ~25K -> several chunks (map-reduce)
+    n_chunks = len(_chunk_text(long_text))
+    budget = StageBudget(n_chunks * 10.0, clock=clock)
+    reduce_fired = [False]
+
+    def slow_complete(system, user, max_tokens=2048, **kw):
+        if "osayhteenveto" in user:
+            reduce_fired[0] = True  # the reduce call — must NOT fire
+            return _notes_json(summary="koottu")
+        clock.advance(10.0)  # each map call burns 10 s
+        return "yhden osan tiivistelm\u00e4"  # map
+
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=slow_complete)
+
+    import vemoizer.notes as notes_module
+
+    warnings: list[str] = []
+    orig_warning = notes_module.logger.warning
+    notes_module.logger.warning = lambda msg, *a, **kw: warnings.append(msg % a if a else msg)
+    try:
+        notes = generate_notes(client, long_text, budget=budget)
+    finally:
+        notes_module.logger.warning = orig_warning
+
+    # The reduce call must NOT have fired (budget exhausted after last map).
+    assert reduce_fired[0] is False, "reduce call must not fire after budget exhaustion"
+    assert notes is None
+    # Exactly one budget warning (from the reduce gate, not the loop).
+    budget_warnings = [w for w in warnings if "budget" in w]
+    assert len(budget_warnings) == 1, f"expected 1 budget warning, got {budget_warnings}"
+
+
 def test_notes_budget_none_runs_to_completion() -> None:
     """No budget (None) -> the notes stage runs its full map-reduce and
     returns parsed notes."""

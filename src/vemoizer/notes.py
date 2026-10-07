@@ -257,6 +257,13 @@ def generate_notes(
                 summaries.append(part.strip())
         if not summaries:
             return None
+        # Budget gate before the reduce call: the map loop's last call may
+        # have exhausted the budget, in which case the reduce must NOT be
+        # spent — return None (fail-open) with one warning (issue #148
+        # FIX 4, mirroring the gate before the single call and the loop).
+        if _budget_exhausted():
+            _log_notes_budget_expired(budget)
+            return None
         joined = "\n\n".join(
             f"osayhteenveto {i}: {s}" for i, s in enumerate(summaries, start=1)
         )
