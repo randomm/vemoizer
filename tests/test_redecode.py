@@ -288,8 +288,8 @@ def test_load_failure_latches_instead_of_retrying_per_span() -> None:
     download for every one of them turns a single failure into hundreds
     of network waits (the pathology PR #46 fixed for the decode stages).
     The latch makes the first failure permanent for the run — every
-    subsequent span fails open immediately, with exactly one
-    snapshot_download attempt.
+    subsequent span fails open immediately (the load resolves through the
+    models seam: one local-only probe + one real download attempt, latched).
     """
     mock_whisper = MagicMock()
     mock_whisper.transcribe.return_value = {"text": "x", "segments": []}
@@ -309,7 +309,9 @@ def test_load_failure_latches_instead_of_retrying_per_span() -> None:
     assert first.ok is False
     assert second.ok is False
     assert transcriber._load_failed is True
-    assert download.call_count == 1  # latched: no per-span retry
+    # The local-only probe (which fails) + the real download (which also
+    # fails) latch the load; per-span retry stays off.
+    assert download.call_count == 2
 
 
 def test_construction_does_not_download() -> None:
@@ -356,7 +358,16 @@ def test_first_use_triggers_revision_pinned_download() -> None:
         # so pass a mock transcribe too.
         mock_whisper.transcribe.return_value = {"text": "x", "words": []}
         transcriber.transcribe_span(audio, Span(0.0, 1.0))
-        mock_snapshot.assert_called_once_with(MODEL_ID, revision=MODEL_REVISION)
+        # Warm-cache silencing probe (local-only) + the real pinned call.
+        for call in mock_snapshot.call_args_list:
+            _, kwargs = call
+            assert kwargs.get("revision") == MODEL_REVISION
+        real = [
+            c
+            for c in mock_snapshot.call_args_list
+            if not c.kwargs.get("local_files_only")
+        ]
+        assert len(real) == 1
         # The model is loaded (and cached) by mlx_whisper.transcribe from the
         # resolved local path — never the bare repo ID, and never a second
         # copy via load_models.load_model (a dead ~3 GB allocation).

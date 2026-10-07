@@ -26,6 +26,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 __all__ = [
     "ModelSpec",
@@ -35,6 +36,7 @@ __all__ = [
     "MODEL_REGISTRY",
     "STAGES",
     "get_model",
+    "resolve_model_path",
     "pull_models",
     "pull_model",
     "pull_all",
@@ -219,76 +221,54 @@ def format_size(nbytes: int) -> str:
     raise AssertionError("unreachable")  # pragma: no cover
 
 
-def pull_model(name: str, cache_dir: str | None = None) -> str:
-    """Download (revision-pinned) the *name* model and return the local path.
+def resolve_model_path(
+    repo_id: str, revision: str, cache_dir: str | None = None, **extra: Any
+) -> str:
+    """Resolve a revision-pinned snapshot to its local path (issue #147).
 
-    When the pinned snapshot is already fully cached the download is silenced
-    (no HF progress bars, issue #147); a real download keeps its progress
-    bar so a multi-GB silent fetch does not look like a hang.
+    The single seam through which every model in this project reaches
+    ``huggingface_hub.snapshot_download``: the ``models pull`` command
+    (via :func:`pull_model` / :func:`pull_models`) and the pipeline loaders
+    (decode A/B, re-decode, diarization) all call this, so the warm-cache
+    silencing lives in exactly one place.
+
+    When the pinned snapshot is already fully cached the download is
+    silenced through the library's own ``disable_progress_bars`` switch
+    (no "Fetching" / "Download complete" / "Reconstruction" bars); a real
+    download keeps its progress bar so a multi-GB silent fetch does not
+    look like a hang. ``*extra`` carries loader-specific kwargs (e.g.
+    ``token`` for the gated diarization repo) and is forwarded to both the
+    probe and the real call (``cache_dir`` is a named param and is also
+    forwarded to both).
+
+    Returns the local snapshot path as a ``str``. Errors propagate
+    unchanged (offline mode, gated repos, …).
     """
     from huggingface_hub import snapshot_download
     from huggingface_hub.utils import disable_progress_bars
 
-    entry = get_model(name)
-    if _snapshot_locally_complete(entry.repo_id, entry.revision, cache_dir):
+    from .model_cache import snapshot_locally_complete
+
+    all_kwargs: dict[str, Any] = {"revision": revision, **extra}
+    if cache_dir is not None:
+        all_kwargs["cache_dir"] = cache_dir
+
+    if snapshot_locally_complete(repo_id, revision, cache_dir):
         # Warm cache: no network call, and no "Fetching" / "Download
         # complete" / "Reconstruction" progress bars (issue #147).
         with disable_progress_bars():
-            return str(
-                snapshot_download(
-                    entry.repo_id, revision=entry.revision, cache_dir=cache_dir
-                )
-            )
-    return str(
-        snapshot_download(entry.repo_id, revision=entry.revision, cache_dir=cache_dir)
-    )
+            return str(snapshot_download(repo_id, **all_kwargs))
+    return str(snapshot_download(repo_id, **all_kwargs))
 
 
-def _snapshot_locally_complete(
-    repo_id: str, revision: str, cache_dir: str | None
-) -> bool:
-    """True when the pinned snapshot can be served from the local cache alone.
+def pull_model(name: str, cache_dir: str | None = None) -> str:
+    """Download (revision-pinned) the *name* model and return the local path.
 
-    Probed by a local-only ``snapshot_download`` call; the result is memoized
-    per (repo, revision, cache_dir) so the probe runs once per model per
-    process. A probe failure means "unknown" — the caller then downloads
-    with progress bars enabled (the safe direction).
+    Warm-cache downloads are silenced (no HF progress bars, issue #147);
+    a real download keeps its progress bar.
     """
-    key = (repo_id, revision, cache_dir)
-    if key in _COMPLETE_SNAPSHOTS:
-        return _COMPLETE_SNAPSHOTS[key]
-    try:
-        _snapshot_download_probe(repo_id, revision, cache_dir)
-        complete = True
-    except Exception:  # noqa: BLE001 - probe failure means "not provable"
-        complete = False
-    _COMPLETE_SNAPSHOTS[key] = complete
-    return complete
-
-
-def _snapshot_download_probe(
-    repo_id: str, revision: str, cache_dir: str | None
-) -> None:
-    """Probe whether the pinned snapshot is resolvable from the local cache.
-
-    Uses a local-only ``snapshot_download`` call; the revision-pinned SHA's
-    file list is cached on the first download, so a complete snapshot
-    resolves without a network call. An incomplete cache raises.
-    """
-    from huggingface_hub import snapshot_download
-
-    snapshot_download(
-        repo_id,
-        revision=revision,
-        cache_dir=cache_dir,
-        local_files_only=True,
-    )
-
-
-#: Per-process memo of "pinned snapshot resolvable from local cache" probes,
-#: keyed by ``(repo_id, revision, cache_dir)``. See
-#: :func:`_snapshot_locally_complete`.
-_COMPLETE_SNAPSHOTS: dict[tuple[str, str, str | None], bool] = {}
+    entry = get_model(name)
+    return resolve_model_path(entry.repo_id, entry.revision, cache_dir=cache_dir)
 
 
 def pull_all(cache_dir: str | None = None) -> dict[str, str]:
@@ -318,18 +298,12 @@ def pull_models(
     download keeps its progress bar.
     """
     assert_all_revisions_pinned(models)
-    from huggingface_hub import snapshot_download
-    from huggingface_hub.utils import disable_progress_bars
 
     results: list[PulledModel] = []
     for spec in models:
         start = time.monotonic()
         try:
-            if _snapshot_locally_complete(spec.repo_id, spec.revision, None):
-                with disable_progress_bars():
-                    local_path = snapshot_download(spec.repo_id, revision=spec.revision)
-            else:
-                local_path = snapshot_download(spec.repo_id, revision=spec.revision)
+            local_path = resolve_model_path(spec.repo_id, spec.revision)
             results.append(
                 PulledModel(spec, str(local_path), None, time.monotonic() - start)
             )

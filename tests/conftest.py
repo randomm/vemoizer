@@ -20,7 +20,22 @@ from typing import Any, cast
 
 import pytest
 
+from vemoizer import model_cache as _model_cache_mod
 from vemoizer import run_log as _run_log_module
+
+
+@pytest.fixture(autouse=True)
+def _clear_snapshot_memo():
+    """Clear the per-process snapshot-completeness memo between tests.
+
+    The memo caches "pinned snapshot resolvable from local cache" results;
+    without this fixture, a previous test's memo entries can cause a probe
+    to be skipped in a later test, changing the snapshot_download call count.
+    """
+    _model_cache_mod.clear_memo()
+    yield
+    _model_cache_mod.clear_memo()
+
 
 # Hermetic CLI help output: typer.rich_utils reads GITHUB_ACTIONS / FORCE_COLOR /
 # PY_COLORS at IMPORT time (rich_utils.py, lines 77-84) to force a coloured

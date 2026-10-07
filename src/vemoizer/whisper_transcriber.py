@@ -46,7 +46,7 @@ import mlx.core as mx
 import numpy as np
 
 from .echo_filter import echo_vocabulary
-from .models import get_model
+from .models import get_model, resolve_model_path
 from .selfheal import heal
 from .transcriber import TranscriptionResult
 from .whisper_windows import process_window_raws
@@ -118,7 +118,7 @@ class WhisperTranscriber:
                 import mlx_whisper
 
                 # Revision-pinned: never load from the bare repo ID (invariant #4).
-                self._model_path = _pinned_download(MODEL_ID, MODEL_REVISION)
+                self._model_path = resolve_model_path(MODEL_ID, MODEL_REVISION)
                 self._mlx_whisper = mlx_whisper
                 # Marker: the real weights live in mlx-whisper's ModelHolder
                 # cache once the first transcribe runs.
@@ -385,66 +385,3 @@ def decode_meeting(
             with suppress(Exception):  # cleanup is best-effort (fail-open)
                 transcriber.cleanup()
 
-
-def _pinned_download(repo_id: str, revision: str) -> str:
-    """Revision-pinned ``snapshot_download`` with cached-bar suppression (issue #147).
-
-    The ``vemoizer meeting`` / ``memo`` command loads its model at run start
-    (not via ``models pull``). When the snapshot is already in the HF cache
-    (the routine case) ``snapshot_download`` still emits three huggingface_hub
-    tqdm bars ("Fetching", "Download complete", "Reconstruction complete")
-    that scroll the rich progress display away. Suppression is therefore
-    scoped: when the snapshot is already local, ``disable_progress_bars()``
-    silences the three bars; when a real download happens (first run, cache
-    miss, ``HF_HUB_OFFLINE=1`` cache miss), the bar is left intact because a
-    multi-GB silent download looks like a hang. The offline invariant
-    (revision-pinned snapshot_download from a local path, invariant #4) is
-    untouched.
-
-    The cache probe (issue #147, round 2) checks the pinned snapshot's
-    ``trees/<revision>.json`` tree cache, NOT ``refs/<revision>``: a full
-    commit-SHA revision is treated as immutable by ``snapshot_download``
-    (``REGEX_COMMIT_HASH`` match → ``commit_hash = revision``, no API call
-    and no ref write — ``refs/`` is written only when ``revision !=
-    commit_hash``, i.e. for branch/tag names), so ``refs/<sha>`` is never
-    created for our pinned-SHA models and probing it is dead code. The tree
-    cache IS written for a full SHA (``write_tree_cache`` runs unconditionally
-    once the file listing resolves) and is the exact condition under which
-    ``snapshot_download`` takes its fast local path (``read_tree_cache``
-    hit → no download) — so it is the right cached/uncached discriminator.
-    It is not the only fast path (the ``snapshots/<sha>/`` early return when
-    ``local_files_only`` is true), so suppression can be missed in that
-    case (a bar appears once); that is the safe direction (bar shown, never
-    a silent multi-GB download).
-
-    Fail-open: any exception from the cache check falls through to the
-    bar-intact path (a download bar is the safe default); an exception from
-    ``snapshot_download`` propagates to the caller's except handler.
-    """
-    from huggingface_hub import snapshot_download
-    from huggingface_hub.utils import disable_progress_bars
-
-    from vemoizer.models import _model_cache_name, cache_dir
-
-    def _is_cached() -> bool:
-        """Cheap local-only cache probe (no network, no download).
-
-        True when ``snapshot_download``'s own tree cache holds the pinned
-        snapshot's file listing (``trees/<revision>.json``): that is the
-        condition under which it resolves the file list locally and takes
-        its fast cached path. Absent tree cache → not cached (the bar stays
-        on, which is safe — a real download shows a bar). Fail-open: any
-        exception returns False (bar stays on).
-        """
-        try:
-            tree = (
-                cache_dir() / _model_cache_name(repo_id) / "trees" / f"{revision}.json"
-            )
-            return tree.is_file()
-        except Exception:  # noqa: BLE001 - fail-open (bar stays on)
-            return False
-
-    if _is_cached():
-        with disable_progress_bars():
-            return str(snapshot_download(repo_id, revision=revision))
-    return str(snapshot_download(repo_id, revision=revision))

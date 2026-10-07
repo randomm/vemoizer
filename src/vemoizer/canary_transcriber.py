@@ -35,6 +35,7 @@ import numpy as np
 
 from .canary_features import SAMPLE_RATE, compute_features
 from .canary_mlx import load_canary_weights
+from .models import resolve_model_path
 from .transcriber import TranscriptionResult
 
 logger = logging.getLogger(__name__)
@@ -71,13 +72,8 @@ class CanaryTranscriber:
             logger.info("Loading Canary model: %s@%s", MODEL_ID, MODEL_REVISION)
             start = time.time()
             try:
-                from huggingface_hub import snapshot_download
-
                 # Revision-pinned: never load from the bare repo ID (invariant #4).
-                local_path = snapshot_download(
-                    MODEL_ID,
-                    revision=MODEL_REVISION,
-                )
+                local_path = resolve_model_path(MODEL_ID, MODEL_REVISION)
                 self.model = load_canary_weights(local_path)
             except Exception as e:  # noqa: BLE001 - logged; model-load guard
                 logger.error("Failed to load Canary model: %s", e)

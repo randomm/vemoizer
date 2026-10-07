@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -179,7 +178,35 @@ def test_load_failure_latches_and_raises() -> None:
             t.transcribe(_audio(1.0))
         with pytest.raises(RuntimeError):
             t.transcribe(_audio(1.0))
-    assert dl.call_count == 1  # latched
+    # The local-only probe (fails) + the real download (fails) latch the load.
+    assert dl.call_count == 2
+
+
+def test_warm_cache_load_silences_progress_bars() -> None:
+    """A locally-complete snapshot is resolved silently (no HF bars) on the
+    meeting decode path — the load goes through the shared models seam
+    (issue #147), so a warm-cache `vemoizer meeting` run prints no
+    "Fetching" / "Download" / "Reconstruction" bars."""
+    from huggingface_hub import utils as hf_utils
+
+    mock = _mock_whisper({})
+    seen: list[bool] = []
+
+    def fake_snapshot(repo_id, **kwargs):
+        seen.append(hf_utils.are_progress_bars_disabled())
+        return "/tmp/turbo"
+
+    with (
+        patch.dict("sys.modules", {"mlx_whisper": mock}),
+        patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot),
+    ):
+        t = WhisperTranscriber()
+        # Use 1 s of audio (non-empty) so the model actually loads.
+        result = t.transcribe(np.zeros(16_000, dtype=np.float32))
+        assert not hf_utils.are_progress_bars_disabled()  # no leaked disable
+    assert result["text"] == ""
+    # Local-only probe (bars on) + one silent real call (bars off).
+    assert seen == [False, True]
 
 
 # -- slice_records_from_words --------------------------------------------
@@ -798,68 +825,4 @@ def test_language_summary_absent_on_empty_audio() -> None:
     assert result["text"] == ""
 
 
-# -- huggingface_hub progress bar suppression (issue #147) --------------------
 
-
-def test_pinned_download_suppresses_bars_when_cached(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """When the snapshot is cached (its ``trees/<revision>.json`` tree cache
-    exists), _pinned_download silences the HF bars around snapshot_download
-    (issue #147): disable_progress_bars enters before the download and its
-    context-manager exit re-enables."""
-    from vemoizer.whisper_transcriber import _pinned_download
-
-    revision = "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb"
-    monkeypatch.setenv("HF_HOME", str(tmp_path))
-    # A full commit-SHA revision never gets a refs/<sha> marker
-    # (huggingface_hub writes refs only when revision != commit_hash);
-    # the tree cache IS written for a pinned SHA, so that is the marker.
-    tree = tmp_path / "hub" / "models--org--name" / "trees" / f"{revision}.json"
-    tree.parent.mkdir(parents=True)
-    tree.touch()
-
-    calls: list[str] = []
-
-    def _fake_download(repo_id: str, revision: str) -> str:
-        calls.append("download")
-        return str(tmp_path / "snap")
-
-    with (
-        patch("vemoizer.models._model_cache_name", return_value="models--org--name"),
-        patch("huggingface_hub.snapshot_download", side_effect=_fake_download),
-        patch("huggingface_hub.utils.disable_progress_bars.__enter__") as mock_enter,
-        patch("huggingface_hub.utils.disable_progress_bars.__exit__") as mock_exit,
-    ):
-        # The __enter__ patch must return the cm so `with` gets a truthy object.
-        mock_enter.side_effect = lambda: calls.append("disable") or object()
-        mock_exit.side_effect = lambda *a: calls.append("enable") or None
-        result = _pinned_download("org/name", revision)
-
-    assert result == str(tmp_path / "snap")
-    assert "disable" in calls
-    assert "enable" in calls
-    assert calls.index("disable") < calls.index("download")
-    assert calls.index("download") < calls.index("enable")
-
-
-def test_pinned_download_keeps_bars_when_uncached(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """When the snapshot is NOT cached (no tree cache), _pinned_download does
-    NOT call disable_progress_bars (a real multi-GB download must show a
-    bar)."""
-    from vemoizer.whisper_transcriber import _pinned_download
-
-    revision = "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb"
-    monkeypatch.setenv("HF_HOME", str(tmp_path))
-    # No trees/<revision>.json marker -> not cached
-    with (
-        patch("vemoizer.models._model_cache_name", return_value="models--org--name"),
-        patch("huggingface_hub.snapshot_download", return_value="/tmp/snap"),
-        patch("huggingface_hub.utils.disable_progress_bars.__enter__") as mock_disable,
-        patch("huggingface_hub.utils.disable_progress_bars.__exit__") as mock_exit,
-    ):
-        _pinned_download("org/name", revision)
-    mock_disable.assert_not_called()
-    mock_exit.assert_not_called()

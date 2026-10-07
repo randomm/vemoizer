@@ -21,6 +21,7 @@ from vemoizer.models import (
     get_model,
     pull_all,
     pull_model,
+    resolve_model_path,
 )
 
 # The exact pins the spec (docs/pipeline-spec.md + plan) fixes.
@@ -52,19 +53,6 @@ _HEX40 = "0123456789abcdef"
 
 def _entry(name: str) -> ModelEntry:
     return MODEL_REGISTRY[name]
-
-
-@pytest.fixture(autouse=True)
-def _clear_snapshot_memo():
-    """Clear the per-process memo between tests so each test starts fresh.
-
-    The memo caches "pinned snapshot resolvable from local cache" results;
-    without this fixture, a previous test's memo entries can cause a probe
-    to be skipped in a later test, changing the snapshot_download call count.
-    """
-    _models_mod._COMPLETE_SNAPSHOTS.clear()
-    yield
-    _models_mod._COMPLETE_SNAPSHOTS.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +175,21 @@ def test_pull_model_unknown_name_raises_before_any_download() -> None:
         with pytest.raises(KeyError):
             pull_model("nope")
         snap.assert_not_called()
+
+
+def test_pull_model_routes_through_resolve_model_path() -> None:
+    """``pull_model`` delegates to the shared ``resolve_model_path`` seam —
+    the warm-cache silencing logic lives in exactly one place (issue #147).
+    If ``pull_model`` ever re-implements its own ``snapshot_download`` call,
+    this test fails: the loader-side fix stops covering ``models pull``."""
+    with patch.object(
+        _models_mod, "resolve_model_path", return_value="/tmp/snap"
+    ) as seam:
+        result = pull_model("parakeet")
+    assert result == "/tmp/snap"
+    seam.assert_called_once_with(
+        EXPECTED["parakeet"][0], EXPECTED["parakeet"][1], cache_dir=None
+    )
 
 
 def test_pull_model_result_is_str() -> None:
@@ -423,9 +426,72 @@ def test_pull_models_warm_cache_silences_per_model() -> None:
     # Every real call ran while the library switch was off.
     reals = seen[1::2]
     assert all(state is True for state in reals), f"saw disabled-states {seen}"
-    # Every real call ran while the library switch was off.
-    reals = seen[1::2]
-    assert all(state is True for state in reals), f"saw disabled-states {seen}"
+
+
+# ---------------------------------------------------------------------------
+# Shared resolve_model_path seam (issue #147: the silencing lives in one place)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_model_path_forwards_revision_and_extra_kwargs(tmp_path) -> None:
+    """Break-and-fail: the real download carries the pinned revision plus the
+    loader's extra kwargs (e.g. the gated repo's ``token``), while the
+    local-only probe never carries the extras."""
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_snapshot(repo_id, **kwargs):
+        calls.append((repo_id, kwargs))
+        return str(tmp_path)
+
+    with patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot):
+        path = resolve_model_path("org/repo", "rev1", token="hf_token")
+
+    assert path == str(tmp_path)
+    assert len(calls) == 2
+    # The probe is local-only and carries no loader extras (the probe does
+    # not talk to the hub); the real call carries the revision + extras.
+    probe, real = calls
+    assert probe[1].get("local_files_only") is True
+    assert "token" not in probe[1]
+    assert real[1].get("revision") == "rev1"
+    assert real[1].get("token") == "hf_token"
+
+
+def test_resolve_model_path_warm_cache_silences(tmp_path) -> None:
+    """A locally-complete snapshot is fetched through the library's own
+    progress-bar switch; the switch is re-enabled afterwards (no leak)."""
+    from huggingface_hub import utils as hf_utils
+
+    seen: list[bool] = []
+
+    def fake_snapshot(repo_id, **kwargs):
+        seen.append(hf_utils.are_progress_bars_disabled())
+        return str(tmp_path)
+
+    with patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot):
+        resolve_model_path("org/repo", "rev1")
+        assert not hf_utils.are_progress_bars_disabled()
+
+    assert seen == [False, True]
+
+
+def test_resolve_model_path_cold_cache_keeps_bars(tmp_path) -> None:
+    """A failed local-only probe means 'not provably cached' — the real
+    download runs with the bars on (a multi-GB silent fetch looks like a hang)."""
+    from huggingface_hub import utils as hf_utils
+
+    seen: list[bool] = []
+
+    def fake_snapshot(repo_id, **kwargs):
+        seen.append(hf_utils.are_progress_bars_disabled())
+        if kwargs.get("local_files_only"):
+            raise RuntimeError("not cached")
+        return str(tmp_path)
+
+    with patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot):
+        resolve_model_path("org/repo", "rev1")
+
+    assert seen == [False, False]
 
 
 # ---------------------------------------------------------------------------

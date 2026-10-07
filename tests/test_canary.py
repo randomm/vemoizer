@@ -608,7 +608,13 @@ def test_transcribe_triggers_revision_pinned_download() -> None:
         result = inst.transcribe(audio)
 
         assert mock_dl.called, "transcribe must trigger the lazy model load"
-        args, kwargs = mock_dl.call_args
+        # The warm-cache silencing probe is local-only; the real download
+        # (the last call) carries the pinned revision.
+        real = [
+            c for c in mock_dl.call_args_list if not c.kwargs.get("local_files_only")
+        ]
+        assert len(real) == 1
+        args, kwargs = real[0]
         # repo_id is passed positionally; revision is pinned as a kwarg.
         assert args[0] == MODEL_ID or kwargs.get("repo_id") == MODEL_ID
         assert kwargs.get("revision") == MODEL_REVISION
@@ -628,7 +634,11 @@ def test_snapshot_download_revision_not_omitted() -> None:
         inst = CanaryTranscriber()
         audio = np.zeros(16_000, dtype=np.float32)
         inst.transcribe(audio)
-        _, kwargs = mock_dl.call_args
+        real = [
+            c for c in mock_dl.call_args_list if not c.kwargs.get("local_files_only")
+        ]
+        assert len(real) == 1
+        _, kwargs = real[0]
         assert "revision" in kwargs
         assert kwargs["revision"] == MODEL_REVISION
         assert kwargs["revision"] != ""
@@ -656,7 +666,31 @@ def test_load_is_idempotent_under_concurrency() -> None:
         inst = CanaryTranscriber()
         inst._load_model()
         inst._load_model()  # second call must be a no-op
-        assert mock_dl.call_count == 1
+        # One local-only probe + one real download; the memo keeps repeat
+        # loads probe-free.
+        assert mock_dl.call_count == 2
+
+
+def test_warm_cache_load_silences_progress_bars() -> None:
+    """A locally-complete snapshot is resolved silently on the decode B load
+    path (issue #147): no HF progress bars on a warm-cache run."""
+    from huggingface_hub import utils as hf_utils
+
+    seen: list[bool] = []
+
+    def fake_snapshot(repo_id, **kwargs):
+        seen.append(hf_utils.are_progress_bars_disabled())
+        return "/tmp/fake"
+
+    with (
+        patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot),
+        patch("vemoizer.canary_transcriber.load_canary_weights") as mock_load,
+    ):
+        mock_load.return_value = _FakeModel()
+        inst = CanaryTranscriber()
+        inst.transcribe(np.zeros(16_000, dtype=np.float32))
+        assert not hf_utils.are_progress_bars_disabled()  # no leaked disable
+    assert seen == [False, True]  # probe (bars on) + silent real call
 
 
 def test_direct_safetensors_load_not_via_mlx_audio() -> None:

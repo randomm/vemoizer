@@ -112,7 +112,7 @@ def test_pull_calls_snapshot_download_per_model_with_full_sha() -> None:
     """Every model is pulled with its full-SHA revision as a kwarg."""
     calls: list[tuple[str, str | None]] = []
 
-    def fake_download(repo_id, revision=None):
+    def fake_download(repo_id, revision=None, **_kwargs):
         calls.append((repo_id, revision))
         return f"/fake/cache/{repo_id}"
 
@@ -123,12 +123,18 @@ def test_pull_calls_snapshot_download_per_model_with_full_sha() -> None:
         result = runner.invoke(app, ["models", "pull"])
 
     assert result.exit_code == 0
-    assert len(calls) == 5
-    for (repo_id, revision), spec in zip(calls, models_mod.MODELS, strict=True):
-        assert repo_id == spec.repo_id
-        assert revision == spec.revision
-        assert len(revision) == 40
-        assert all(c in "0123456789abcdef" for c in revision)
+    # Each model gets a local-only probe + one real call = 2 calls per model.
+    assert len(calls) == 2 * 5
+    # Both the probe and the real call carry the pinned revision.
+    for i, spec in enumerate(models_mod.MODELS):
+        probe_repo, probe_rev = calls[2 * i]
+        real_repo, real_rev = calls[2 * i + 1]
+        assert probe_repo == spec.repo_id
+        assert probe_rev == spec.revision
+        assert real_repo == spec.repo_id
+        assert real_rev == spec.revision
+        assert len(probe_rev) == 40
+        assert all(c in "0123456789abcdef" for c in probe_rev)
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +202,8 @@ def test_pull_warm_cache_no_redownload() -> None:
         result = runner.invoke(app, ["models", "pull"])
 
     assert result.exit_code == 0
-    assert mock_dl.call_count == 5
+    # Each model gets a local-only probe + one real call = 2 calls per model.
+    assert mock_dl.call_count == 2 * 5
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +289,8 @@ def test_pull_partial_failure_continues_to_remaining_models() -> None:
     ):
         result = runner.invoke(app, ["models", "pull"])
 
-    assert mock_dl.call_count == 5
+    # Each model gets a local-only probe + one real call = 2 calls per model.
+    assert mock_dl.call_count == 2 * 5
     assert result.exit_code == 1
     assert "FAILED" in result.stdout
 

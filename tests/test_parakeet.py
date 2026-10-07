@@ -21,7 +21,6 @@ import numpy as np
 import pytest
 
 from vemoizer.parakeet_transcriber import (
-    MODEL_ID,
     MODEL_REVISION,
     SAMPLE_RATE,
     ParakeetTranscriber,
@@ -181,7 +180,7 @@ class TestParakeetTranscriber:
     def test_load_model_revision_pinned(self):
         """First transcribe() triggers a revision-pinned load from the local path."""
         t = ParakeetTranscriber()
-        local_path = MagicMock()  # a str-like path returned by snapshot_download
+        local_path = "/tmp/parakeet-model"
         with (
             patch(
                 "huggingface_hub.snapshot_download",
@@ -193,8 +192,15 @@ class TestParakeetTranscriber:
             ) as fp,
         ):
             t.transcribe(np.array([], dtype=np.float32))
-            snap.assert_called_once_with(MODEL_ID, revision=MODEL_REVISION)
-            # Loaded from the returned local path, not the bare repo ID.
+            # Warm-cache silencing probe (local-only) + the real pinned call.
+            for call in snap.call_args_list:
+                _, kwargs = call
+                assert kwargs.get("revision") == MODEL_REVISION
+            real = [
+                c for c in snap.call_args_list if not c.kwargs.get("local_files_only")
+            ]
+            assert len(real) == 1
+            # Loaded from the returned local path (stringified), not the bare repo ID.
             fp.assert_called_once_with(local_path)
         assert t.model is not None
 
@@ -213,7 +219,7 @@ class TestParakeetTranscriber:
         ):
             t.transcribe(np.array([], dtype=np.float32))
             t.transcribe(np.array([], dtype=np.float32))
-            assert snap.call_count == 1
+            assert snap.call_count == 2  # probe + real call, memoized after
 
     def test_load_failure_leaves_model_none(self):
         """A failed download/load is logged, leaves model None, transcribe raises."""
@@ -228,6 +234,26 @@ class TestParakeetTranscriber:
         ):
             t.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32))
         assert t.model is None
+
+    def test_warm_cache_load_silences_progress_bars(self):
+        """A locally-complete snapshot is resolved silently on the decode A
+        load path (issue #147): no HF progress bars on a warm-cache run."""
+        from huggingface_hub import utils as hf_utils
+
+        t = ParakeetTranscriber()
+        seen: list[bool] = []
+
+        def fake_snapshot(repo_id, **kwargs):
+            seen.append(hf_utils.are_progress_bars_disabled())
+            return "mock-path"
+
+        with (
+            patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot),
+            patch("parakeet_mlx.from_pretrained", return_value=make_mock_model()),
+        ):
+            t.transcribe(np.zeros(0, dtype=np.float32))
+            assert not hf_utils.are_progress_bars_disabled()  # no leaked disable
+        assert seen == [False, True]  # probe (bars on) + silent real call
 
     def test_transcribe_no_language_for_real_aligned_result_shape(self):
         """The real parakeet-mlx AlignedResult has no ``language`` attribute.
