@@ -9,14 +9,31 @@ unambiguous: the run is done and its files are on disk.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
+from unittest import mock
 
 import pytest
 from _cli_helpers import isolate_home, touch_files
 from typer.testing import CliRunner
 
+import vemoizer.batch as batch_module
+import vemoizer.batch_preset as batch_preset_module
+import vemoizer.grouping_decode as grouping_decode_module
+import vemoizer.notify as notify_module
+import vemoizer.pipeline as pipeline_module
+import vemoizer.preflight as preflight_module
 from vemoizer.cli import app
+from vemoizer.preset_interrupt import begin_interrupt_tracking
 
 runner = CliRunner()
+
+
+def _good_result(paragraphs):
+    return {
+        "text": " ".join(p["text"] for p in paragraphs),
+        "segments": paragraphs,
+        "paragraphs": paragraphs,
+    }
 
 
 def _two_label_paragraphs():
@@ -83,3 +100,304 @@ class TestFinalLine:
         )
         assert result.exit_code == 0
         assert "complete" not in result.stdout
+
+
+# -- FIX 1: the final line is gated on the run succeeding for ALL files ---
+#
+# "complete" appears only when every expected pair was fully written:
+# exit code 0 AND len(written) == len(files) * len(PRESET_FORMATS), in
+# BOTH run_preset paths (plain per-file loop and _run_preset_groups).
+# On any failure (partial pair, quality-check failure) the successful
+# files' "wrote" lines still print, but no "complete" line ever does.
+# Break-and-fail: dropping the gate (reverting the final-line condition
+# to `if not quiet and written`) fails the partial-pair, check-failure,
+# and mixed-batch assertions below.
+
+
+def _plain_seams(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the seams the plain per-file path hits (preflight gate, notify,
+    and the config pre-check) so the test reaches the transcribe + write
+    seams it exercises. The transcribe seam is the name as LOOKED UP in
+    the calling modules' own namespaces (``preset_file_transcribe`` for
+    the plain loop, ``batch_guard`` for the group path)."""
+    monkeypatch.setattr(preflight_module, "preflight_gate", lambda **kw: None)
+    monkeypatch.setattr(batch_module, "_resolve_llm_config", lambda p: None)
+    monkeypatch.setattr(notify_module, "notify_write", lambda *a, **kw: None)
+    monkeypatch.setattr(notify_module, "notify_result", lambda *a, **kw: None)
+    # The transcribe seam is a function-local `from vemoizer.pipeline import
+    # transcribe_file` — patch the name in the SOURCE module (where the
+    # lazy import looks it up), which every call site resolves through.
+    monkeypatch.setattr(pipeline_module, "transcribe_file", _plain_fake_transcribe)
+
+
+def _plain_fake_transcribe(path, **kwargs):
+    return _good_result(_two_label_paragraphs())
+
+
+def _run_preset_plain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    files: list[Path],
+    *,
+    result_per_file: dict[str, Any] | Any,
+    quiet: bool = False,
+    command: str = "meeting",
+) -> int:
+    """Run run_preset's plain per-file path with the transcribe seam stubbed;
+    returns the exit code."""
+
+    def fake_transcribe(file, options=None, glossary_path=None, **kwargs):
+        if callable(result_per_file):
+            return result_per_file(file)
+        return result_per_file
+
+    monkeypatch.setattr(batch_preset_module, "_transcribe_preset_file", fake_transcribe)
+    _plain_seams(monkeypatch)
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    tracker = begin_interrupt_tracking()
+    return batch_preset_module.run_preset(
+        list(files),
+        command=command,
+        config_path=None,
+        glossary_path=None,
+        quiet=quiet,
+        yes=True,
+        tracker=tracker,
+        display=None,
+    )
+
+
+def _group_write_seam(result, first_stem, out_dir, *, date_str=None):
+    """Write seam for the group path: md ok, json fails (partial pair)."""
+    return [f"2025-01-01 {first_stem}.md"]  # partial: json write "failed"
+
+
+def _group_seams(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the transcribe seam the group path uses (function-local import
+    from ``vemoizer.pipeline``)."""
+    monkeypatch.setattr(pipeline_module, "transcribe_file", _plain_fake_transcribe)
+
+
+def _patch_group_seams(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Stub the seams the meeting 2+ files path hits before the write seam:
+    the preflight gate (the models are not in the cache under the fake home),
+    the boundary decodes (the zero-byte fixtures are not real audio), and
+    the transcribe fn itself (no real audio to decode — the write seam is
+    what the test exercises)."""
+    _group_seams(monkeypatch)
+    monkeypatch.setattr(preflight_module, "preflight_gate", lambda **kw: None)
+    monkeypatch.setattr(
+        grouping_decode_module,
+        "decode_boundaries",
+        lambda *a, **kw: (["", ""], ["", ""]),
+    )
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+
+
+class TestFinalLineGatedOnSuccess:
+    def test_partial_pair_no_complete_line(self, tmp_path, monkeypatch) -> None:
+        """Plain path: the .json write fails (partial pair) -> exit 1, the
+        .md "wrote" line still prints, but NO "complete" line (issue #148
+        core promise: nothing reads 'complete' until the files are on
+        disk)."""
+        files = touch_files(["a.m4a"], tmp_path)
+        record: dict[str, Any] = {}
+
+        def fake_echo(msg, err: bool = False, **kw):
+            if not err:
+                record.setdefault("echoes", []).append(str(msg))
+
+        def fake_write(result, stem, out_dir, *, date_str=None):
+            return ["2025-01-01 a.md"]  # partial pair: only the .md "wrote"
+
+        _plain_seams(monkeypatch)
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        tracker = begin_interrupt_tracking()
+        with (
+            mock.patch.object(batch_preset_module, "_write_preset_output", fake_write),
+            mock.patch.object(batch_preset_module.typer, "echo", fake_echo),
+        ):
+            code = batch_preset_module.run_preset(
+                list(files),
+                command="meeting",
+                config_path=None,
+                glossary_path=None,
+                quiet=False,
+                yes=True,
+                tracker=tracker,
+                display=None,
+            )
+        assert code == 1
+        echoes = record.get("echoes", [])
+        assert any(e.startswith("wrote ") for e in echoes), echoes
+        # NO "complete" line on a failed run.
+        assert all("complete" not in e for e in echoes), echoes
+
+    def test_check_failure_no_complete_line(self, tmp_path, monkeypatch) -> None:
+        """Plain path: a file that fails the quality checks -> exit 1, no
+        "complete" line, no "wrote" lines (the file never got written)."""
+        files = touch_files(["a.m4a"], tmp_path)
+        record: dict[str, Any] = {}
+
+        def fake_echo(msg, err: bool = False, **kw):
+            if not err:
+                record.setdefault("echoes", []).append(str(msg))
+
+        def bad_transcribe(file, options=None, glossary_path=None, **kwargs):
+            return {
+                "text": "",  # no transcript -> _check_result fails
+                "segments": [],
+            }
+
+        _plain_seams(monkeypatch)
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        tracker = begin_interrupt_tracking()
+        with (
+            mock.patch.object(
+                batch_preset_module, "_transcribe_preset_file", bad_transcribe
+            ),
+            mock.patch.object(batch_preset_module.typer, "echo", fake_echo),
+        ):
+            code = batch_preset_module.run_preset(
+                list(files),
+                command="meeting",
+                config_path=None,
+                glossary_path=None,
+                quiet=False,
+                yes=True,
+                tracker=tracker,
+                display=None,
+            )
+        assert code == 1
+        echoes = record.get("echoes", [])
+        assert all("complete" not in e for e in echoes), echoes
+        assert all(not e.startswith("wrote ") for e in echoes), echoes
+
+    def test_mixed_batch_one_failed_one_succeeded(self, tmp_path, monkeypatch):
+        """Plain path, 2 files: the first succeeds (full pair written), the
+        second has a partial pair (its .json write fails) -> exit 1, the
+        first file's "wrote" lines still print, but NO "complete" line
+        for the mixed batch."""
+        files = touch_files(["a.m4a", "b.m4a"], tmp_path)
+        record: dict[str, Any] = {}
+
+        def fake_echo(msg, err: bool = False, **kw):
+            if not err:
+                record.setdefault("echoes", []).append(str(msg))
+
+        def fake_write(result, stem, out_dir, *, date_str=None):
+            if stem == "a":
+                return ["2025-01-01 a.md", "2025-01-01 a.json"]  # full pair
+            return ["2025-01-01 b.md"]  # b: partial pair (json write failed)
+
+        _plain_seams(monkeypatch)
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        tracker = begin_interrupt_tracking()
+        with (
+            mock.patch.object(batch_preset_module, "_write_preset_output", fake_write),
+            mock.patch.object(batch_preset_module.typer, "echo", fake_echo),
+        ):
+            code = batch_preset_module.run_preset(
+                list(files),
+                command="meeting",
+                config_path=None,
+                glossary_path=None,
+                quiet=False,
+                yes=True,
+                tracker=tracker,
+                display=None,
+            )
+        assert code == 1
+        echoes = record.get("echoes", [])
+        wrote = [e for e in echoes if e.startswith("wrote ")]
+        # The successful file's pair + the partial pair's .md still print.
+        assert len(wrote) == 3, echoes
+        # But no "complete" line — one file failed.
+        assert all("complete" not in e for e in echoes), echoes
+
+    def test_success_full_pairs_prints_complete(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """Plain path, all files fully written, exit 0 -> exactly one
+        "complete" line, after the wrote lines."""
+        files = touch_files(["a.m4a"], tmp_path)
+        code = _run_preset_plain(
+            tmp_path,
+            monkeypatch,
+            files,
+            result_per_file=_good_result(_two_label_paragraphs()),
+        )
+        assert code == 0
+        out = capsys.readouterr().out
+        assert out.count("complete") == 1
+        wrote_idx = out.index("wrote ")
+        complete_idx = out.index("complete")
+        assert complete_idx > wrote_idx
+
+    def test_quiet_failed_run_prints_no_complete(self, tmp_path, monkeypatch):
+        """--quiet with a failed run: nothing at all (no wrote lines, no
+        complete line)."""
+        files = touch_files(["a.m4a"], tmp_path)
+        record: dict[str, Any] = {}
+
+        def fake_echo(msg, err: bool = False, **kw):
+            if not err:
+                record.setdefault("echoes", []).append(str(msg))
+
+        def bad_transcribe(file, options=None, glossary_path=None, **kwargs):
+            return {"text": "", "segments": []}
+
+        _plain_seams(monkeypatch)
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        tracker = begin_interrupt_tracking()
+        with (
+            mock.patch.object(
+                batch_preset_module, "_transcribe_preset_file", bad_transcribe
+            ),
+            mock.patch.object(batch_preset_module.typer, "echo", fake_echo),
+        ):
+            code = batch_preset_module.run_preset(
+                list(files),
+                command="meeting",
+                config_path=None,
+                glossary_path=None,
+                quiet=True,
+                yes=True,
+                tracker=tracker,
+                display=None,
+            )
+        assert code == 1
+        assert record.get("echoes", []) == []
+
+    def test_group_partial_pair_no_complete_line(self, tmp_path, monkeypatch):
+        """Group path: a group's .json write fails (partial pair) -> exit
+        1, the .md "wrote" line prints, but NO "complete" line."""
+        files = touch_files(["a.m4a", "b.m4a"], tmp_path)
+        record: dict[str, Any] = {}
+
+        def fake_echo(msg, err: bool = False, **kw):
+            if not err:
+                record.setdefault("echoes", []).append(str(msg))
+
+        _patch_group_seams(monkeypatch, tmp_path)
+        tracker = begin_interrupt_tracking()
+        with (
+            mock.patch.object(
+                batch_preset_module, "_write_preset_output", _group_write_seam
+            ),
+            mock.patch.object(batch_preset_module.typer, "echo", fake_echo),
+        ):
+            code = batch_preset_module.run_preset(
+                list(files),
+                command="meeting",
+                config_path=None,
+                glossary_path=None,
+                quiet=False,
+                yes=True,
+                tracker=tracker,
+                display=None,
+            )
+        assert code == 1
+        echoes = record.get("echoes", [])
+        assert any(e.startswith("wrote ") for e in echoes), echoes
+        assert all("complete" not in e for e in echoes), echoes

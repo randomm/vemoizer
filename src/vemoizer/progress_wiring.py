@@ -12,17 +12,19 @@ stays as the idempotent backstop (issue #143).
 
 from __future__ import annotations
 
+import typer
+
 from vemoizer.output.naming import nfc
 from vemoizer.progress import ProgressDisplay
 
 
 def make_batch_display(quiet: bool = False) -> ProgressDisplay | None:
-    """Construct the run's :class:`ProgressDisplay` (issue #105 M4b).
+    """Construct the run's :class:`~vemoizer.progress.ProgressDisplay` (issue #105 M4b).
 
     Returns ``None`` when *quiet* is true (``--quiet`` suppresses the live
     progress line as well as the summary lines it already suppresses).
-    A non-TTY stderr is handled by :class:`ProgressDisplay` itself (its
-    ``disable`` flag makes every method a no-op and the tqdm shim a
+    A non-TTY stderr is handled by :class:`~vemoizer.progress.ProgressDisplay`
+    itself (its ``disable`` flag makes every method a no-op and the tqdm shim a
     pass-through), so the display object is always constructed when not
     quiet and the TTY state only decides whether anything renders.
     ``None`` is the default at every downstream call site, so all existing
@@ -44,6 +46,21 @@ def _close_run_display(display: ProgressDisplay | None) -> None:
     """
     if display is not None:
         display.close()
+
+
+def _print_final_line(n_files: int, *, quiet: bool) -> None:
+    """The single final line of the run, after the ``wrote`` lines
+    (issue #148).
+
+    The one place the word ``complete`` appears: per-stage markers are
+    ``✓ <stage>`` (``decode ✓``, ``diarize ✓`` …), so ``complete`` on the
+    final line is unambiguous — the run is done and its files are on
+    disk. ``--quiet`` suppresses it (the quiet contract already covers
+    the ``wrote`` lines it would follow).
+    """
+    if quiet:
+        return
+    typer.echo(f"[green]✓ complete — wrote {n_files} file(s)")
 
 
 def set_batch_prefix(

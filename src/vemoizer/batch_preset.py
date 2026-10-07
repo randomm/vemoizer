@@ -35,7 +35,7 @@ from vemoizer.preset_interrupt import (
 )
 from vemoizer.presets import RunOptions, resolve_options
 from vemoizer.progress import ProgressDisplay
-from vemoizer.progress_wiring import _close_run_display
+from vemoizer.progress_wiring import _close_run_display, _print_final_line
 from vemoizer.run_log import file_log
 from vemoizer.sidecar import resolve_run_glossary_files
 
@@ -43,16 +43,6 @@ if TYPE_CHECKING:
     from vemoizer.preset_interrupt import InterruptTracker
 
 __all__ = ["run_preset"]
-
-
-def _print_final_line(n_files: int) -> None:
-    """The single final line of the run, after the ``wrote`` lines (issue #148).
-
-    The one place the word ``complete`` appears: per-stage markers are
-    ``✓ <stage>`` (``decode ✓``, ``diarize ✓`` …), so ``complete`` on the
-    final line is unambiguous — the run is done and its files are on disk.
-    """
-    typer.echo(f"[green]✓ complete — wrote {n_files} file(s)")
 
 
 def _mtime_date_str(path: Path) -> str:
@@ -188,10 +178,16 @@ def _run_preset_groups(
         if not quiet:
             typer.echo(f"wrote {name}")
     # The single final line (issue #148): the only place "complete" appears.
-    # Per-stage markers use the stage name ("decode ✓", "diarize ✓", …),
-    # so "complete" on the final line is unambiguous and fires after the
-    # files are written.
-    if not quiet and written:
+    # Gated on the run having succeeded for ALL files (exit 0 and every
+    # expected pair fully written): a partial pair or a failed check means
+    # some file's files are missing, so nothing may read "complete" — the
+    # successful groups' "wrote" lines still print above.
+    if (
+        not quiet
+        and written
+        and exit_code == 0
+        and len(written) == len(files) * len(PRESET_FORMATS)
+    ):
         _print_final_line(len(written))
     # End-of-meeting naming hook (issue #95): the prompt is the last
     # interactive output; the hook never alters the run's exit code.
@@ -473,9 +469,17 @@ def run_preset(
             if not quiet:
                 typer.echo(f"wrote {name}")
         # The single final line (issue #148): the only place "complete"
-        # appears; suppressed by --quiet and by an empty ``written``.
-        if not quiet and written:
-            _print_final_line(len(written))
+        # appears. Gated on the run having succeeded for ALL files (exit 0
+        # and every expected pair fully written): a partial pair or a
+        # failed check means some file's files are missing, so nothing may
+        # read "complete" — the successful files' "wrote" lines still
+        # print above; --quiet suppresses the line.
+        if (
+            written
+            and exit_code == 0
+            and len(written) == len(files) * len(PRESET_FORMATS)
+        ):
+            _print_final_line(len(written), quiet=quiet)
         # End-of-meeting naming hook (issue #95): memo never prompts;
         # the hook never alters the run's exit code.
         if command == "meeting":
