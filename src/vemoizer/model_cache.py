@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 __all__ = ["snapshot_locally_complete", "clear_memo"]
 
@@ -268,7 +268,18 @@ def _shards_complete(snapshot_dir: Path) -> bool:
 
 
 def _index_shards_complete(snapshot_dir: Path, index: Path) -> bool:
-    """True when every shard named by *index* exists non-empty under *snapshot_dir*."""
+    """True when every shard named by *index* exists non-empty under *snapshot_dir*.
+
+    Shard names are validated BY NAME before any filesystem touch: an
+    absolute name (``Path.__truediv__`` drops the base) or a ``..`` name
+    would make the probe stat files OUTSIDE the snapshot dir — a false
+    'complete' could silence a real download. Legitimate relative subfolder
+    names (``sub/model-00001-of-00002.safetensors``) stay allowed. NOTE:
+    containment is deliberately checked by name, not via
+    ``Path.resolve()`` — real HF caches store blobs in a sibling ``blobs/``
+    dir and the snapshot entries are symlinks into it, so resolved paths
+    legitimately live outside the snapshot dir.
+    """
     try:
         data = json.loads(index.read_text())
     except (OSError, json.JSONDecodeError):
@@ -277,7 +288,7 @@ def _index_shards_complete(snapshot_dir: Path, index: Path) -> bool:
     if not isinstance(weight_map, dict):
         return False
     for shard_name in weight_map.values():
-        if not isinstance(shard_name, str):
+        if not _is_safe_shard_name(shard_name):
             return False
         shard = snapshot_dir / shard_name
         try:
@@ -285,4 +296,28 @@ def _index_shards_complete(snapshot_dir: Path, index: Path) -> bool:
                 return False
         except OSError:
             return False
+    return True
+
+
+def _is_safe_shard_name(name: object) -> bool:
+    """True when *name* is a relative, traversal-free POSIX shard path.
+
+    Rejects by name (never touching the filesystem): non-``str`` values,
+    absolute names (drive, UNC, or plain POSIX absolute — checked via
+    ``PurePosixPath`` AND ``PureWindowsPath`` so Windows forms are rejected
+    even on macOS), ``..`` parts, NUL bytes, and backslash escape tricks
+    (on POSIX, ``\\`` is a legal filename character and is NOT a path
+    separator, so a name like ``sub\\x.safetensors`` would resolve into a
+    subfolder — reject it to keep the check platform-independent).
+    """
+    if not isinstance(name, str) or not name:
+        return False
+    if "\\" in name or "\x00" in name:
+        return False
+    posix = PurePosixPath(name)
+    windows = PureWindowsPath(name)
+    if posix.is_absolute() or windows.is_absolute():
+        return False
+    if ".." in posix.parts or ".." in windows.parts:
+        return False
     return True

@@ -466,6 +466,128 @@ def test_pytorch_index_shards_must_exist_nonempty(tmp_path: Path) -> None:
     assert _probe_fresh(repo2, PINNED_REVISION, tmp_path) is False
 
 
+def test_shard_name_absolute_path_is_incomplete(tmp_path: Path) -> None:
+    """A weight_map shard name that is an ABSOLUTE path must be rejected by
+    NAME: ``snapshot_dir / absolute`` makes pathlib drop the base, so the
+    probe would stat a file outside the snapshot dir (a false 'complete'
+    could silence a real download). The shard must not even be touched."""
+    import json as _json
+
+    repo = "org/shard-absolute"
+    snap = _snapshot_dir(tmp_path, PINNED_REVISION, repo)
+    _write_file(snap, "model.safetensors", size=16)  # passes weight check
+    # A real non-empty file OUTSIDE the snapshot dir (the false-positive
+    # case: the old code said 'complete' because the absolute name
+    # replaced the snapshot base entirely).
+    outside = tmp_path / "outside.safetensors"
+    outside.write_bytes(b"0" * 16)
+    (snap / "model.safetensors.index.json").write_text(
+        _json.dumps({"weight_map": {"w1": str(outside)}})
+    )
+    # Direct unit proof of the name check: the old code stats the file
+    # outside the snapshot dir and reports complete.
+    index = snap / "model.safetensors.index.json"
+    assert model_cache._index_shards_complete(snap, index) is False
+    assert _probe_fresh(repo, PINNED_REVISION, tmp_path) is False
+
+
+def test_shard_name_dotdot_escape_is_incomplete(tmp_path: Path) -> None:
+    """A ``../outside.safetensors`` shard name must be rejected: the old
+    code probed ``snapshot/../outside.safetensors`` — a real non-empty file
+    outside the snapshot dir — and reported 'complete'."""
+    import json as _json
+
+    repo = "org/shard-dotdot"
+    snap = _snapshot_dir(tmp_path, PINNED_REVISION, repo)
+    _write_file(snap, "model.safetensors", size=16)  # passes weight check
+    outside = tmp_path / "escape.safetensors"
+    outside.write_bytes(b"0" * 16)
+    (snap / "model.safetensors.index.json").write_text(
+        _json.dumps({"weight_map": {"w1": "../escape.safetensors"}})
+    )
+    # Break-and-fail case: pre-fix, `snap / "../escape.safetensors"` resolves
+    # to the real non-empty file OUTSIDE the snapshot -> old code said True.
+    index = snap / "model.safetensors.index.json"
+    assert model_cache._index_shards_complete(snap, index) is False
+    assert _probe_fresh(repo, PINNED_REVISION, tmp_path) is False
+
+
+def test_shard_name_windows_and_trick_forms_are_incomplete(tmp_path: Path) -> None:
+    """Drive/UNC forms and separator-escape tricks are rejected by name
+    without ever touching the filesystem outside the snapshot dir."""
+    import json as _json
+
+    for bad_name in (
+        "C:/abs.safetensors",
+        "\\\\server\\share.safetensors",  # UNC
+        "sub\\nested.safetensors",  # backslash escape on POSIX
+    ):
+        repo = f"org/shard-{abs(hash(bad_name)) % 10**6}"
+        snap = _snapshot_dir(tmp_path, PINNED_REVISION, repo)
+        _write_file(snap, "model.safetensors", size=16)
+        (snap / "model.safetensors.index.json").write_text(
+            _json.dumps({"weight_map": {"w1": bad_name}})
+        )
+        assert model_cache._index_shards_complete(
+            snap, snap / "model.safetensors.index.json"
+        ) is False, f"shard name {bad_name!r} must be rejected by name"
+
+
+def test_shard_name_non_string_value_is_incomplete_without_raising(
+    tmp_path: Path,
+) -> None:
+    """Non-str weight_map values (int/None/list/dict) -> incomplete, never
+    an exception out of the probe."""
+    import json as _json
+
+    for bad_value in (42, None, ["x"], {"a": 1}):
+        repo = f"org/shard-nonstr-{abs(hash(str(bad_value))) % 10**6}"
+        snap = _snapshot_dir(tmp_path, PINNED_REVISION, repo)
+        _write_file(snap, "model.safetensors", size=16)
+        (snap / "model.safetensors.index.json").write_text(
+            _json.dumps({"weight_map": {"w1": bad_value}})
+        )
+        assert model_cache._index_shards_complete(
+            snap, snap / "model.safetensors.index.json"
+        ) is False
+
+
+def test_shard_name_relative_subfolder_stays_allowed(tmp_path: Path) -> None:
+    """A legitimate relative subfolder shard name (``sub/model-00001-of-\n    00002.safetensors``) with a real non-empty file stays complete — the
+    name check must not over-reject."""
+    import json as _json
+
+    repo = "org/shard-subfolder"
+    snap = _snapshot_dir(tmp_path, PINNED_REVISION, repo)
+    _write_file(snap, "model.safetensors", size=16)
+    _write_file(snap, "sub/model-00001-of-00002.safetensors", size=16)
+    (snap / "model.safetensors.index.json").write_text(
+        _json.dumps({"weight_map": {"w1": "sub/model-00001-of-00002.safetensors"}})
+    )
+    assert model_cache._index_shards_complete(
+        snap, snap / "model.safetensors.index.json"
+    ) is True
+    assert _probe_fresh(repo, PINNED_REVISION, tmp_path) is True
+
+
+def test_symlinked_weights_into_blobs_still_complete(tmp_path: Path) -> None:
+    """Break-and-fail guard against over-fixing: legitimate HF caches store
+    blobs in ``blobs/`` and the snapshot entries are SYMLINKS into the
+    sibling ``blobs/`` dir — resolved paths legitimately live OUTSIDE the
+    snapshot dir, so a resolve()-based containment check would (wrongly)
+    mark them incomplete. The name-based check must keep them complete."""
+    repo = "org/symlink-blobs"
+    snap = _snapshot_dir(tmp_path, PINNED_REVISION, repo)
+    blobs = _blobs_dir(tmp_path, repo)
+    blob = blobs / "the-blob"
+    blob.write_bytes(b"0" * 16)
+    link = snap / "model.safetensors"
+    link.symlink_to(blob)  # resolves to blobs/the-blob, outside the snapshot
+    assert link.is_file() and link.stat().st_size > 0
+    assert link.resolve() != snap / "model.safetensors"
+    assert _probe_fresh(repo, PINNED_REVISION, tmp_path) is True
+
+
 def test_generic_fallback_requires_nonempty_weight_file(tmp_path: Path) -> None:
     """(c) the generic fallback (repo not in the table) requires at least one
     NON-EMPTY weights file, not merely the presence of a zero-byte one."""
