@@ -804,16 +804,20 @@ def test_language_summary_absent_on_empty_audio() -> None:
 def test_pinned_download_suppresses_bars_when_cached(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When the snapshot is cached, _pinned_download calls
-    disable_progress_bars() before and enable_progress_bars() after
-    snapshot_download (issue #147)."""
+    """When the snapshot is cached (its ``trees/<revision>.json`` tree cache
+    exists), _pinned_download silences the HF bars around snapshot_download
+    (issue #147): disable_progress_bars enters before the download and its
+    context-manager exit re-enables."""
     from vemoizer.whisper_transcriber import _pinned_download
 
     revision = "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb"
     monkeypatch.setenv("HF_HOME", str(tmp_path))
-    marker = tmp_path / "hub" / "models--org--name" / "refs" / revision
-    marker.parent.mkdir(parents=True)
-    marker.touch()
+    # A full commit-SHA revision never gets a refs/<sha> marker
+    # (huggingface_hub writes refs only when revision != commit_hash);
+    # the tree cache IS written for a pinned SHA, so that is the marker.
+    tree = tmp_path / "hub" / "models--org--name" / "trees" / f"{revision}.json"
+    tree.parent.mkdir(parents=True)
+    tree.touch()
 
     calls: list[str] = []
 
@@ -824,15 +828,12 @@ def test_pinned_download_suppresses_bars_when_cached(
     with (
         patch("vemoizer.models._model_cache_name", return_value="models--org--name"),
         patch("huggingface_hub.snapshot_download", side_effect=_fake_download),
-        patch(
-            "huggingface_hub.utils.disable_progress_bars",
-            side_effect=lambda: calls.append("disable"),
-        ),
-        patch(
-            "huggingface_hub.utils.enable_progress_bars",
-            side_effect=lambda: calls.append("enable"),
-        ),
+        patch("huggingface_hub.utils.disable_progress_bars.__enter__") as mock_enter,
+        patch("huggingface_hub.utils.disable_progress_bars.__exit__") as mock_exit,
     ):
+        # The __enter__ patch must return the cm so `with` gets a truthy object.
+        mock_enter.side_effect = lambda: calls.append("disable") or object()
+        mock_exit.side_effect = lambda *a: calls.append("enable") or None
         result = _pinned_download("org/name", revision)
 
     assert result == str(tmp_path / "snap")
@@ -845,19 +846,20 @@ def test_pinned_download_suppresses_bars_when_cached(
 def test_pinned_download_keeps_bars_when_uncached(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When the snapshot is NOT cached, _pinned_download does NOT call
-    disable_progress_bars (a real multi-GB download must show a bar)."""
+    """When the snapshot is NOT cached (no tree cache), _pinned_download does
+    NOT call disable_progress_bars (a real multi-GB download must show a
+    bar)."""
     from vemoizer.whisper_transcriber import _pinned_download
 
     revision = "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb"
     monkeypatch.setenv("HF_HOME", str(tmp_path))
-    # No marker file → not cached
+    # No trees/<revision>.json marker -> not cached
     with (
         patch("vemoizer.models._model_cache_name", return_value="models--org--name"),
         patch("huggingface_hub.snapshot_download", return_value="/tmp/snap"),
-        patch("huggingface_hub.utils.disable_progress_bars") as mock_disable,
-        patch("huggingface_hub.utils.enable_progress_bars") as mock_enable,
+        patch("huggingface_hub.utils.disable_progress_bars.__enter__") as mock_disable,
+        patch("huggingface_hub.utils.disable_progress_bars.__exit__") as mock_exit,
     ):
         _pinned_download("org/name", revision)
     mock_disable.assert_not_called()
-    mock_enable.assert_not_called()
+    mock_exit.assert_not_called()

@@ -212,6 +212,14 @@ def _assemble(
             if speaker is not None:
                 segment["speaker"] = speaker
     result: dict[str, Any] = {"text": text, "segments": segments}
+    # Per-window language distribution (issue #147, display only): decode A's
+    # whisper windows report a ``language_summary`` (e.g. "fi 29/30, en
+    # 1/30"); carry it onto the run dict so the end-of-run quality report's
+    # Kielet/Languages section can render it. The dictation profile never
+    # sets the key, so nothing is copied in that case (fail-open).
+    lang_summary = base.get("language_summary")
+    if isinstance(lang_summary, str) and lang_summary:
+        result["language_summary"] = lang_summary
     if segments:
         result["paragraphs"] = tidy_paragraphs(paragraphs(segments))
     return result

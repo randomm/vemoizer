@@ -401,38 +401,50 @@ def _pinned_download(repo_id: str, revision: str) -> str:
     (revision-pinned snapshot_download from a local path, invariant #4) is
     untouched.
 
-    Fail-open: any exception from ``disable_progress_bars`` / the cache check
-    / ``snapshot_download`` propagates to the caller's except handler.
+    The cache probe (issue #147, round 2) checks the pinned snapshot's
+    ``trees/<revision>.json`` tree cache, NOT ``refs/<revision>``: a full
+    commit-SHA revision is treated as immutable by ``snapshot_download``
+    (``REGEX_COMMIT_HASH`` match → ``commit_hash = revision``, no API call
+    and no ref write — ``refs/`` is written only when ``revision !=
+    commit_hash``, i.e. for branch/tag names), so ``refs/<sha>`` is never
+    created for our pinned-SHA models and probing it is dead code. The tree
+    cache IS written for a full SHA (``write_tree_cache`` runs unconditionally
+    once the file listing resolves) and is the exact condition under which
+    ``snapshot_download`` takes its fast local path (``read_tree_cache``
+    hit → no download) — so it is the right cached/uncached discriminator.
+    It is not the only fast path (the ``snapshots/<sha>/`` early return when
+    ``local_files_only`` is true), so suppression can be missed in that
+    case (a bar appears once); that is the safe direction (bar shown, never
+    a silent multi-GB download).
+
+    Fail-open: any exception from the cache check falls through to the
+    bar-intact path (a download bar is the safe default); an exception from
+    ``snapshot_download`` propagates to the caller's except handler.
     """
     from huggingface_hub import snapshot_download
-    from huggingface_hub.utils import (
-        disable_progress_bars,
-        enable_progress_bars,
-    )
+    from huggingface_hub.utils import disable_progress_bars
 
     from vemoizer.models import _model_cache_name, cache_dir
 
     def _is_cached() -> bool:
         """Cheap local-only cache probe (no network, no download).
 
-        The pinned-snapshot marker file (``refs/<revision>``) is written by
-        ``snapshot_download`` once the download completes. Its presence is a
-        sufficient (not necessary) condition for the snapshot being cached:
-        an absent marker always means "not cached" (the bar stays on, which
-        is safe — the download bar is shown); a present marker means the
-        snapshot is almost certainly cached (the bar is suppressed, which is
-        the goal). Fail-open: any exception returns False (bar stays on).
+        True when ``snapshot_download``'s own tree cache holds the pinned
+        snapshot's file listing (``trees/<revision>.json``): that is the
+        condition under which it resolves the file list locally and takes
+        its fast cached path. Absent tree cache → not cached (the bar stays
+        on, which is safe — a real download shows a bar). Fail-open: any
+        exception returns False (bar stays on).
         """
         try:
-            marker = cache_dir() / _model_cache_name(repo_id) / "refs" / revision
-            return marker.is_file()
+            tree = (
+                cache_dir() / _model_cache_name(repo_id) / "trees" / f"{revision}.json"
+            )
+            return tree.is_file()
         except Exception:  # noqa: BLE001 - fail-open (bar stays on)
             return False
 
     if _is_cached():
-        disable_progress_bars()
-        try:
+        with disable_progress_bars():
             return str(snapshot_download(repo_id, revision=revision))
-        finally:
-            enable_progress_bars()
     return str(snapshot_download(repo_id, revision=revision))
