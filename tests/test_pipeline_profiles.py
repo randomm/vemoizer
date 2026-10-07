@@ -8,6 +8,9 @@ mocked — no models, no network, no ffmpeg.
 
 from __future__ import annotations
 
+import io
+import sys
+
 import pytest
 from test_pipeline import (  # noqa: F401 - shared orchestrator fixtures
     _consensus_setup,
@@ -24,6 +27,15 @@ import vemoizer.diarization as diarization_mod
 import vemoizer.pipeline as pipeline
 from vemoizer.pipeline import transcribe_file
 
+
+@pytest.fixture
+def fake_stderr(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
+    """Replace sys.stderr so ProgressDisplay is disabled (non-TTY)."""
+    buffer = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", buffer)
+    return buffer
+
+
 # -- notes stage wiring (issue #57) --------------------------------------
 
 
@@ -34,7 +46,7 @@ def test_notes_failure_lands_in_warnings_not_errors(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(
         pipeline,
         "generate_notes",
-        lambda client, text, paragraphs=None, glossary=None: None,
+        lambda client, text, paragraphs=None, glossary=None, **_: None,
     )
 
     class _Client:
@@ -60,7 +72,7 @@ def test_notes_attach_when_generated(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         pipeline,
         "generate_notes",
-        lambda client, text, paragraphs=None, glossary=None: fake_notes,
+        lambda client, text, paragraphs=None, glossary=None, **_: fake_notes,
     )
 
     class _Client:
@@ -228,7 +240,7 @@ def test_repair_pass_updates_paragraphs_only(tmp_path, monkeypatch) -> None:
         def adjudicate(self, a_text, candidates, context=""):
             return "moikka"
 
-        def complete(self, system, user, max_tokens=2048):
+        def complete(self, system, user, max_tokens=2048, **kw):
             return user.replace("moikka", "moikka!")  # a visible "repair"
 
         def close(self) -> None:
@@ -238,7 +250,7 @@ def test_repair_pass_updates_paragraphs_only(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         pipeline,
         "generate_notes",
-        lambda client, text, paragraphs=None, glossary=None: None,
+        lambda client, text, paragraphs=None, glossary=None, **_: None,
     )
     cfg = _llm_config(tmp_path)
     result = transcribe_file("/nonexistent.m4a", config_path=str(cfg), repair=True)
@@ -318,7 +330,7 @@ def test_glossary_reaches_whisper_and_notes(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(pipeline, "decode_meeting", fake_decode_meeting)
 
-    def fake_notes(client, text, paragraphs=None, glossary=None):
+    def fake_notes(client, text, paragraphs=None, glossary=None, budget=None):
         seen["notes_glossary"] = glossary
         seen["notes_paragraphs"] = paragraphs
         return None
@@ -455,3 +467,62 @@ def test_fused_qa_splits_by_word_level_speakers(tmp_path, monkeypatch) -> None:
     texts = [(s.get("speaker"), s["text"]) for s in result["segments"]]
     assert ("SPEAKER_00", "mitä mieltä olet") in texts
     assert ("SPEAKER_01", "minusta hyvä") in texts
+
+
+# -- display tasks (issue #148) ---------------------------------------------
+
+
+def test_diarize_creates_display_stage_task(tmp_path, monkeypatch, fake_stderr) -> None:
+    """When a ProgressDisplay is threaded into transcribe_file with diarize=True,
+    a "diarize" stage task is added and finished (issue #148).
+
+    The task must be visible (added) and completed (finished, description
+    starts with "[green]") — not left live at the end of the run.
+    """
+    _patch_preflight_pass(monkeypatch)
+    _patch_ingest(monkeypatch)
+    _patch_vad(monkeypatch)
+    _patch_whisper_a(monkeypatch)
+    _patch_diarize(monkeypatch, segments=[(0.0, 2.0, "SPEAKER_00")])
+
+    from vemoizer.progress import ProgressDisplay
+
+    display = ProgressDisplay(verbose=True)  # enabled (TTY mocked)
+    transcribe_file(
+        "/nonexistent.m4a",
+        config_path=str(tmp_path / "none.toml"),
+        profile="meeting",
+        diarize=True,
+        display=display,
+    )
+    display.close()
+    # A "diarize" task was added and finished.
+    # rich tracks tasks in display._progress.tasks; find one that was the
+    # diarize stage by checking its description starts with the green check.
+    finished_tasks = [
+        t
+        for t in display._progress.tasks
+        if t.description.startswith("[green]✓ diarize")
+    ]
+    assert len(finished_tasks) == 1, (
+        f"Expected one finished 'diarize' task, found {len(finished_tasks)} "
+        f"(descriptions: {[t.description for t in display._progress.tasks]})"
+    )
+
+
+def test_diarize_without_display_does_not_crash(tmp_path, monkeypatch) -> None:
+    """diarize=True without a display is a no-op for the display layer."""
+    _patch_preflight_pass(monkeypatch)
+    _patch_ingest(monkeypatch)
+    _patch_vad(monkeypatch)
+    _patch_whisper_a(monkeypatch)
+    _patch_diarize(monkeypatch, segments=[(0.0, 2.0, "SPEAKER_00")])
+    # display=None (default) — must not raise
+    result = transcribe_file(
+        "/nonexistent.m4a",
+        config_path=str(tmp_path / "none.toml"),
+        profile="meeting",
+        diarize=True,
+        display=None,
+    )
+    assert result["segments"][0].get("speaker") == "SPEAKER_00"

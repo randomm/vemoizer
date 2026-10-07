@@ -180,6 +180,10 @@ class ProgressDisplay:
         # strip the previous prefix precisely instead of inferring it from
         # content (a stem containing ` · ` would otherwise be corrupted).
         self._prefixes: dict[TaskID, str] = {}
+        # Base stage name per task id, so finish() can render a
+        # per-stage marker ("decode ✓") instead of the generic
+        # "✓ complete" that read as the whole run being done (issue #148).
+        self._stage_names: dict[TaskID, str] = {}
         self._console = Console(
             stderr=True,
             no_color=not is_tty,
@@ -192,10 +196,6 @@ class ProgressDisplay:
             transient=False,
         )
         self._started = False
-        # Exact batch prefix last applied per task id, so a re-prefix can
-        # strip the previous prefix precisely instead of inferring it from
-        # content (a stem containing ` · ` would otherwise be corrupted).
-        self._prefixes: dict[TaskID, str] = {}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -233,21 +233,61 @@ class ProgressDisplay:
     def add_stage(self, description: str, total: float | None = None) -> TaskID:
         """Register a pipeline stage and return its task id."""
         self.start()
-        return self._progress.add_task(description, total=total)
+        task_id = self._progress.add_task(description, total=total)
+        self._stage_names[task_id] = description
+        return task_id
 
     def advance(self, task_id: TaskID, advance: float = 1) -> None:
         """Advance a stage's progress counter."""
         self._progress.advance(task_id, advance)
 
     def finish(self, task_id: TaskID, total: float | None = None) -> None:
-        """Mark a stage complete (optional explicit total to end on)."""
+        """Mark a stage complete (optional explicit total to end on).
+
+        The completion marker uses the stage's base name (``decode``,
+        ``diarize``, ``repair``, ``notes``) so each stage gets its own
+        ``✓ decode`` / ``✓ diarize`` / … marker (issue #148) instead of
+        the generic ``✓ complete`` that read as the whole run being done.
+        The word ``complete`` now appears only in the run's final line.
+        """
         self._progress.update(task_id, completed=total)
-        self._progress.update(task_id, description="[green]✓ complete")
+        name = self._stage_names.get(task_id, "")
+        self._progress.update(task_id, description=f"[green]✓ {name}")
         self._progress.stop_task(task_id)
 
     def update_text(self, task_id: TaskID, description: str) -> None:
         """Replace a running stage's status text (e.g. 'loading model...')."""
         self._progress.update(task_id, description=description)
+
+    def active_stage_name(self) -> str | None:
+        """The last unfinished task's base stage name (prefix-free).
+
+        Reads the name off the display's own base-name registry (set at
+        ``add_stage``, prefix-free) so a batch prefix's file stem can never
+        leak into the result. ``None`` when there is no live task, when the
+        only task is the last one and it is already finished (its
+        description carries the ``[green]`` completion marker), or when the
+        registry does not know the task's id (falls back to the live
+        description with the ``[i/N] <stem> · `` prefix stripped). Used by
+        :func:`vemoizer.preset_interrupt.handle_interrupt` to name the
+        active stage without reaching into private display state.
+        """
+        from vemoizer.preset_interrupt import _strip_batch_prefix
+
+        tasks = self._progress.tasks
+        if not tasks:
+            return None
+        task = tasks[-1]
+        if task.description.startswith("[green]"):
+            # A completed task carries the completion marker; it is not the
+            # active stage (the ``prefix_active_stage`` convention).
+            return None
+        # The base name per task id (set at add_stage); the prefix never
+        # reaches this map, so the stem cannot leak.
+        name = self._stage_names.get(task.id, "")
+        if name and not name.startswith("[green]"):
+            return name
+        return _strip_batch_prefix(task.description)
 
     def prefix_active_stage(self, prefix: str) -> None:
         """Prepend *prefix* (e.g. ``"[1/3] memo · "``) to the active stage.

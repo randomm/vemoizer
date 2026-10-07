@@ -1,10 +1,9 @@
-"""Preset (``meeting`` / ``memo``) run orchestration.
+"""Preset (``meeting`` / ``memo``) run orchestration (issue #87).
 
-Extracted from :mod:`vemoizer.batch_output` (500-line cap, issue #87).
 ``run_preset`` composes the layered glossary, resolves the preset
 :class:`~vemoizer.presets.RunOptions`, and runs the plain per-file loop
-(single / memo / ``--no-group``) or the M3 grouping flow (meeting 2+).
-The dated output name uses the first file's ``st_mtime`` (fallback: today).
+or the M3 grouping flow (meeting 2+). The dated output name uses the
+first file's ``st_mtime`` (fallback: today).
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import typer
 
@@ -30,10 +29,23 @@ from vemoizer.ingest import IngestError
 from vemoizer.naming_hook import ask_naming_hook
 from vemoizer.output.naming import nfc_stem_and_suffix
 from vemoizer.preset_file_transcribe import _transcribe_preset_file
+from vemoizer.preset_final import (
+    print_final_line,
+    print_wrote_lines,
+    run_went_full,
+)
+from vemoizer.preset_interrupt import (
+    note_written_files,
+    set_interrupt_stage,
+)
 from vemoizer.presets import RunOptions, resolve_options
 from vemoizer.progress import ProgressDisplay
 from vemoizer.progress_wiring import _close_run_display
 from vemoizer.run_log import file_log
+from vemoizer.sidecar import resolve_run_glossary_files
+
+if TYPE_CHECKING:
+    from vemoizer.preset_interrupt import InterruptTracker
 
 __all__ = ["run_preset"]
 
@@ -41,11 +53,9 @@ __all__ = ["run_preset"]
 def _mtime_date_str(path: Path) -> str:
     """The ``YYYY-MM-DD`` of *path*'s modification date (local time).
 
-    ``st_mtime`` — deliberately NOT ``st_birthtime``/``creation_time``:
-    on iOS exports the creation time is the copy/export time, not the
-    recording date. Falls back to today when the file cannot be
-    stat'ed (``OSError`` on special filesystems, deleted-then-replaced
-    paths) — a clean fallback, never an exception.
+    ``st_mtime`` (not ``st_birthtime``): on iOS exports the creation time
+    is the copy/export time, not the recording date. Falls back to today
+    when the file cannot be stat'ed.
     """
     try:
         mtime = os.stat(path).st_mtime
@@ -68,13 +78,14 @@ def _run_preset_groups(
     effective_glossary: str | None,
     command: str,
     display: ProgressDisplay | None = None,
+    tracker: InterruptTracker | None = None,
 ) -> int:
     """The meeting 2+ files path: the M3 flow via ``run_batch``.
 
-    ``run_batch`` owns the full grouping logic; this function only hands
-    over the meeting write seam — one dated ``.md`` + ``.json`` pair per
-    group in the CWD — and lets ``run_batch``'s single-file and
-    ``--no-group`` short-circuits keep the per-file behaviour.
+    ``run_batch`` owns the grouping logic; this function only hands over
+    the meeting write seam. A ``KeyboardInterrupt`` raised inside
+    propagates untouched (it is neither ``OSError`` nor ``ValueError``)
+    to the command's handler.
     """
     from vemoizer.batch import run_batch
     from vemoizer.presets import replace
@@ -85,8 +96,6 @@ def _run_preset_groups(
 
     written: list[str] = []
     exit_code = 0
-    from vemoizer.sidecar import resolve_run_glossary_files  # noqa: E402
-
     gfiles = resolve_run_glossary_files(command, options.glossary_path)
     glossary_terms = list(options.whisper_prompt)
     if gfiles:
@@ -95,11 +104,8 @@ def _run_preset_groups(
         glossary_source = None
 
     def write_group(label: Path | str, result: dict[str, Any]) -> None:
-        # One dated pair per group: the date is the first part's mtime
-        # (group[0] in natural-sort order); the fallback stem is the same
-        # first part's stem.
-        # M5a: stash the per-part PCM durations (fail-open) and the real
-        # part paths, then build the sidecar keys.
+        # One dated pair per group; stash per-part PCM durations and
+        # build the sidecar keys (M5a).
         from vemoizer.sidecar import (
             build_sidecar,
             group_durations,
@@ -137,6 +143,7 @@ def _run_preset_groups(
             Path.cwd(),
             date_str=_mtime_date_str(first),
         )
+        note_written_files(tracker, pair)
         written.extend(pair)
         # A partial pair (fewer paths than the preset's formats — e.g.
         # the .json write failed) means this group's run failed; the error
@@ -144,11 +151,8 @@ def _run_preset_groups(
         nonlocal exit_code
         if len(pair) < len(PRESET_FORMATS):
             exit_code = 1
-        # M4a (issue #100), seam (c): one notification per group, at the
-        # seam's own write point (check-/decode-failure notifications fire
-        # earlier in run_batch, so a group is never double-notified).
-        # Success = the full pair written; a partial pair is a FAILURE even
-        # though one file landed; the stem is the group's first part.
+        # M4a (issue #100), seam (c): one notification per group; a
+        # partial pair is a FAILURE even though one file landed.
         from vemoizer.notify import notify_write
 
         notify_write(
@@ -175,15 +179,20 @@ def _run_preset_groups(
     # Issue #143: close the display before the wrote lines and the naming
     # prompt so neither is overdrawn by the live rich Progress.
     _close_run_display(display)
-    for name in written:
-        if not quiet:
-            typer.echo(f"wrote {name}")
+    print_wrote_lines(written, quiet)
+    # Final line (issue #148): only when the run went full. No independent
+    # pair count is passed on the group path (counting pairs from
+    # ``written`` itself would make the length check tautological); a
+    # group's partial pair or failed check sets exit_code = 1 in the write
+    # seam above — the gate rests on that plus a non-empty ``written``.
+    if not quiet and run_went_full(written, exit_code=exit_code):
+        print_final_line(len(written), quiet=quiet)
     # End-of-meeting naming hook (issue #95): the prompt is the last
-    # interactive output (after the wrote lines); the command guard
-    # (meeting only — memo never prompts) is enforced at this call
-    # site; the hook never alters the run's exit code.
+    # interactive output; the hook never alters the run's exit code.
     if command == "meeting":
-        ask_naming_hook(written, yes=yes, input_fn=input_fn, tty_isatty=tty_isatty)
+        ask_naming_hook(
+            written, yes=yes, quiet=quiet, input_fn=input_fn, tty_isatty=tty_isatty
+        )
     return max(code, exit_code)
 
 
@@ -206,6 +215,7 @@ def run_preset(
     print_fn: Callable[[str], None] | None = None,
     tty_isatty: Callable[[], bool] | None = None,
     display: ProgressDisplay | None = None,
+    tracker: InterruptTracker | None = None,
 ) -> int:
     """Run the *meeting* or *memo* preset over *files*.
 
@@ -214,13 +224,11 @@ def run_preset(
     value; ``None`` keeps the plain decode).
 
     Composes the layered glossary, resolves the preset options, then runs
-    the plain per-file loop (single file / memo / ``--no-group``) or, for
-    meeting with 2+ files, the M3 grouping flow via
-    :func:`vemoizer.batch.run_batch` with the meeting write seam.
-    ``display`` (issue #105 M4b) is threaded to ``transcribe_file``.
-    ``run_preset`` takes ownership of the display's close on the success
-    path (meeting runs — before the wrote lines / naming prompt); the
-    CLI's finally-close is then a no-op (issue #143).
+    the plain per-file loop or, for meeting with 2+ files, the M3
+    grouping flow via :func:`vemoizer.batch.run_batch`. ``display`` is
+    threaded to ``transcribe_file``; on the success path ``run_preset``
+    closes it (meeting runs, before the wrote lines / naming prompt) so
+    the CLI's finally-close is a no-op (issue #143).
     Returns 0 on success, 1 on any failure, 2 on a bad flag combination.
     """
     # Deferred import so run_preset (defined here) and _write_temp_glossary
@@ -268,16 +276,14 @@ def run_preset(
     )
 
     # Temp-file seam: without --glossary, write the composed glossary to
-    # a temp file and pass it through the existing glossary_path argument
-    # (no new pipeline parameter). Memo: correction pairs ONLY (the
-    # whisper prompt stays empty) — meeting: merged terms plus the merged
-    # correction pairs.
-    temp_path: Path | None = None
-    effective_glossary: str | None = None
-
+    # a temp file (memo: correction pairs ONLY — the whisper prompt stays
+    # empty; meeting: merged terms + ``@`` lines + correction pairs).
     # The temp file is created INSIDE the protected region so a write
     # failure neither leaks the file nor raises a raw traceback
     # (issue #82 review): a clean error line and exit 1 instead.
+    temp_path: Path | None = None
+    effective_glossary: str | None = None
+
     try:
         if options.glossary_path is None:
             if command == "memo":
@@ -308,15 +314,14 @@ def run_preset(
                     effective_glossary = None
 
         # M3 grouping (issue #87): meeting with 2+ files runs the full
-        # grouping flow through run_batch (the single source of the M3
-        # contract — TTY guard, boundary decodes, concat, part markers).
-        # The mutual-exclusion check also fires for a single file (before
-        # the single-file short-circuit, matching run_batch's existing
+        # grouping flow through run_batch. The mutual-exclusion check
+        # fires before the single-file short-circuit (matching run_batch's
         # order) — run_preset must check it here too.
         if command == "meeting" and yes and no_group:
             typer.echo("error: --yes and --no-group are mutually exclusive", err=True)
             return 2
         if command == "meeting" and len(files) > 1:
+            set_interrupt_stage(tracker, "decoding")
             return _run_preset_groups(
                 files,
                 options,
@@ -330,6 +335,7 @@ def run_preset(
                 effective_glossary=effective_glossary,
                 command=command,
                 display=display,
+                tracker=tracker,
             )
 
         # Plain per-file loop: single file (either preset), memo (always),
@@ -337,24 +343,27 @@ def run_preset(
         # the file's own modification date (issue #87); the fallback stem
         # is the FIRST file's stem (deterministic, unchanged since #82).
         from vemoizer.caffeinate import caffeinate_context
+        from vemoizer.ingest import pcm_duration_seconds
+        from vemoizer.notify import notify_write
         from vemoizer.progress_wiring import set_batch_prefix
+        from vemoizer.sidecar import build_sidecar, resolve_run_glossary_files
 
+        set_interrupt_stage(tracker, "decoding")
         first_stem, _ = nfc_stem_and_suffix(files[0])
         exit_code = 0
         written: list[str] = []
         # M5a: the glossary files the run used (for the sidecar hash).
-        from vemoizer.sidecar import resolve_run_glossary_files
-
         gfiles = resolve_run_glossary_files(command, options.glossary_path)
+
         with caffeinate_context():
             for index, file in enumerate(files, start=1):
                 # M4b (issue #105): prefix the active stage with ``[i/N]
                 # stem`` for multi-file runs.
                 stem, _ = nfc_stem_and_suffix(file)
                 set_batch_prefix(display, index, len(files), stem)
-                # M4c (issue #111), seam (b): per-file log wrapping the entire
-                # per-file iteration (transcribe through notify_write); a
-                # failing transcribe still leaves a log file (decision 6).
+                # M4c (issue #111), seam (b): per-file log wrapping the
+                # entire per-file iteration; a failing transcribe still
+                # leaves a log file (decision 6).
                 with file_log(stem):
                     result = _transcribe_preset_file(
                         file,
@@ -362,6 +371,7 @@ def run_preset(
                         effective_glossary,
                         notify_failed=True,
                         display=display,
+                        tracker=tracker,
                     )
                     if result is None:
                         exit_code = 1
@@ -369,9 +379,6 @@ def run_preset(
                     # M5a: stash this file's PCM duration (fail-open) and
                     # build the sidecar keys before the seam writes the
                     # .md + .json pair.
-                    from vemoizer.ingest import pcm_duration_seconds
-                    from vemoizer.sidecar import build_sidecar
-
                     with suppress(
                         OSError, IngestError
                     ):  # fail-open: skip on ffmpeg error
@@ -391,22 +398,19 @@ def run_preset(
                     # M6 (issue #75): stash the report-only glossary
                     # provenance before the seam writes. Source = the real
                     # layer file path(s) the run read (never the composed
-                    # temp file — deleted in the finally) or the explicit
-                    # --glossary; term count = the whisper-prompt terms only
-                    # (@-prefixed LLM-only terms never reached the whisper
-                    # prompt). Absent when the run read no glossary at all —
-                    # then the md header and the report omit the line, never
-                    # a blank one.
+                    # temp file); term count = the whisper-prompt terms
+                    # only (@-prefixed LLM-only terms never reached the
+                    # whisper prompt). Absent when no glossary was read.
                     if gfiles:
                         result["glossary_source"] = (", ".join(gfiles)) + (
                             f" ({len(options.whisper_prompt)} terms)"
                         )
                         result["glossary_terms"] = list(options.whisper_prompt)
-                    # M6 (issue #75): compute the per-file quality report
+                    # M6 (issue #75): the per-file quality report is computed
                     # BEFORE _check_result pops result["warnings"] (a report
                     # computed after the pop would see an empty warnings
-                    # list), then let the check print the warnings to stderr
-                    # and fail loud on error/no-transcript/no-labels.
+                    # list), then the check prints the warnings to stderr
+                    # and fails loud on error/no-transcript/no-labels.
                     _render_quality_report(
                         result, diarize_requested=bool(options.diarize)
                     )
@@ -441,16 +445,13 @@ def run_preset(
                         Path.cwd(),
                         date_str=_mtime_date_str(file),
                     )
+                    note_written_files(tracker, pair)
                     written.extend(pair)
+                    # M4a (issue #100), seam (b): one notification per file
+                    # (success = the full pair was written; failure = a
+                    # partial pair, with the stderr error line as reason).
                     if len(pair) < len(PRESET_FORMATS):
-                        # A partial pair (e.g. the .json write failed) means
-                        # this file's run failed; the error line was already
-                        # printed by _write_output. A partial pair is a
-                        # FAILURE notification (one file landed, the pair did
-                        # not). M4a (issue #100), seam (b).
                         exit_code = 1
-                        from vemoizer.notify import notify_write
-
                         notify_write(
                             file,
                             len(pair),
@@ -458,27 +459,23 @@ def run_preset(
                             "could not write output",
                         )
                         continue
-                    # M4a (issue #100), seam (b): one success notification
-                    # per file that was transcribed AND the full pair was
-                    # written (meeting single / --no-group / memo; independent
-                    # of --quiet).
-                    from vemoizer.notify import notify_write
-
                     notify_write(file, len(pair), len(PRESET_FORMATS))
         # Issue #143: close the display before the wrote lines and the
-        # naming prompt (meeting only — the memo display stays owned by the
-        # CLI caller's finally, where it is never followed by a prompt);
-        # close() is idempotent, so the later finally-close is a no-op.
+        # naming prompt (meeting only); close() is idempotent.
         if command == "meeting":
             _close_run_display(display)
-        for name in written:
-            if not quiet:
-                typer.echo(f"wrote {name}")
-        # End-of-meeting naming hook (issue #95): memo never prompts
-        # (the command guard lives in the hook's call site), and the
-        # hook never alters the run's exit code.
+        print_wrote_lines(written, quiet)
+        # Final line (issue #148): only when the run went full for ALL files.
+        # The plain path writes one pair per file, so expected pairs = files
+        # (an independent count: the gate verifies every pair fully written).
+        if run_went_full(written, len(files), exit_code):
+            print_final_line(len(written), quiet=quiet)
+        # End-of-meeting naming hook (issue #95): memo never prompts;
+        # the hook never alters the run's exit code.
         if command == "meeting":
-            ask_naming_hook(written, yes=yes, input_fn=input_fn, tty_isatty=tty_isatty)
+            ask_naming_hook(
+                written, yes=yes, quiet=quiet, input_fn=input_fn, tty_isatty=tty_isatty
+            )
         return exit_code
     except OSError as e:
         # Temp-glossary write failure: clean error, non-zero exit, no

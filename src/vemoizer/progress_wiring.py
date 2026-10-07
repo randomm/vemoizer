@@ -17,12 +17,12 @@ from vemoizer.progress import ProgressDisplay
 
 
 def make_batch_display(quiet: bool = False) -> ProgressDisplay | None:
-    """Construct the run's :class:`ProgressDisplay` (issue #105 M4b).
+    """Construct the run's :class:`~vemoizer.progress.ProgressDisplay` (issue #105 M4b).
 
     Returns ``None`` when *quiet* is true (``--quiet`` suppresses the live
     progress line as well as the summary lines it already suppresses).
-    A non-TTY stderr is handled by :class:`ProgressDisplay` itself (its
-    ``disable`` flag makes every method a no-op and the tqdm shim a
+    A non-TTY stderr is handled by :class:`~vemoizer.progress.ProgressDisplay`
+    itself (its ``disable`` flag makes every method a no-op and the tqdm shim a
     pass-through), so the display object is always constructed when not
     quiet and the TTY state only decides whether anything renders.
     ``None`` is the default at every downstream call site, so all existing

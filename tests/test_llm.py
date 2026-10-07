@@ -149,6 +149,64 @@ class TestLoadConfig:
         # Passing a directory (not a file) must fail open, not raise.
         assert load_config(CONFIG_DIR) is None
 
+    # -- stage budgets (issue #148) ---------------------------------------
+    #
+    # The [llm] table gains two optional keys: repair_budget_seconds and
+    # notes_budget_seconds. Absent -> the safe 600 s default; present ->
+    # must be a positive finite number, else the section is malformed.
+    # These are tested against the raw TOML parser (the config fixtures
+    # pre-date the budget keys; a direct section-parse avoids fixture churn).
+
+    def _section(self, extra: str) -> LLMConfig | None:
+        import tomllib
+
+        from vemoizer.llm_config import _parse_llm_section
+
+        raw = tomllib.loads(
+            "[llm]\n"
+            'base_url = "http://localhost"\n'
+            'model = "m"\n'
+            'api_key_env = "K"\n'
+            "timeout_seconds = 10\n" + extra
+        )
+        return _parse_llm_section(raw["llm"])
+
+    def test_budget_keys_absent_use_safe_default(self) -> None:
+        cfg = self._section("")
+        assert cfg is not None
+        assert cfg.repair_budget_seconds == 600.0
+        assert cfg.notes_budget_seconds == 600.0
+
+    def test_budget_keys_present_are_parsed(self) -> None:
+        cfg = self._section(
+            "repair_budget_seconds = 120\nnotes_budget_seconds = 42.5\n"
+        )
+        assert cfg is not None
+        assert cfg.repair_budget_seconds == 120.0
+        assert cfg.notes_budget_seconds == 42.5
+
+    def test_repair_budget_zero_is_malformed(self) -> None:
+        assert self._section("repair_budget_seconds = 0\n") is None
+
+    def test_notes_budget_negative_is_malformed(self) -> None:
+        assert self._section("notes_budget_seconds = -5\n") is None
+
+    def test_repair_budget_bool_is_malformed(self) -> None:
+        # TOML bools are a distinct type; a true/false budget is a typo.
+        assert self._section("repair_budget_seconds = true\n") is None
+
+    def test_notes_budget_inf_is_malformed(self) -> None:
+        # 1e400 overflows to float("inf"); an infinite budget is a typo.
+        assert self._section("notes_budget_seconds = 1e400\n") is None
+
+    def test_budget_only_repair_present_notes_defaults(self) -> None:
+        # One budget key present, the other absent: the absent one keeps
+        # the default, the present one is used.
+        cfg = self._section("repair_budget_seconds = 90\n")
+        assert cfg is not None
+        assert cfg.repair_budget_seconds == 90.0
+        assert cfg.notes_budget_seconds == 600.0
+
 
 class TestBuildRequest:
     """Request shape: URL, body, headers. No hardcoding regression."""
@@ -650,3 +708,77 @@ def test_complete_uses_a_larger_answer_budget_than_adjudication() -> None:
     _url, adj_body, _h = client._build_request("s", "u")
     _url, notes_body, _h = client._build_request("s", "u", max_tokens=2048)
     assert notes_body["max_tokens"] > adj_body["max_tokens"]
+
+
+# -- in-flight deadline (issue #148 FIX 3) --------------------------------
+
+
+class _FakeClock:
+    """Injectable monotonic clock for deadline tests (no real sleep)."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, s: float) -> None:
+        self.now += s
+
+
+def _dribbling_transport(clock: _FakeClock, chunks: list[bytes]) -> httpx.MockTransport:
+    """A MockTransport whose body is a generator that advances the fake
+    clock by 1 s per chunk and yields the given bytes sequentially."""
+    from collections.abc import Iterator
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        def body() -> Iterator[bytes]:
+            for c in chunks:
+                clock.advance(1.0)
+                yield c
+
+        return httpx.Response(200, content=body())
+
+    return httpx.MockTransport(handler)
+
+
+class TestInFlightDeadline:
+    """The stage budget's deadline must cut off a call in flight, not
+    just bound the gap between calls (issue #148 FIX 3)."""
+
+    def test_no_deadline_reads_dribbling_response_fully(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without a deadline, a dribbling response is read in full — the
+        old behaviour is preserved."""
+        monkeypatch.setenv("VEMOIZER_LLM_API_KEY", "sk-test")
+        clock = _FakeClock()
+        body = b'{"choices":[{"message":{"content":"ok"}}]}'
+        # Dribble the body in two chunks; no deadline -> read both.
+        transport = _dribbling_transport(clock, [body[:5], body[5:]])
+        real_client = httpx.Client(transport=transport, timeout=10.0)
+        client = LLMClient(DEFAULT_CONFIG)
+        with patch("vemoizer.llm.httpx.Client", return_value=real_client):
+            result = client.complete("s", "u")
+        assert result == "ok"
+        # The clock advanced 2 s (two chunks), proving the body was read.
+        assert clock.now == 2.0
+
+    def test_deadline_raises_llm_call_deadline_exceeded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With a deadline, a dribbling response that outlasts it raises
+        LLMCallDeadlineExceeded mid-body — which the fail-open handler
+        catches and turns into ``None``."""
+        monkeypatch.setenv("VEMOIZER_LLM_API_KEY", "sk-test")
+        clock = _FakeClock()
+        body = b'{"choices":[{"message":{"content":"ok"}}]}'
+        # Dribble in 3 chunks, 1 s each. Deadline = 2 s: the 3rd chunk
+        # (at t=3) passes the deadline (t=2) and raises.
+        transport = _dribbling_transport(clock, [body[:5], body[5:10], body[10:]])
+        real_client = httpx.Client(transport=transport, timeout=10.0)
+        client = LLMClient(DEFAULT_CONFIG)
+        with patch("vemoizer.llm.httpx.Client", return_value=real_client):
+            # complete() swallows the error (fail-open) and returns None.
+            result = client.complete("s", "u", deadline_s=2.0, monotonic=clock)
+        assert result is None

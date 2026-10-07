@@ -217,7 +217,7 @@ def _run_real_pipeline(monkeypatch, tmp_path: Path, extra_args: list[str] | None
     # the pipeline module's namespace, so a fake generate_notes (and the
     # client constructor) means zero network and a faster, deterministic
     # run — the LLM tail is not under test here.
-    def fake_notes(client, text, paragraphs=None, glossary=None):
+    def fake_notes(client, text, paragraphs=None, glossary=None, budget=None):
         return {"title": "Test", "summary": "s", "key_points": [], "action_items": []}
 
     class _Client:

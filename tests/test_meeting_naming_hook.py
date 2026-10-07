@@ -19,10 +19,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 from _cli_helpers import isolate_home, touch_files
+from _naming_hook_helpers import (
+    _no_label_paragraphs,
+    _one_label_paragraphs,
+    _two_label_paragraphs,
+    _write_sidecar,
+)
 from typer.testing import CliRunner
 
 import vemoizer.batch as batch
@@ -36,43 +41,6 @@ runner = CliRunner()
 
 
 # --- Helpers -----------------------------------------------------------------
-
-
-def _two_label_paragraphs() -> list[dict[str, Any]]:
-    return [
-        {"start": 0.0, "end": 10.0, "text": "Moikka.", "speaker": "SPEAKER_1"},
-        {"start": 12.0, "end": 20.0, "text": "Kyll\u00e4.", "speaker": "SPEAKER_2"},
-    ]
-
-
-def _one_label_paragraphs() -> list[dict[str, Any]]:
-    return [
-        {"start": 0.0, "end": 10.0, "text": "Moikka.", "speaker": "SPEAKER_1"},
-    ]
-
-
-def _no_label_paragraphs() -> list[dict[str, Any]]:
-    return [
-        {"start": 0.0, "end": 10.0, "text": "Moikka."},
-    ]
-
-
-def _write_sidecar(tmp_path: Path, name: str, paragraphs: list[dict]) -> str:
-    """Write a minimal sidecar with *paragraphs*; return the file name."""
-    data = {
-        "text": "moikka",
-        "paragraphs": paragraphs,
-        "notes": {"title": name.rstrip(".json")},
-        "options": {
-            "command": "meeting",
-            "glossary_files": [],
-            "glossary_sha256": None,
-        },
-        "speaker_names": {},
-    }
-    path = tmp_path / name
-    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    return name
 
 
 def _stub_run_names(monkeypatch: pytest.MonkeyPatch, return_val: int = 0) -> list:
@@ -548,10 +516,10 @@ class TestIntegrationCommandGuard:
         assert len(calls) == 0
         assert "Name the speakers now?" not in result.stdout
 
-    def test_meeting_with_yes_no_hook(
+    def test_meeting_with_yes_narrates_not_requested(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        """--yes: the hook is a complete no-op."""
+        """--yes: the hook skips, narrates one reason line, no run_names."""
         _fake_transcribe_rich(monkeypatch, _two_label_paragraphs())
         calls = _stub_run_names(monkeypatch)
         isolate_home(monkeypatch, tmp_path, tmp_path)
@@ -561,6 +529,53 @@ class TestIntegrationCommandGuard:
         assert result.exit_code == 0
         assert len(calls) == 0
         assert "Name the speakers now?" not in result.stdout
+        assert result.stdout.count("skipping speaker naming: not requested") == 1
+
+    def test_meeting_yes_quiet_suppresses_narration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """--yes --quiet: no skip-reason line (quiet threaded from CLI)."""
+        _fake_transcribe_rich(monkeypatch, _two_label_paragraphs())
+        calls = _stub_run_names(monkeypatch)
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        touch_files(["a.m4a"], tmp_path)
+
+        result = runner.invoke(
+            app, ["meeting", "a.m4a", "--yes", "--quiet"], input="y\n"
+        )
+        assert result.exit_code == 0
+        assert len(calls) == 0
+        assert "skipping speaker naming" not in result.stdout
+
+
+class TestIntegrationPartialPair:
+    def test_partial_pair_no_json_narrates_no_labels(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A partial pair (only .md written, no .json): exit code 1, no
+        prompt. The skip-reason line is the non-TTY reason (CliRunner
+        pipes stdin), not the no-sidecar reason — the latter is covered
+        by unit tests (TestSkipNarration.test_no_sidecar_at_all_*)."""
+        import vemoizer.batch_preset as batch_preset
+        from vemoizer.batch_output import _write_preset_output as real_write
+
+        def partial_write(result, first_stem, out_dir, *, date_str=None):
+            paths = real_write(result, first_stem, out_dir, date_str=date_str)
+            return [p for p in paths if p.endswith(".md")]
+
+        monkeypatch.setattr(batch_preset, "_write_preset_output", partial_write)
+        _fake_transcribe_rich(monkeypatch, _two_label_paragraphs())
+        calls = _stub_run_names(monkeypatch)
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        touch_files(["a.m4a"], tmp_path)
+
+        result = runner.invoke(app, ["meeting", "a.m4a"], input="y\n")
+        assert result.exit_code == 1
+        assert len(calls) == 0
+        assert "Name the speakers now?" not in result.stdout
+        # Under CliRunner, stdin is a pipe (non-TTY), so the non-TTY guard
+        # fires before the no-sidecar guard.
+        assert "skipping speaker naming: not an interactive terminal" in result.stdout
 
 
 class TestIntegrationTranscriptionFailure:
@@ -573,31 +588,6 @@ class TestIntegrationTranscriptionFailure:
             raise RuntimeError("boom")
 
         monkeypatch.setattr(pipeline_module, "transcribe_file", fake_raise)
-        calls = _stub_run_names(monkeypatch)
-        isolate_home(monkeypatch, tmp_path, tmp_path)
-        touch_files(["a.m4a"], tmp_path)
-
-        result = runner.invoke(app, ["meeting", "a.m4a"], input="y\n")
-        assert result.exit_code == 1
-        assert len(calls) == 0
-        assert "Name the speakers now?" not in result.stdout
-
-
-class TestIntegrationPartialPair:
-    def test_partial_pair_no_json_no_prompt(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        """A partial pair (only .md written, no .json): no eligible
-        sidecar, no prompt. Exit code is 1 (write failure)."""
-        import vemoizer.batch_preset as batch_preset
-        from vemoizer.batch_output import _write_preset_output as real_write
-
-        def partial_write(result, first_stem, out_dir, *, date_str=None):
-            paths = real_write(result, first_stem, out_dir, date_str=date_str)
-            return [p for p in paths if p.endswith(".md")]
-
-        monkeypatch.setattr(batch_preset, "_write_preset_output", partial_write)
-        _fake_transcribe_rich(monkeypatch, _two_label_paragraphs())
         calls = _stub_run_names(monkeypatch)
         isolate_home(monkeypatch, tmp_path, tmp_path)
         touch_files(["a.m4a"], tmp_path)

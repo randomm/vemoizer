@@ -28,6 +28,7 @@ from vemoizer.diarization import (
     DiarizationResult,
     _load_pipeline,
     diarize,
+    run_diarization_stage,
 )
 
 _AUDIO = np.zeros(16000, dtype=np.float32)
@@ -290,3 +291,20 @@ def test_speaker_range_bounds_clustering(monkeypatch):
 
 def test_no_speaker_count_leaves_clustering_free(monkeypatch):
     assert _received_kwargs(monkeypatch, None) == {}
+
+
+def test_keyboard_interrupt_in_diarize_propagates_out_of_stage(
+    monkeypatch,
+) -> None:
+    """A Ctrl-C raised inside the real ``diarize`` seam bound in
+    ``run_diarization_stage`` must propagate OUT of the stage (issue #148):
+    the stage boundary only fails open for ``Exception``; ``KeyboardInterrupt``
+    is a ``BaseException`` and the Ctrl-C interrupt line must be able to
+    name the stage the run was in."""
+
+    def fake_diarize(audio, *, device="auto", num_speakers=None):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr("vemoizer.diarization.diarize", fake_diarize)
+    with pytest.raises(KeyboardInterrupt):
+        run_diarization_stage(_AUDIO)

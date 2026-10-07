@@ -19,9 +19,10 @@ import logging
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from rich.progress import TaskID
 
 from .assembly import Candidate, _adjudicate, _b_text_in_span, _find_spans
 from .audio_contract import SAMPLE_RATE
@@ -58,6 +59,9 @@ from .vad import load_model as load_vad_model
 from .whisper_transcriber import decode_meeting
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from .preset_interrupt import InterruptTracker
 
 
 def _speech_slices(audio: np.ndarray) -> list[tuple[int, np.ndarray]]:
@@ -232,6 +236,7 @@ def transcribe_file(
     display: ProgressDisplay | None = None,
     language: str | None = None,
     preprocess: str | None = None,
+    tracker: InterruptTracker | None = None,
 ) -> dict:
     """Run the full consensus pipeline over one audio file.
 
@@ -388,8 +393,15 @@ def transcribe_file(
     if diarize:
         logger.info("diarization: starting")
         diarize_start = time.monotonic()
+        if tracker is not None:
+            tracker.set_stage("diarize")
+        diarize_task: TaskID | None = (
+            display.add_stage("diarize") if display is not None else None
+        )
         speaker_segments = run_diarization_stage(audio, speakers)
         diarization_ran = speaker_segments is not None
+        if diarize_task is not None and display is not None:
+            display.finish(diarize_task)
         logger.info(
             "diarization: %s speaker segments in %s",
             len(speaker_segments) if speaker_segments is not None else "no",
@@ -447,6 +459,8 @@ def transcribe_file(
         generate_notes_fn=generate_notes,
         repair_paragraphs_fn=repair_paragraphs,
         llm_client_cls=LLMClient,
+        display=display,
+        tracker=tracker,
     )
     logger.info(
         "transcribe: done in %s — %d chars, %d segments",
