@@ -84,8 +84,11 @@ class _FilteredStdout:
         return getattr(self._original, name)
 
     def close(self) -> None:
+        # Flush any buffered text but do NOT close the delegate — the
+        # stream owner (sys.stdout) is responsible for closing it.
+        # Closing the delegate here would close the real sys.stdout for
+        # the rest of the process if anything calls close() on the proxy.
         self.flush()
-        self._original.close()
 
 
 @contextlib.contextmanager

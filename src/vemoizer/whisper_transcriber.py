@@ -366,21 +366,14 @@ def decode_meeting(
         )
         rtf = result.get("rtf") or 0.0
         lang_summary = result.get("language_summary")
-        if lang_summary:
-            logger.info(
-                "decode A (whisper): %d chars, %d words, %.1fx realtime, languages: %s",
-                len(result.get("text", "")),
-                len(result.get("words") or []),
-                1.0 / rtf if rtf else 0.0,
-                lang_summary,
-            )
-        else:
-            logger.info(
-                "decode A (whisper): %d chars, %d words, %.1fx realtime",
-                len(result.get("text", "")),
-                len(result.get("words") or []),
-                1.0 / rtf if rtf else 0.0,
-            )
+        lang_suffix = f", languages: {lang_summary}" if lang_summary else ""
+        logger.info(
+            "decode A (whisper): %d chars, %d words, %.1fx realtime%s",
+            len(result.get("text", "")),
+            len(result.get("words") or []),
+            1.0 / rtf if rtf else 0.0,
+            lang_suffix,
+        )
         return result
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
         logger.warning("decode A (whisper) failed, using best available: %s", e)

@@ -14,7 +14,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vemoizer.lang_filter import _LANGUAGE_LINE_RE, filter_language_lines
+from vemoizer.lang_filter import (
+    _LANGUAGE_LINE_RE,
+    _FilteredStdout,
+    filter_language_lines,
+)
 
 # -- regex correctness ----------------------------------------------------------
 
@@ -132,6 +136,30 @@ def test_filter_thread_safety_reentrant() -> None:
         assert sys.stdout is first_wrapped
     # After outer exit, stdout is the original.
     assert sys.stdout is original
+
+
+def test_filter_close_does_not_close_original() -> None:
+    """Closing the proxy flushes buffered text but does NOT close the
+    original stream — the stream owner (sys.stdout) is responsible for
+    closing it. If the proxy closed the delegate, the real sys.stdout
+    would be closed for the rest of the process."""
+    original = io.StringIO()
+    proxy = _FilteredStdout(original)
+    proxy.write("Hello\n")
+    proxy.close()
+    # The original must still be open and writable.
+    original.write("still works\n")
+    assert "still works\n" in original.getvalue()
+    assert not original.closed
+
+
+def test_filter_close_flushes_buffer() -> None:
+    """Closing the proxy flushes any buffered (non-newline-terminated) text."""
+    original = io.StringIO()
+    proxy = _FilteredStdout(original)
+    proxy.write("partial line")  # no trailing newline
+    proxy.close()
+    assert "partial line" in original.getvalue()
 
 
 def test_filter_does_not_affect_stderr() -> None:
