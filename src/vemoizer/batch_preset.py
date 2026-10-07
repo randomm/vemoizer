@@ -180,12 +180,12 @@ def _run_preset_groups(
     # prompt so neither is overdrawn by the live rich Progress.
     _close_run_display(display)
     print_wrote_lines(written, quiet)
-    # Final line (issue #148): only when the run went full. The group path
-    # writes one pair per group (a merged group writes a single pair, not
-    # one per file), so the gate counts groups, not files — groups is the
-    # full pair count (len(written) // len(PRESET_FORMATS)).
-    expected_pairs = len(written) // len(PRESET_FORMATS)
-    if not quiet and run_went_full(written, expected_pairs, exit_code):
+    # Final line (issue #148): only when the run went full. No independent
+    # pair count is passed on the group path (counting pairs from
+    # ``written`` itself would make the length check tautological); a
+    # group's partial pair or failed check sets exit_code = 1 in the write
+    # seam above — the gate rests on that plus a non-empty ``written``.
+    if not quiet and run_went_full(written, exit_code=exit_code):
         print_final_line(len(written), quiet=quiet)
     # End-of-meeting naming hook (issue #95): the prompt is the last
     # interactive output; the hook never alters the run's exit code.
@@ -466,7 +466,8 @@ def run_preset(
             _close_run_display(display)
         print_wrote_lines(written, quiet)
         # Final line (issue #148): only when the run went full for ALL files.
-        # The plain path writes one pair per file, so expected pairs = files.
+        # The plain path writes one pair per file, so expected pairs = files
+        # (an independent count: the gate verifies every pair fully written).
         if run_went_full(written, len(files), exit_code):
             print_final_line(len(written), quiet=quiet)
         # End-of-meeting naming hook (issue #95): memo never prompts;

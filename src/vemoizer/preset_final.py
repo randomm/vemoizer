@@ -19,22 +19,32 @@ from vemoizer.batch_output import PRESET_FORMATS
 __all__ = ["print_final_line", "print_wrote_lines", "run_went_full"]
 
 
-def run_went_full(written: list[str], expected_pairs: int, exit_code: int) -> bool:
+def run_went_full(
+    written: list[str],
+    expected_pairs: int | None = None,
+    exit_code: int = 0,
+) -> bool:
     """Whether the run succeeded for **all** inputs (the final-line gate).
 
-    ``expected_pairs`` is the number of output pairs the run is expected to
-    write — one per file in the plain per-file path, one per *group* in the
-    M3 grouping path (a merged group writes a single pair, not one per file).
-    The gate is the run having exited 0 *and* every expected pair being fully
-    written (``len(written) == expected_pairs * len(PRESET_FORMATS)``). A
-    partial pair or a failed check fails the gate, so no ``complete`` line is
-    printed even though some outputs did write.
+    The gate is exactly: ``exit_code == 0`` and at least one file written,
+    and — when an *independent* pair count is given (``expected_pairs`` is
+    not ``None``) — exactly that many pairs fully written
+    (``len(written) == expected_pairs * len(PRESET_FORMATS)``; one pair per
+    file in the plain per-file path).
+
+    ``expected_pairs=None`` means no independent expectation is available
+    (the M3 grouping path: a merged group writes a single pair, so the pair
+    count cannot be known without deriving it from ``written`` itself, which
+    would make the length check tautological). There the gate rests on
+    ``exit_code`` and a non-empty ``written``: a group's partial pair or a
+    failed check is suppressed through ``exit_code == 1``, which the write
+    seam sets on any failed pair.
     """
-    return bool(
-        written
-        and exit_code == 0
-        and len(written) == expected_pairs * len(PRESET_FORMATS)
-    )
+    if not written or exit_code != 0:
+        return False
+    if expected_pairs is None:
+        return True
+    return len(written) == expected_pairs * len(PRESET_FORMATS)
 
 
 def print_wrote_lines(written: list[str], quiet: bool) -> None:

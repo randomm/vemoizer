@@ -487,3 +487,77 @@ def test_run_went_full_group_gate_unit() -> None:
     # gate: 3 groups, 1 partial pair -> 5 files != 3 * 2 = 6.
     written_mixed = ["a.md", "a.json", "b.md", "c.md", "c.json"]
     assert run_went_full(written_mixed, 3, 1) is False
+
+
+class TestRunWentFullOptionalExpectedPairs:
+    """``expected_pairs=None`` (the group path: no independent pair count)
+    makes the gate rest on exit_code and a non-empty ``written``."""
+
+    def test_no_expected_pairs_exit_zero_is_true(self) -> None:
+        """(a) written non-empty + exit 0 -> True without an expectation."""
+        assert run_went_full(["a.md", "a.json"], None, 0) is True
+
+    def test_no_expected_pairs_nonzero_exit_is_false(self) -> None:
+        """(b) written non-empty but exit 1 (write seam failed) -> False."""
+        assert run_went_full(["a.md", "a.json"], None, 1) is False
+
+    def test_no_expected_pairs_empty_written_is_false(self) -> None:
+        """(c) nothing written -> False even with exit 0."""
+        assert run_went_full([], None, 0) is False
+
+    def test_expected_pairs_mismatch_is_false(self) -> None:
+        """(d) an independent expectation that the written count does not
+        satisfy (3 names, expected 1 pair = 2 files) -> False."""
+        assert run_went_full(["a.md", "a.json", "b.md"], 1, 0) is False
+        # And the matching count passes: 3 names vs expected... 3 files is
+        # 1.5 pairs -> also False; 2 names vs 1 pair is True.
+        assert run_went_full(["a.md", "a.json"], 1, 0) is True
+
+    def test_group_write_seam_second_group_partial_no_complete(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """(e) The group path with a write seam that fails on the SECOND
+        group (one group full, one partial pair): the seam sets exit_code
+        = 1, so NO 'complete' line prints and the run exits 1."""
+        files = touch_files(["a.m4a", "b.m4a", "c.m4a"], tmp_path)
+        record: dict[str, Any] = {}
+        calls: list[str] = []
+
+        def fake_echo(msg, err: bool = False, **kw):
+            if not err:
+                record.setdefault("echoes", []).append(str(msg))
+
+        def seam(result, first_stem, out_dir, *, date_str=None):
+            # First group writes a full pair; every later group's .json
+            # write fails (partial pair).
+            calls.append(first_stem)
+            if len(calls) == 1:
+                return [f"2025-01-01 {first_stem}.md", f"2025-01-01 {first_stem}.json"]
+            return [f"2025-01-01 {first_stem}.md"]
+
+        _patch_group_seams(monkeypatch, tmp_path)
+        tracker = begin_interrupt_tracking()
+        with (
+            mock.patch.object(batch_preset_module, "_write_preset_output", seam),
+            mock.patch.object(batch_preset_module.typer, "echo", fake_echo),
+        ):
+            code = batch_preset_module.run_preset(
+                list(files),
+                command="meeting",
+                config_path=None,
+                glossary_path=None,
+                quiet=False,
+                yes=True,
+                tracker=tracker,
+                display=None,
+            )
+        assert code == 1
+        echoes = record.get("echoes", [])
+        # The seam actually failed on the second group: 3 groups -> 3 calls,
+        # 1 full pair + 2 partial pairs -> 4 wrote lines.
+        assert len(calls) == 3, calls
+        wrote = [e for e in echoes if e.startswith("wrote ")]
+        assert len(wrote) == 4, echoes
+        # No 'complete' line: the partial pair failed the run through the
+        # exit code the write seam set.
+        assert all("complete" not in e for e in echoes), echoes
