@@ -46,6 +46,7 @@ import mlx.core as mx
 import numpy as np
 
 from .echo_filter import echo_vocabulary
+from .lang_filter import filter_language_lines
 from .models import get_model, resolve_model_path
 from .selfheal import heal
 from .transcriber import TranscriptionResult
@@ -183,12 +184,13 @@ class WhisperTranscriber:
             "hallucination_silence_threshold": 2.0,
             "initial_prompt": self._initial_prompt,
         }
-        # Always pass verbose=False (issue #147): in mlx-whisper 0.4.3
-        # verbose=False SUPPRESSES the per-window "Detected language: X"
-        # print (the ~30 identical lines that scroll the progress display
-        # away) and ENABLES the tqdm bar (the shim intercepts it when a
-        # display is active; tqdm auto-suppresses in non-TTY contexts).
-        # The contract test in tests/test_mlx_whisper_contract.py pins
+        # verbose=False (issue #147): in mlx-whisper 0.4.3 this ENABLES the
+        # tqdm bar (the shim intercepts it when a display is active; tqdm
+        # auto-suppresses in non-TTY contexts) and SUPPRESSES the per-segment
+        # print. It does NOT suppress the per-window "Detected language: X"
+        # line (``if verbose is not None:`` is True for False), so that line
+        # is filtered by :func:`filter_language_lines` around the decode loop
+        # below. The contract test in tests/test_mlx_whisper_contract.py pins
         # the inverted verbose semantics.
         options.update(kwargs)
         options["verbose"] = False
@@ -223,7 +225,10 @@ class WhisperTranscriber:
         # Per-window protocol: declare each main-loop window so the shim's
         # factory hands its bar to the display (any other bar created before
         # the next mark is a re-entrant call and gets a no-op bar instead).
-        with shim_cm:
+        # filter_language_lines (issue #147) suppresses the per-window
+        # "Detected language: X" print from stdout; it is scoped to the
+        # decode loop and restores sys.stdout on every exit path.
+        with shim_cm, filter_language_lines():
             for index, offset in enumerate(range(0, len(audio), window_frames)):
                 mark_window(offset / SAMPLE_RATE)
                 raw = self._mlx_whisper.transcribe(
@@ -384,4 +389,3 @@ def decode_meeting(
         if transcriber is not None:
             with suppress(Exception):  # cleanup is best-effort (fail-open)
                 transcriber.cleanup()
-
