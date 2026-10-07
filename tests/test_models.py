@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
+import vemoizer.models as _models_mod
 from vemoizer.models import (
     MODEL_REGISTRY,
     MODELS,
@@ -51,6 +52,19 @@ _HEX40 = "0123456789abcdef"
 
 def _entry(name: str) -> ModelEntry:
     return MODEL_REGISTRY[name]
+
+
+@pytest.fixture(autouse=True)
+def _clear_snapshot_memo():
+    """Clear the per-process memo between tests so each test starts fresh.
+
+    The memo caches "pinned snapshot resolvable from local cache" results;
+    without this fixture, a previous test's memo entries can cause a probe
+    to be skipped in a later test, changing the snapshot_download call count.
+    """
+    _models_mod._COMPLETE_SNAPSHOTS.clear()
+    yield
+    _models_mod._COMPLETE_SNAPSHOTS.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +154,10 @@ def test_pull_model_calls_snapshot_download_with_pinned_revision(
     repo_id, revision = EXPECTED[name]
     with patch("huggingface_hub.snapshot_download", return_value="/tmp/snap") as snap:
         result = pull_model(name)
-    snap.assert_called_once_with(repo_id, revision=revision)
+    # The probe (local-only) + the real call both use the pinned revision.
+    for call in snap.call_args_list:
+        _, kwargs = call
+        assert kwargs.get("revision") == revision
     assert result == "/tmp/snap"
 
 
@@ -159,11 +176,10 @@ def test_pull_model_revision_never_omitted(name: str) -> None:
 def test_pull_model_accepts_cache_dir() -> None:
     with patch("huggingface_hub.snapshot_download", return_value="/tmp/snap") as snap:
         pull_model("parakeet", cache_dir="/tmp/custom")
-    snap.assert_called_once_with(
-        "mlx-community/parakeet-tdt-0.6b-v3",
-        revision=EXPECTED["parakeet"][1],
-        cache_dir="/tmp/custom",
-    )
+    for call in snap.call_args_list:
+        _, kwargs = call
+        assert kwargs.get("revision") == EXPECTED["parakeet"][1]
+        assert kwargs.get("cache_dir") == "/tmp/custom"
 
 
 def test_pull_model_unknown_name_raises_before_any_download() -> None:
@@ -200,9 +216,13 @@ def test_pull_all_warms_all_five_in_pipeline_order() -> None:
         result = pull_all()
 
     assert result == paths
-    assert snap.call_count == 5
+    # Each model gets a local-only probe + one real call = 2 calls per model.
+    assert snap.call_count == 2 * 5
     order = [c.args[0] for c in snap.call_args_list]
-    assert order == [
+    # Interleaved: probe(repo1), real(repo1), probe(repo2), real(repo2), ...
+    # Extract the real calls (every 2nd one, starting from index 1).
+    real_calls = order[1::2]
+    assert real_calls == [
         EXPECTED[n][0]
         for n in ("parakeet", "canary", "whisper-finnish", "whisper-turbo", "pyannote")
     ]
@@ -288,6 +308,124 @@ def _fake_response(status: int) -> Any:
 
     request = httpx.Request("GET", "https://huggingface.co")
     return httpx.Response(status, request=request)
+
+
+# ---------------------------------------------------------------------------
+# Warm-cache quietness (issue #147: no HF progress bars when cached)
+# ---------------------------------------------------------------------------
+
+
+def test_pull_model_warm_cache_silences_progress_bars(tmp_path) -> None:
+    """A locally-complete snapshot is fetched with the library's own
+    progress-bar switch off (and no network), so no "Fetching" /
+    "Download" / "Reconstruction" bar reaches the terminal."""
+    from huggingface_hub import utils as hf_utils
+
+    seen: list[bool] = []  # one entry per call: bars-disabled state at call time
+
+    def fake_snapshot(repo_id, **kwargs):
+        seen.append(hf_utils.are_progress_bars_disabled())
+        return str(tmp_path)
+
+    with patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot) as snap:
+        # The local-only probe succeeds => warm cache => silent path.
+        result = pull_model("parakeet", cache_dir=str(tmp_path))
+        # After the call the library's global state must be back to enabled
+        # (the context manager re-enabled it) — a leaked disable would be
+        # a regression this assertion catches.
+        assert not hf_utils.are_progress_bars_disabled()
+
+    assert result == str(tmp_path)
+    assert snap.call_count == 2, "expected a local-only probe + one silent call"
+    # The probe ran local-only (no network), the real call did not.
+    assert snap.call_args_list[0].kwargs.get("local_files_only") is True
+    # During the real (second) call the library's own switch was OFF.
+    assert seen == [False, True], (
+        "warm-cache download must run while HF's progress bars are disabled; "
+        f"saw disabled-states {seen}"
+    )
+
+
+def test_pull_model_cold_cache_keeps_progress_bars(tmp_path) -> None:
+    """When the local-only probe fails (cold or incomplete cache) the real
+    download runs with the progress bars untouched — a multi-GB silent
+    download would look like a hang."""
+    from huggingface_hub import utils as hf_utils
+
+    seen: list[bool] = []
+
+    def fake_snapshot(repo_id, **kwargs):
+        seen.append(hf_utils.are_progress_bars_disabled())
+        if kwargs.get("local_files_only"):
+            raise RuntimeError("not cached locally")
+        return str(tmp_path)
+
+    with patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot):
+        result = pull_model("canary", cache_dir=str(tmp_path))
+        assert not hf_utils.are_progress_bars_disabled()
+
+    assert result == str(tmp_path)
+    assert seen == [False, False], (
+        "cold-cache download must run with HF's progress bars ENABLED; "
+        f"saw disabled-states {seen}"
+    )
+
+
+def test_pull_model_warm_cache_uses_library_switch_not_print_patch(tmp_path) -> None:
+    """Break-and-fail: the warm-cache path must silence the bars through
+    huggingface_hub's own ``disable_progress_bars`` switch. Remove that
+    from ``pull_model`` and this test fails, because the library's switch
+    is never consulted during the download call."""
+    consulted: list[bool] = []
+
+    def fake_snapshot(repo_id, **kwargs):
+        # The real (non-probe) call happens inside the disable_progress_bars
+        # context; the library's own tqdm wrapper calls are_progress_bars_disabled.
+        if not kwargs.get("local_files_only"):
+            consulted.append(True)
+        return str(tmp_path)
+
+    with patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot):
+        pull_model("parakeet", cache_dir=str(tmp_path))
+
+    assert consulted, (
+        "pull_model must run the real download inside the library's own "
+        "disable_progress_bars switch for a warm cache"
+    )
+
+
+def test_pull_models_warm_cache_silences_per_model() -> None:
+    """``pull_models`` (the ``models pull`` seam) silences each model
+    individually when its snapshot is locally complete."""
+    from huggingface_hub import utils as hf_utils
+
+    seen: list[bool] = []
+
+    def fake_snapshot(repo_id, **kwargs):
+        seen.append(hf_utils.are_progress_bars_disabled())
+        return f"/cache/{repo_id}"
+
+    with patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot) as snap:
+        from vemoizer.models import pull_models
+
+        results = pull_models(MODELS)
+        assert not hf_utils.are_progress_bars_disabled()
+
+    assert all(r.error is None for r in results)
+    # 1 local-only probe + 1 (silent) real call per model.
+    assert snap.call_count == 2 * len(MODELS)
+    for i, spec in enumerate(MODELS):
+        probe = snap.call_args_list[2 * i]
+        real = snap.call_args_list[2 * i + 1]
+        assert probe.kwargs.get("local_files_only") is True
+        assert real.kwargs.get("revision") == spec.revision
+        assert real.kwargs.get("local_files_only") in (None, False)
+    # Every real call ran while the library switch was off.
+    reals = seen[1::2]
+    assert all(state is True for state in reals), f"saw disabled-states {seen}"
+    # Every real call ran while the library switch was off.
+    reals = seen[1::2]
+    assert all(state is True for state in reals), f"saw disabled-states {seen}"
 
 
 # ---------------------------------------------------------------------------

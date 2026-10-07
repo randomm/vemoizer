@@ -11,14 +11,13 @@ This module is the single source of truth for which repo each transcriber
 loads from (issue #79): the whisper-turbo, whisper-finnish (re-decode) and
 pyannote (diarization) modules read ``repo_id`` + ``revision`` from the
 registry via :func:`get_model`, so no repo/SHA pair lives in two places.
-Drift tests pin the module-level constants against the registry.
 
 ``MODELS`` is the canonical tuple of :class:`ModelSpec` (friendly name,
-HF repo, pinned SHA) in pipeline order. ``MODEL_REGISTRY`` and
-:func:`get_model` expose the same models as :class:`ModelEntry` for
-name-keyed lookup. ``pull_model`` / ``pull_all`` download a single model or
-all five and return local snapshot paths; ``pull_models`` is the
-CLI-facing variant that captures per-model failures instead of aborting.
+HF repo, pinned SHA) in pipeline order. ``pull_model`` / ``pull_all``
+download a single model or all five and return local snapshot paths;
+``pull_models`` is the CLI-facing variant that captures per-model failures
+instead of aborting. Warm-cache downloads are silenced (no HF progress
+bars, issue #147); a real download keeps its progress bar.
 """
 
 from __future__ import annotations
@@ -135,8 +134,7 @@ def get_model(name: str) -> ModelEntry:
 def assert_all_revisions_pinned(models: tuple[ModelSpec, ...] = MODELS) -> None:
     """Raise ``ValueError`` if any entry is not pinned to a full-SHA commit.
 
-    Regression guard for invariant #4: ``snapshot_download`` without a
-    revision (or with a branch name / short SHA) caches a moving ref.
+    Regression guard for invariant #4: a moving ref is a bug.
     """
     for spec in models:
         if not _FULL_SHA_RE.match(spec.revision):
@@ -149,8 +147,7 @@ def assert_all_revisions_pinned(models: tuple[ModelSpec, ...] = MODELS) -> None:
 def cache_dir() -> Path:
     """The HuggingFace hub cache directory (honours ``HF_HOME``).
 
-    ``HF_HOME`` is read at call time (not cached at import) so tests can
-    monkeypatch the environment variable.
+    ``HF_HOME`` is read at call time so tests can monkeypatch it.
     """
     import os
 
@@ -167,8 +164,7 @@ def cache_dir() -> Path:
 def _model_cache_name(repo_id: str) -> str:
     """Cache directory name for a repo (e.g. ``models--org--name``).
 
-    Delegates to ``huggingface_hub``'s own ``repo_folder_name`` so the
-    naming can never drift from what ``snapshot_download`` writes on disk.
+    Delegates to ``huggingface_hub``'s own ``repo_folder_name``.
     """
     from huggingface_hub.file_download import repo_folder_name
 
@@ -178,7 +174,7 @@ def _model_cache_name(repo_id: str) -> str:
 def cache_size(models: tuple[ModelSpec, ...] = MODELS) -> dict[str, int]:
     """On-disk size (bytes) of each model's cache dir in the HF cache.
 
-    Missing cache dirs report ``0``. Reads only the local cache; no network.
+    Missing cache dirs report ``0``. No network.
     """
     root = cache_dir()
     sizes: dict[str, int] = {}
@@ -191,8 +187,7 @@ def cache_size(models: tuple[ModelSpec, ...] = MODELS) -> dict[str, int]:
 def cache_size_bytes(name: str, cache_dir: str | None = None) -> int | None:
     """Byte size of the pinned snapshot for *name*, or ``None`` if absent.
 
-    Uses ``huggingface_hub.scan_cache_dir`` so the walk respects the HF
-    cache layout (``models--<org>--<name>``); no raw filesystem globbing.
+    Uses ``huggingface_hub.scan_cache_dir`` to respect the HF cache layout.
     """
     from huggingface_hub import scan_cache_dir
 
@@ -227,20 +222,73 @@ def format_size(nbytes: int) -> str:
 def pull_model(name: str, cache_dir: str | None = None) -> str:
     """Download (revision-pinned) the *name* model and return the local path.
 
-    ``snapshot_download`` is idempotent: a warm cache makes no network call
-    and returns the cached snapshot. If ``HF_HUB_OFFLINE=1`` is set and the
-    snapshot is not cached, ``huggingface_hub.errors.OfflineModeIsEnabled``
-    is raised; use :func:`format_pull_error` to turn it into a user-facing
-    message.
+    When the pinned snapshot is already fully cached the download is silenced
+    (no HF progress bars, issue #147); a real download keeps its progress
+    bar so a multi-GB silent fetch does not look like a hang.
     """
     from huggingface_hub import snapshot_download
+    from huggingface_hub.utils import disable_progress_bars
 
     entry = get_model(name)
-    if cache_dir is None:
-        return str(snapshot_download(entry.repo_id, revision=entry.revision))
+    if _snapshot_locally_complete(entry.repo_id, entry.revision, cache_dir):
+        # Warm cache: no network call, and no "Fetching" / "Download
+        # complete" / "Reconstruction" progress bars (issue #147).
+        with disable_progress_bars():
+            return str(
+                snapshot_download(
+                    entry.repo_id, revision=entry.revision, cache_dir=cache_dir
+                )
+            )
     return str(
         snapshot_download(entry.repo_id, revision=entry.revision, cache_dir=cache_dir)
     )
+
+
+def _snapshot_locally_complete(
+    repo_id: str, revision: str, cache_dir: str | None
+) -> bool:
+    """True when the pinned snapshot can be served from the local cache alone.
+
+    Probed by a local-only ``snapshot_download`` call; the result is memoized
+    per (repo, revision, cache_dir) so the probe runs once per model per
+    process. A probe failure means "unknown" — the caller then downloads
+    with progress bars enabled (the safe direction).
+    """
+    key = (repo_id, revision, cache_dir)
+    if key in _COMPLETE_SNAPSHOTS:
+        return _COMPLETE_SNAPSHOTS[key]
+    try:
+        _snapshot_download_probe(repo_id, revision, cache_dir)
+        complete = True
+    except Exception:  # noqa: BLE001 - probe failure means "not provable"
+        complete = False
+    _COMPLETE_SNAPSHOTS[key] = complete
+    return complete
+
+
+def _snapshot_download_probe(
+    repo_id: str, revision: str, cache_dir: str | None
+) -> None:
+    """Probe whether the pinned snapshot is resolvable from the local cache.
+
+    Uses a local-only ``snapshot_download`` call; the revision-pinned SHA's
+    file list is cached on the first download, so a complete snapshot
+    resolves without a network call. An incomplete cache raises.
+    """
+    from huggingface_hub import snapshot_download
+
+    snapshot_download(
+        repo_id,
+        revision=revision,
+        cache_dir=cache_dir,
+        local_files_only=True,
+    )
+
+
+#: Per-process memo of "pinned snapshot resolvable from local cache" probes,
+#: keyed by ``(repo_id, revision, cache_dir)``. See
+#: :func:`_snapshot_locally_complete`.
+_COMPLETE_SNAPSHOTS: dict[tuple[str, str, str | None], bool] = {}
 
 
 def pull_all(cache_dir: str | None = None) -> dict[str, str]:
@@ -265,16 +313,23 @@ def pull_models(
     aborting the run: the remaining models still get pulled, and the caller
     reports the failure. ``snapshot_download`` is a no-op when the pinned
     snapshot is already cached, so a warm cache completes quickly with no
-    network traffic.
+    network traffic. Warm-cache downloads are quiet (no "Fetching" /
+    "Download" / "Reconstruction" progress bars, issue #147); a real
+    download keeps its progress bar.
     """
     assert_all_revisions_pinned(models)
     from huggingface_hub import snapshot_download
+    from huggingface_hub.utils import disable_progress_bars
 
     results: list[PulledModel] = []
     for spec in models:
         start = time.monotonic()
         try:
-            local_path = snapshot_download(spec.repo_id, revision=spec.revision)
+            if _snapshot_locally_complete(spec.repo_id, spec.revision, None):
+                with disable_progress_bars():
+                    local_path = snapshot_download(spec.repo_id, revision=spec.revision)
+            else:
+                local_path = snapshot_download(spec.repo_id, revision=spec.revision)
             results.append(
                 PulledModel(spec, str(local_path), None, time.monotonic() - start)
             )
