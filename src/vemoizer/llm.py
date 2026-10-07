@@ -19,7 +19,10 @@ call sites keep working. Private names (``_strict_load``,
 from __future__ import annotations
 
 import contextlib
+import json
 import os
+import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -31,6 +34,15 @@ from .llm_config import (  # noqa: F401 - re-export of the moved config layer
     load_default_config,
     load_language,
 )
+
+
+#: The client's own deadline error, for one call whose read exceeds its
+#: allotted time (issue #148 FIX 3). A subclass of ``httpx.TimeoutException``
+#: so the existing per-call fail-open (``except (httpx.HTTPError, ...)``)
+#: catches it exactly like any other read timeout.
+class LLMCallDeadlineExceeded(httpx.TimeoutException):
+    """The in-flight call ran past its wall-clock deadline."""
+
 
 #: Default system prompt for adjudication. Intentionally short: the
 #: model's task is to pick or compose the final text for a disputed
@@ -129,23 +141,49 @@ class LLMClient:
         return url, body, headers
 
     def _post(
-        self, url: str, body: dict[str, Any], headers: dict[str, str]
+        self,
+        url: str,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        *,
+        deadline_s: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> str | None:
-        """POST and parse ``choices[0].message.content``; ``None`` on any failure."""
+        """POST and parse ``choices[0].message.content``; ``None`` on any failure.
+
+        With a *deadline_s*, the response is streamed and the monotonic
+        clock is checked per chunk: the moment the clock passes
+        ``deadline_s``, the read is cut off with
+        :class:`LLMCallDeadlineExceeded` (the per-read timeout is capped
+        at ``min(config timeout, remaining)`` so httpx itself also fires
+        within the remaining budget on a truly silent connection). Without
+        it, the old single ``post`` — identical behaviour.
+        """
         try:
-            resp = self._get_client().post(url, json=body, headers=headers)
-            if resp.status_code >= 400:
-                resp.raise_for_status()
-            data = resp.json()
-        except (httpx.HTTPError, ValueError, OSError):
-            # httpx.HTTPError covers RequestError, TimeoutException,
-            # HTTPStatusError. ValueError covers json.JSONDecodeError
-            # (which is a ValueError) and any other JSON parse failure.
-            # OSError covers network-level failures that httpx does not
-            # wrap into its own hierarchy (e.g. DNS, socket, file-descriptor
-            # exhaustion on the Client constructor itself). The fail-open
-            # contract is "never raises" — the caller's un-adjudicated text
-            # is returned on ANY failure, not just the expected ones.
+            if deadline_s is None:
+                resp = self._get_client().post(url, json=body, headers=headers)
+                content: Any = getattr(resp, "content", None)
+                if not isinstance(content, (bytes, str)):
+                    # Not a real bytes body (test double, or a mock that
+                    # auto-created a MagicMock for ``content``): parse
+                    # the response's JSON view instead.
+                    content = resp.json()
+            else:
+                content = self._read_streamed(url, body, headers, deadline_s, monotonic)
+            data = json.loads(content) if isinstance(content, (bytes, str)) else content
+        except (httpx.HTTPError, ValueError, TypeError, OSError):
+            # httpx.HTTPError covers RequestError, TimeoutException
+            # (incl. LLMCallDeadlineExceeded, a TimeoutException
+            # subclass), HTTPStatusError. ValueError covers
+            # json.JSONDecodeError (a ValueError); TypeError covers
+            # json.loads on a non-str/bytes response body (e.g. a mock
+            # returning an object) — any other JSON read failure.
+            # OSError covers network-level failures that
+            # httpx does not wrap into its own hierarchy (e.g. DNS,
+            # socket, file-descriptor exhaustion on the Client
+            # constructor itself). The fail-open contract is "never
+            # raises" — the caller's un-adjudicated text is returned on
+            # ANY failure, not just the expected ones.
             return None
 
         choices = data.get("choices") if isinstance(data, dict) else None
@@ -164,6 +202,53 @@ class LLMClient:
         if not content:
             return None
         return content
+
+    def _read_streamed(
+        self,
+        url: str,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        deadline_s: float,
+        monotonic: Callable[[], float],
+    ) -> bytes:
+        """POST with a per-read timeout capped at *deadline_s* and read the
+        body by streaming, cutting the read off the moment the injected
+        monotonic clock passes the deadline (issue #148 FIX 3).
+
+        A dribbling connection that keeps returning partial bytes resets
+        the per-read timeout on every byte; the per-chunk deadline check is
+        what actually bounds the in-flight call.
+        """
+        remaining = max(deadline_s, 0.0)
+        client = self._get_client()
+        # Cap the per-read timeout at the remaining budget: a silent
+        # connection must also be cut off within the budget, not only
+        # between bytes.
+        capped = min(
+            client.timeout.read if client.timeout.read is not None else remaining,
+            remaining,
+        )
+        deadline_at = monotonic() + remaining
+        raw: list[bytes] = []
+        with client.stream(
+            "POST",
+            url,
+            json=body,
+            headers=headers,
+            timeout=httpx.Timeout(
+                connect=client.timeout.connect,
+                read=capped,
+                write=client.timeout.write,
+                pool=client.timeout.pool,
+            ),
+        ) as resp:
+            if resp.status_code >= 400:
+                resp.raise_for_status()
+            for chunk in resp.iter_bytes():
+                raw.append(chunk)
+                if monotonic() >= deadline_at:
+                    raise LLMCallDeadlineExceeded("LLM read exceeded its deadline")
+        return b"".join(raw)
 
     def adjudicate(
         self,
@@ -199,14 +284,31 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         max_tokens: int = 2048,
+        *,
+        deadline_s: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> str | None:
-        """One generic chat completion; ``None`` on any failure."""
+        """One generic chat completion; ``None`` on any failure.
+
+        ``deadline_s`` (issue #148 FIX 3) is the wall-clock seconds
+        *remaining* to the stage's budget: when given, the response is
+        read by streaming and the deadline is checked per chunk, so a
+        call that dribbles bytes (each dribble resets the per-read
+        ``httpx`` timeout) can no longer run past the stage's total
+        budget. ``None`` (default) is exactly the old behaviour: a
+        single ``post`` with the per-read timeout. The deadline is a
+        bound on the read, not a wall-clock guarantee: the deadline
+        fires as soon as the next byte arrives after the clock passes
+        it. ``monotonic`` is injectable for tests (no real sleep).
+        """
         if self._api_key() is None:
             return None
         url, body, headers = self._build_request(
             system_prompt, user_prompt, max_tokens=max_tokens
         )
-        return self._post(url, body, headers)
+        return self._post(
+            url, body, headers, deadline_s=deadline_s, monotonic=monotonic
+        )
 
 
 def adjudicate_span(

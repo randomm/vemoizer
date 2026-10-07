@@ -235,7 +235,11 @@ def generate_notes(
             if _budget_exhausted():
                 _log_notes_budget_expired(budget)
                 return None
-            raw = client.complete(system, f"Transcript:\n{text}")
+            raw = client.complete(
+                system,
+                f"Transcript:\n{text}",
+                deadline_s=budget.remaining() if budget is not None else None,
+            )
             return _finish(_parse_notes(raw), text) if raw else None
 
         summaries: list[str] = []
@@ -247,6 +251,7 @@ def generate_notes(
             part = client.complete(
                 _MAP_SYSTEM_PROMPT,
                 f"Portion {i}/{len(chunks)}:\n{chunk}",
+                deadline_s=budget.remaining() if budget is not None else None,
             )
             if part:
                 summaries.append(part.strip())
@@ -258,6 +263,7 @@ def generate_notes(
         raw = client.complete(
             system,
             "Part summaries of one long recording (in order):\n" + joined,
+            deadline_s=budget.remaining() if budget is not None else None,
         )
         # ground evidence against what the reduce call actually saw
         return _finish(_parse_notes(raw), joined) if raw else None

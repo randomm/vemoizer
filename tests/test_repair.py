@@ -9,7 +9,10 @@ LLMClient is mocked throughout.
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock
+
+import pytest
 
 from vemoizer.llm_budget import StageBudget
 from vemoizer.repair import repair_paragraphs
@@ -93,7 +96,7 @@ def test_repair_prompt_maps_glossary_near_misses() -> None:
     ('Flaksi' survived next to correct 'Flagship' without it)."""
     seen = {}
 
-    def spy(system, user, max_tokens=2048):
+    def spy(system, user, max_tokens=2048, **kw):
         seen["system"] = system
         return user
 
@@ -131,7 +134,7 @@ def test_budget_exhausted_stops_loop_and_ships_originals() -> None:
     # Each reply is a high-similarity fix (a single extra letter) that the
     # no-invention guard accepts — so the repaired text is visibly different
     # from the original, while the budget gate still cuts the loop off.
-    def slow_complete(system, user, max_tokens=2048):
+    def slow_complete(system, user, max_tokens=2048, **kw):
         clock.advance(10.0)  # each call burns 10 s of wall clock
         return user + "x"
 
@@ -181,7 +184,7 @@ def test_repair_emits_throttled_heartbeat(caplog) -> None:
     clock = _FakeClock()
     budget = StageBudget(1000.0, clock=clock)  # generous budget
 
-    def slow_complete(system, user, max_tokens=2048):
+    def slow_complete(system, user, max_tokens=2048, **kw):
         clock.advance(10.0)  # push past PROGRESS_INTERVAL_S (5.0)
         return user
 
@@ -201,3 +204,47 @@ def test_repair_emits_throttled_heartbeat(caplog) -> None:
     for h in heartbeats:
         assert "eka" not in h
         assert "toka" not in h
+
+
+# -- in-flight deadline (issue #148 FIX 3) --------------------------------
+
+
+def test_repair_passes_deadline_s_to_client_complete() -> None:
+    """(c) repair_paragraphs passes ``budget.remaining()`` as ``deadline_s``
+    to each ``client.complete`` call (only when a budget exists). Without
+    a budget, ``deadline_s`` is not passed (old behaviour)."""
+    calls: list[dict[str, Any]] = []
+    clock = _FakeClock()
+    budget = StageBudget(100.0, clock=clock)
+
+    def fake_complete(system, user, max_tokens=2048, deadline_s=None, **kw):
+        calls.append({"deadline_s": deadline_s, "elapsed": clock()})
+        clock.advance(1.0)
+        return user  # no-op repair: passes the guard
+
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=fake_complete)
+    paras = [_para("eka"), _para("toka")]
+
+    repair_paragraphs(client, paras, budget=budget)
+    # Two calls, each with a deadline_s (the remaining budget at call time):
+    #   call 1: elapsed 0, remaining 100
+    #   call 2: elapsed 1 (clock advanced by fake), remaining 99
+    assert len(calls) == 2
+    assert calls[0]["deadline_s"] == pytest.approx(100.0)
+    assert calls[1]["deadline_s"] == pytest.approx(99.0)
+
+
+def test_repair_no_budget_passes_no_deadline() -> None:
+    """No budget -> ``deadline_s`` is not passed (None) — the old behaviour.
+    (a) Without a deadline, the dribbling response is read fully."""
+    calls: list[Any] = []
+
+    def fake_complete(system, user, max_tokens=2048, deadline_s=None, **kw):
+        calls.append(deadline_s)
+        return user
+
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=fake_complete)
+    repair_paragraphs(client, [_para("eka")], budget=None)
+    assert calls == [None]

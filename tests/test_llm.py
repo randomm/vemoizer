@@ -708,3 +708,77 @@ def test_complete_uses_a_larger_answer_budget_than_adjudication() -> None:
     _url, adj_body, _h = client._build_request("s", "u")
     _url, notes_body, _h = client._build_request("s", "u", max_tokens=2048)
     assert notes_body["max_tokens"] > adj_body["max_tokens"]
+
+
+# -- in-flight deadline (issue #148 FIX 3) --------------------------------
+
+
+class _FakeClock:
+    """Injectable monotonic clock for deadline tests (no real sleep)."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, s: float) -> None:
+        self.now += s
+
+
+def _dribbling_transport(clock: _FakeClock, chunks: list[bytes]) -> httpx.MockTransport:
+    """A MockTransport whose body is a generator that advances the fake
+    clock by 1 s per chunk and yields the given bytes sequentially."""
+    from collections.abc import Iterator
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        def body() -> Iterator[bytes]:
+            for c in chunks:
+                clock.advance(1.0)
+                yield c
+
+        return httpx.Response(200, content=body())
+
+    return httpx.MockTransport(handler)
+
+
+class TestInFlightDeadline:
+    """The stage budget's deadline must cut off a call in flight, not
+    just bound the gap between calls (issue #148 FIX 3)."""
+
+    def test_no_deadline_reads_dribbling_response_fully(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without a deadline, a dribbling response is read in full — the
+        old behaviour is preserved."""
+        monkeypatch.setenv("VEMOIZER_LLM_API_KEY", "sk-test")
+        clock = _FakeClock()
+        body = b'{"choices":[{"message":{"content":"ok"}}]}'
+        # Dribble the body in two chunks; no deadline -> read both.
+        transport = _dribbling_transport(clock, [body[:5], body[5:]])
+        real_client = httpx.Client(transport=transport, timeout=10.0)
+        client = LLMClient(DEFAULT_CONFIG)
+        with patch("vemoizer.llm.httpx.Client", return_value=real_client):
+            result = client.complete("s", "u")
+        assert result == "ok"
+        # The clock advanced 2 s (two chunks), proving the body was read.
+        assert clock.now == 2.0
+
+    def test_deadline_raises_llm_call_deadline_exceeded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With a deadline, a dribbling response that outlasts it raises
+        LLMCallDeadlineExceeded mid-body — which the fail-open handler
+        catches and turns into ``None``."""
+        monkeypatch.setenv("VEMOIZER_LLM_API_KEY", "sk-test")
+        clock = _FakeClock()
+        body = b'{"choices":[{"message":{"content":"ok"}}]}'
+        # Dribble in 3 chunks, 1 s each. Deadline = 2 s: the 3rd chunk
+        # (at t=3) passes the deadline (t=2) and raises.
+        transport = _dribbling_transport(clock, [body[:5], body[5:10], body[10:]])
+        real_client = httpx.Client(transport=transport, timeout=10.0)
+        client = LLMClient(DEFAULT_CONFIG)
+        with patch("vemoizer.llm.httpx.Client", return_value=real_client):
+            # complete() swallows the error (fail-open) and returns None.
+            result = client.complete("s", "u", deadline_s=2.0, monotonic=clock)
+        assert result is None

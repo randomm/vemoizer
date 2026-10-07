@@ -102,7 +102,15 @@ def repair_paragraphs(
             repaired.append(dict(para))
             continue
         try:
-            candidate = client.complete(system, original)
+            # The in-flight call is bounded by the stage budget's
+            # remaining time: a dribbling connection that keeps resetting
+            # the per-read timeout cannot run past the stage (issue #148
+            # FIX 3). No budget -> no deadline -> the old behaviour.
+            candidate = client.complete(
+                system,
+                original,
+                deadline_s=budget.remaining() if budget is not None else None,
+            )
         except Exception as e:  # noqa: BLE001 - fail-open stage boundary
             logger.warning("repair failed; keeping originals: %s", e)
             candidate = None

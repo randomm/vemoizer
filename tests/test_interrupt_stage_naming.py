@@ -345,9 +345,7 @@ class TestInterruptStageNaming:
     def test_ctrl_c_in_notes_tty(self, tmp_path, monkeypatch) -> None:
         self._tail_case(monkeypatch, quiet=False, repair=True, interrupt_in="notes")
 
-    def test_ctrl_c_in_notes_with_repair_disabled(
-        self, tmp_path, monkeypatch
-    ) -> None:
+    def test_ctrl_c_in_notes_with_repair_disabled(self, tmp_path, monkeypatch) -> None:
         """repair=False: the notes interrupt must read 'notes', not the
         earlier 'repair' (or nothing) — a skipped stage must not set its
         stage, and 'notes' must be set where the notes work actually

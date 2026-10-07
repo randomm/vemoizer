@@ -301,6 +301,7 @@ def test_keyboard_interrupt_in_diarize_propagates_out_of_stage(
     the stage boundary only fails open for ``Exception``; ``KeyboardInterrupt``
     is a ``BaseException`` and the Ctrl-C interrupt line must be able to
     name the stage the run was in."""
+
     def fake_diarize(audio, *, device="auto", num_speakers=None):
         raise KeyboardInterrupt()
 

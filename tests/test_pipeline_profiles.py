@@ -240,7 +240,7 @@ def test_repair_pass_updates_paragraphs_only(tmp_path, monkeypatch) -> None:
         def adjudicate(self, a_text, candidates, context=""):
             return "moikka"
 
-        def complete(self, system, user, max_tokens=2048):
+        def complete(self, system, user, max_tokens=2048, **kw):
             return user.replace("moikka", "moikka!")  # a visible "repair"
 
         def close(self) -> None:

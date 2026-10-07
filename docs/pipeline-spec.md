@@ -878,8 +878,8 @@ connection refused, HTTP error) also fails open per invariant #5.
 | `llm.model` | model ID to request |
 | `llm.api_key_env` | environment variable name holding the API key |
 | `llm.timeout_seconds` | request timeout; must be set (unset = hang) |
-| `llm.repair_budget_seconds` | wall-clock budget for the whole repair stage (default 600, issue #148); on expiry the remaining paragraphs ship un-repaired (fail-open) |
-| `llm.notes_budget_seconds` | wall-clock budget for the whole notes stage (default 600, issue #148); on expiry the transcript ships without notes (fail-open) |
+| `llm.repair_budget_seconds` | wall-clock budget for the whole repair stage (default 600, issue #148); it also cuts off the LLM call in flight via `complete(deadline_s=remaining)` (checked per streamed chunk), not just the gap between calls; on expiry the remaining paragraphs ship un-repaired (fail-open) |
+| `llm.notes_budget_seconds` | wall-clock budget for the whole notes stage (default 600, issue #148); it also cuts off the LLM call in flight via `complete(deadline_s=remaining)` (checked per streamed chunk), not just the gap between calls; on expiry the transcript ships without notes (fail-open) |
 | `language` | section language for the Markdown header and quality report: `"fi"` (default) or `"en"` (top-level key, issue #75) |
 | `meeting.language` | recognition-language override for the whisper meeting decode: `"auto"` (default, per-window detection), `"fi"`, or `"en"` pins every window (issue #108) |
 | `people` | top-level list of speaker names for the `names` command (the read path fails open to an empty list for a non-list value; issue #93) |

@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
+import pytest
+
 from vemoizer.llm_budget import StageBudget
 from vemoizer.notes import _chunk_text, generate_notes
 
@@ -30,6 +32,20 @@ class _FakeClock:
 def _client(responses: list[str | None]) -> MagicMock:
     client = MagicMock()
     client.complete = MagicMock(side_effect=responses)
+    return client
+
+
+def _client_with_kw(responses: list[str | None]) -> MagicMock:
+    """A fake client that records the ``deadline_s`` kwarg per call."""
+    calls: list[dict] = []
+    client = MagicMock()
+
+    def fake_complete(system, user, max_tokens=2048, deadline_s=None, **kw):
+        calls.append({"deadline_s": deadline_s})
+        return responses[0] if len(responses) == 1 else responses.pop(0)
+
+    client.complete = MagicMock(side_effect=fake_complete)
+    client.complete_calls = calls
     return client
 
 
@@ -91,7 +107,7 @@ def test_json_inside_a_code_fence_is_parsed() -> None:
 def test_long_transcript_map_reduces() -> None:
     long_text = ("sana " * 15_000).strip()  # ~75K chars -> several chunks
 
-    def fake_complete(system, user):
+    def fake_complete(system, user, **kw):
         if "osayhteenveto" in user:
             return _notes_json(summary="koottu")  # reduce call sees the parts
         return "yhden osan tiivistelmä"  # map calls
@@ -166,7 +182,7 @@ def test_notes_prompt_carries_speaker_labels() -> None:
     ]
     seen = {}
 
-    def spy(system, user, max_tokens=2048):
+    def spy(system, user, max_tokens=2048, **kw):
         seen["system"], seen["user"] = system, user
         return _notes_json()
 
@@ -185,7 +201,7 @@ def test_notes_prompt_carries_speaker_labels() -> None:
 def test_notes_prompt_forbids_inventing_names() -> None:
     seen = {}
 
-    def spy(system, user, max_tokens=2048):
+    def spy(system, user, max_tokens=2048, **kw):
         seen["system"] = system
         return _notes_json()
 
@@ -199,7 +215,7 @@ def test_notes_prompt_forbids_inventing_names() -> None:
 def test_notes_prompt_carries_glossary_terms() -> None:
     seen = {}
 
-    def spy(system, user, max_tokens=2048):
+    def spy(system, user, max_tokens=2048, **kw):
         seen["system"] = system
         return _notes_json()
 
@@ -252,7 +268,7 @@ def test_action_item_objects_ground_owner_via_evidence() -> None:
 def test_suspect_paragraphs_are_marked_in_the_notes_prompt() -> None:
     seen: dict[str, str] = {}
 
-    def spy(system: str, user: str) -> str:
+    def spy(system: str, user: str, **kw) -> str:
         seen["system"], seen["user"] = system, user
         return _notes_json()
 
@@ -311,7 +327,7 @@ def test_notes_budget_exhausted_returns_none_before_reduce() -> None:
     budget = StageBudget(10.0, clock=clock)
     long_text = ("sana " * 5_000).strip()  # ~25K -> several chunks (map-reduce)
 
-    def slow_complete(system, user, max_tokens=2048):
+    def slow_complete(system, user, max_tokens=2048, **kw):
         clock.advance(10.0)  # each call burns the full remaining budget
         if "osayhteenveto" in user:
             return _notes_json(summary="koottu")  # reduce
@@ -333,7 +349,7 @@ def test_notes_budget_none_runs_to_completion() -> None:
     returns parsed notes."""
     long_text = ("sana " * 5_000).strip()
 
-    def fake_complete(system, user, max_tokens=2048):
+    def fake_complete(system, user, max_tokens=2048, **kw):
         if "osayhteenveto" in user:
             return _notes_json(summary="koottu")
         return "yhden osan tiivistelmä"
@@ -362,3 +378,42 @@ def test_notes_budget_exhausted_on_single_call_path_returns_none() -> None:
     assert notes is None
     # The budget gate fired before any call was made.
     assert client.complete.call_count == 0
+
+
+# -- in-flight deadline (issue #148 FIX 3) --------------------------------
+
+
+def test_notes_passes_deadline_s_to_client_complete() -> None:
+    """(d) generate_notes passes ``budget.remaining()`` as ``deadline_s``
+    for each call (only when a budget exists); without a budget,
+    ``deadline_s=None`` (old behaviour)."""
+    clock = _FakeClock()
+    budget = StageBudget(100.0, clock=clock)
+    calls: list[float | None] = []
+
+    def fake_complete(system, user, max_tokens=2048, deadline_s=None, **kw):
+        calls.append(deadline_s)
+        clock.advance(1.0)
+        return _notes_json()
+
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=fake_complete)
+    notes = generate_notes(client, "lyhyt transkripti", budget=budget)
+    assert notes is not None
+    assert len(calls) == 1  # short transcript -> single call
+    assert calls[0] == pytest.approx(100.0)  # remaining at call time
+
+
+def test_notes_no_budget_deadline_s_is_none() -> None:
+    """No budget -> ``deadline_s`` is None (old behaviour, fully read)."""
+    calls: list[float | None] = []
+
+    def fake_complete(system, user, max_tokens=2048, deadline_s=None, **kw):
+        calls.append(deadline_s)
+        return _notes_json()
+
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=fake_complete)
+    notes = generate_notes(client, "lyhyt transkripti", budget=None)
+    assert notes is not None
+    assert calls == [None]
