@@ -98,7 +98,18 @@ def snapshot_locally_complete(
 
 
 def _storage_root(cache_dir: str | Path | None) -> Path:
-    """The cache directory under which ``models--<org>--<repo>`` lives."""
+    """The cache directory under which ``models--<org>--<repo>`` lives.
+
+    When ``cache_dir`` is None this reads ``HF_HUB_CACHE`` (not ``HF_HOME``):
+    that is the root ``snapshot_download`` itself uses for its default
+    destination (``huggingface_hub.constants.HF_HUB_CACHE``, which defaults
+    to ``$HF_HOME/hub`` but is independently overridable), so the probe looks
+    exactly where a real download would land. ``models.cache_dir()`` (which
+    derives ``$HF_HOME/hub``) is only used for cache *size reporting* and
+    may differ from ``HF_HUB_CACHE`` if that env var is set independently; a
+    probe that used it could miss a warm cache (or, worse, see one the
+    download would never write).
+    """
     if cache_dir is not None:
         return Path(cache_dir)
     from huggingface_hub import constants
