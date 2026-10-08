@@ -65,13 +65,18 @@ if TYPE_CHECKING:
     from .preset_interrupt import InterruptTracker
 
 
-def _speech_slices(audio: np.ndarray) -> list[tuple[int, np.ndarray]]:
+def _speech_slices(audio: np.ndarray) -> tuple[list[tuple[int, np.ndarray]], bool]:
     """VAD-split the recording into ``(offset, slice)`` pairs.
 
     The offset is the slice's first sample in the full recording, used to
     shift per-slice timestamps back onto the full timeline. Falls back to
     the whole recording as a single slice when VAD is unavailable or finds
-    no speech.
+    no speech. Returns ``(slices, vad_found_speech)`` — the explicit signal
+    for the meeting lost-window retry gate (issue #152): ``True`` means
+    the slices are the VAD's real speech spans (trust them, even a single
+    full-recording span); ``False`` means no usable VAD information
+    (unavailable, or zero speech found) — the gate must use the frame-RMS
+    energy gate, not slice geometry.
     """
     start = time.monotonic()
     try:
@@ -79,10 +84,10 @@ def _speech_slices(audio: np.ndarray) -> list[tuple[int, np.ndarray]]:
         segments: list[SpeechSegment] = vad_segments(audio, vad_model)
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
         logger.warning("VAD unavailable, decoding full recording: %s", e)
-        return [(0, audio)]
+        return [(0, audio)], False
     if not segments:
         logger.info("VAD: no speech found, decoding full recording as one slice")
-        return [(0, audio)]
+        return [(0, audio)], False
     speech = sum(seg.end - seg.start for seg in segments) / SAMPLE_RATE
     logger.info(
         "VAD: %d speech slices (%s of speech) in %s",
@@ -90,7 +95,7 @@ def _speech_slices(audio: np.ndarray) -> list[tuple[int, np.ndarray]]:
         format_duration(speech),
         format_duration(time.monotonic() - start),
     )
-    return [(seg.start, audio[seg.start : seg.end]) for seg in segments]
+    return [(seg.start, audio[seg.start : seg.end]) for seg in segments], True
 
 
 def _redecode_spans(
@@ -129,7 +134,6 @@ def _assemble(
     ``spans`` are the guardrailed disputed spans the caller re-decoded —
     the exact list ``redecoded`` was indexed against, so verdicts and
     re-decode results can never drift apart.
-
     ``speaker_segments`` (when given) is a list of ``(start, end, speaker)``
     triples from the diarization stage; each adjudicated segment is labelled
     with the speaker whose segment overlaps the disputed span the most. The
@@ -356,7 +360,7 @@ def transcribe_file(
     logger.info(
         "LLM adjudication: %s", "configured" if llm_config is not None else "disabled"
     )
-    slices = _speech_slices(audio)
+    slices, vad_found_speech = _speech_slices(audio)
 
     result_a: dict[str, Any] | None = None
     result_b: dict[str, Any] | None = None
@@ -367,9 +371,15 @@ def transcribe_file(
     glossary = load_glossary(glossary_path)
     corrections = load_corrections(glossary_path)
     if profile == "meeting":
+        vad_kwargs: dict[str, Any] = (
+            {"vad_slices": [(s, s + len(a)) for s, a in slices]}
+            if vad_found_speech
+            else {"vad_slices": None}
+        )
         kwargs: dict[str, Any] = {
             "initial_prompt": glossary_prompt(glossary),
             "language": meeting_language,
+            **vad_kwargs,
         }
         if display is not None:
             kwargs["display"] = display

@@ -358,6 +358,7 @@ def decode_meeting(
     initial_prompt: str | None = None,
     display: ProgressDisplay | None = None,
     language: str | None = None,
+    vad_slices: list[tuple[int, int]] | None = None,
 ) -> dict[str, Any] | None:
     """Per-window Whisper decode A for the meeting profile (fail-open).
 
@@ -378,21 +379,21 @@ def decode_meeting(
     on — Whisper detects per window, matching invariant #3 (language is a
     property of a span, not of a file). A non-None value (e.g. ``"fi"``)
     pins every window to that language.
+
+    ``vad_slices`` (issue #152, explicit signal) carries the lost-window
+    retry gate's speech signal from the seam that knows: the VAD's real
+    ``(start_sample, end_sample)`` speech spans (trust them — even a
+    single span covering the whole file is a genuine all-speech memo), or
+    ``None`` when the VAD produced no usable information (unavailable,
+    or ran and found nothing; the slice list in that case is the
+    full-recording fallback and carries no speech information) — the gate
+    then falls back to the frame-RMS energy gate.
     """
     transcriber: WhisperTranscriber | None = None
     try:
         transcriber = WhisperTranscriber(
             language=language, initial_prompt=initial_prompt
         )
-        # Widen from the TranscriptionResult TypedDict: the slice records are
-        # a pipeline-internal extension, not part of the transcriber contract.
-        #
-        # vad_slices: convert VAD ``slices`` (``(offset, slice_audio)``)
-        # to ``(start_sample, end_sample)`` pairs so the lost-window retry
-        # gate can use the real VAD signal (issue #152 FIX 1). The windows
-        # are cut from the FULL audio (not the VAD-sliced audio), so the
-        # sample offsets map directly onto the recording timeline.
-        vad_slices = [(s, s + len(a)) for s, a in slices]
         result: dict[str, Any] = dict(
             transcriber.transcribe(audio, display=display, vad_slices=vad_slices)
         )
