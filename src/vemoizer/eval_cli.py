@@ -76,7 +76,7 @@ def transcribe_decode_only(path: Path | str, *, backend: str) -> dict:
         return {"text": "", "segments": [], "error": str(e)}
     if len(audio) == 0:
         return {"text": "", "segments": []}
-    slices = pipeline_module._speech_slices(audio)
+    slices, _vad_found_speech = pipeline_module._speech_slices(audio)
     transcriber: Any = None
     result: dict[str, Any] | None = None
     try:

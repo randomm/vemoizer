@@ -47,6 +47,17 @@ class TranscriptionResult(_TranscriptionBase, total=False):
     # "fi 29/30, en 1/30". Present when at least one window reported a
     # language; absent when no window reported one (empty decode).
     language_summary: str
+    # Windows that contained speech but returned 0 segments even after the
+    # prompt-free retry (issue #152). Each entry is a (start_s, end_s)
+    # tuple — the window's time range on the recording timeline. Present
+    # only when at least one window was lost; absent on a clean decode.
+    # Consumed only by the quality report; backends may omit it.
+    #
+    # Unlike language_summary (present-on-clean), lost_windows is
+    # absent-on-clean: the key is omitted when no window was lost, so
+    # callers should use .get('lost_windows') or isinstance checks rather
+    # than assuming its presence.
+    lost_windows: list[tuple[float, float]]
     transcribe_time: float
     audio_duration: float
     rtf: float

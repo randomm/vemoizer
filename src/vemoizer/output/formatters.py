@@ -36,6 +36,8 @@ import json
 import math
 from typing import Any
 
+from ..whisper_windows import normalize_lost_windows
+
 #: Every output format the CLI accepts, in canonical order.
 OUTPUT_FORMATS: tuple[str, ...] = ("txt", "json", "srt", "vtt", "md")
 
@@ -220,6 +222,16 @@ def format_json(transcript: dict[str, Any]) -> str:
     glossary = transcript.get("glossary_source")
     if isinstance(glossary, str) and glossary:
         out["glossary_source"] = glossary
+    # Issue #152: lost windows (windows with speech but 0 segments even after
+    # the prompt-free retry). Mirrored present-only: absent on clean runs and
+    # pre-#152 sidecars. normalize_lost_windows (FIX 3) drops malformed
+    # entries (bool, str, NaN, negative, start > end) so a hand-edited or
+    # corrupted sidecar cannot persist garbage.
+    lost = transcript.get("lost_windows")
+    if lost:
+        normalized = normalize_lost_windows(lost)
+        if normalized:
+            out["lost_windows"] = normalized
     return json.dumps(out, ensure_ascii=False, indent=2) + "\n"
 
 

@@ -17,13 +17,50 @@ would otherwise scroll the progress display away.
 from __future__ import annotations
 
 import logging
+import math
 from collections import Counter
+from collections.abc import Callable
+from numbers import Real
 from typing import Any
 
+import numpy as np
+
+from .audio_contract import SAMPLE_RATE
 from .echo_filter import filter_echo_segments
+from .lang_filter import filter_language_lines
 from .transcriber import TranscriptionResult
 
 logger = logging.getLogger(__name__)
+
+#: Minimum seconds of VAD speech overlap with a window before the window
+#: counts as speech (issue #152). VAD slices are second-accurate at the
+#: edges, and a 30 s window whose only "speech" is 0.4 s of VAD bleed from
+#: a neighboring slice is not a lost window — it is a pause. 0.5 s is a
+#: deliberately small floor: real utterance fragments are longer, VAD
+#: edge jitter is shorter.
+MIN_VAD_OVERLAP_S = 0.5
+
+#: Fallback energy-gate constants for the no-slices path (dictation and
+#: test callers that never run VAD; issue #152). The gate is frame-based
+#: RMS so a hiss-only window (peak ~5e-3) does NOT count as speech the way
+#: the old peak-amplitude rule (1e-6) did — room noise peaks well above
+#: 1e-6 and was producing false "puhetta, ei tekstiä" report lines.
+#:
+#: - :data:`FALLBACK_FRAME_SECONDS` (0.03 s = 30 ms) is the frame length;
+#:   short enough to resolve 30 Hz syllabic modulation, long enough that a
+#:   single-frame RMS is a stable number.
+#:
+#: - :data:`FALLBACK_SILENT_RMS` (1e-2) is the per-frame RMS floor. That is
+#:   20·log10(1e-2) = -40 dBFS. Room-noise hiss sits around -55…-65 dBFS
+#:   RMS; quiet real speech (whispered) sits around -35…-30 dBFS RMS, so
+#:   -40 dBFS separates the two with margin on both sides.
+#:
+#: The gate is a 5%-of-frames rule: a window is speech if at least 5% of its
+#:   30 ms frames have RMS ≥ :data:`FALLBACK_SILENT_RMS`. A 30 s window of
+#:   room-noise hiss has 0 active frames; a window with a 3 s quiet speech
+#:   burst (RMS ~-35 dBFS) has ~100 active frames out of 1000 (10%).
+FALLBACK_FRAME_SECONDS = 0.03
+FALLBACK_SILENT_RMS = 1e-2  # = -40 dBFS (frame considered "active")
 
 
 def process_window_raws(
@@ -118,3 +155,188 @@ def process_window_raws(
         result["language_summary"] = ", ".join(parts)
 
     return result
+
+
+def normalize_lost_windows(
+    value: Any,
+) -> list[tuple[float, float]]:
+    """Validate and normalize ``lost_windows`` entries.
+
+    Accepts a list of ``(start_s, end_s)`` pairs (tuples or lists, any
+    real numeric scalar — Python int/float, numpy float32/float64/
+    int64, …). Drops entries that are not 2-element pairs, have
+    non-numeric values, bool values (a bool is a Real, still excluded),
+    NaN/inf, negative values, or start > end. Returns a list of
+    ``tuple[float, float]``. Empty list on empty/invalid input.
+    """
+    if not isinstance(value, list):
+        return []
+    result: list[tuple[float, float]] = []
+    for p in value:
+        if not isinstance(p, (tuple, list)) or len(p) != 2:
+            continue
+        a, b = p
+        for v in (a, b):
+            if isinstance(v, bool) or not isinstance(v, Real):
+                break
+            fv = float(v)
+            if not math.isfinite(fv) or fv < 0:
+                break
+        else:
+            fa, fb = float(a), float(b)
+            if fa <= fb:
+                result.append((fa, fb))
+    return result
+
+
+def retry_lost_windows(
+    raws: list[dict[str, Any]],
+    audio: np.ndarray,
+    transcribe_fn: Callable[[np.ndarray, dict[str, Any]], Any],
+    *,
+    window_frames: int,
+    window_seconds: float,
+    vad_slices: list[tuple[int, int]] | None = None,
+) -> list[tuple[float, float]]:
+    """Prompt-free fail-safe retry for 0-segment windows with speech.
+
+    A window that is flagged as speech (either by VAD-slice overlap —
+    *vad_slices*, when given, or by the fallback frame-RMS gate) but that
+    returned 0 segments is re-decoded once via *transcribe_fn* without the
+    glossary prompt. The prompt is the remaining suspect: whisper can echo
+    the glossary instead of transcribing, and the echo filter (post-decode)
+    would then drop the only segment. A retry that returns None (a real
+    mlx-whisper failure) or 0 segments records the window as lost and fails
+    open. Returns the list of ``(start_s, end_s)`` tuples for windows that
+    were lost.
+
+    *vad_slices* is an EXPLICIT signal from the seam (issue #152, fix pass
+    3): ``None`` means "no usable VAD information — the slice list the
+    caller holds is the full-recording fallback (VAD unavailable or VAD ran
+    and found no speech), so use the frame-RMS fallback gate"; a (possibly
+    empty) list means "the VAD ran and these are its real speech spans
+    (``(start_sample, end_sample)`` pairs on the recording timeline) —
+    trust them". Trusting the list is what makes a genuine short all-speech
+    recording work: its single slice covering (almost) the whole file is
+    real VAD output, not the "VAD found nothing" fallback shape, so a quiet
+    window (-45 dBFS, below the RMS floor) is still retried. An empty list
+    (the VAD ran and found zero speech spans) means no window is speech —
+    no retries, no losses.
+    """
+    use_vad = vad_slices is not None
+    lost_windows: list[tuple[float, float]] = []
+    for index, raw in enumerate(raws):
+        if raw.get("segments"):
+            continue
+        window_start_s = index * window_seconds
+        window_end_s = window_start_s + window_seconds
+        offset_samples = index * window_frames
+        window_audio = audio[offset_samples : offset_samples + window_frames]
+        if use_vad:
+            overlap_s = _vad_overlap_seconds(
+                vad_slices, window_start_s, window_end_s, SAMPLE_RATE
+            )
+            is_speech = overlap_s >= MIN_VAD_OVERLAP_S
+        else:
+            is_speech = _window_has_speech(window_audio)
+        if not is_speech:
+            # Genuinely silent window (or VAD-bleed-only): nothing to
+            # retry, not a loss.
+            continue
+        offset_s = index * window_seconds
+        logger.warning(
+            "whisper window %d (offset %.0fs) returned no segments; "
+            "retrying without glossary prompt",
+            index,
+            offset_s,
+        )
+        # The retry is a second decode call, so it honors the same stdout
+        # contract as the main window loop: the per-window "Detected
+        # language: X" line is filtered. The progress shim is intentionally
+        # NOT re-entered — it tracks the main window loop one window at a
+        # time, and a retry re-marking the same window would regress the
+        # bar; the retry is a rare fail-safe path so the cosmetic impact of
+        # skipping it is negligible.
+        with filter_language_lines():
+            retry_raw = transcribe_fn(window_audio, {"initial_prompt": None})
+        if retry_raw is None:
+            # A None from mlx-whisper is a real failure of the retry, not a
+            # silent no-op: the window had confirmed speech energy, so record
+            # it as lost (fail-open: the transcript is incomplete but the run
+            # continues; never silent). mlx-whisper returns None for a failed
+            # decode (e.g. an empty/no-speech classification), not an
+            # exception — the log explains the mechanism, not just the
+            # observation.
+            logger.error(
+                "retry for window %d (offset %.0fs) returned None "
+                "(mlx-whisper decode failure); recording as lost",
+                index,
+                offset_s,
+            )
+            lost_windows.append((offset_s, offset_s + window_seconds))
+            continue
+        raws[index] = retry_raw
+        if not retry_raw.get("segments"):
+            # FIX 4: the retry returned 0 segments (not None) — the window
+            # is lost. Log a warning naming the window index and offset so
+            # the loss is never silent (the None case is logged above).
+            logger.warning(
+                "retry for window %d (offset %.0fs) returned 0 segments; "
+                "recording as lost",
+                index,
+                offset_s,
+            )
+            lost_windows.append((offset_s, offset_s + window_seconds))
+    return lost_windows
+
+
+def _vad_overlap_seconds(
+    vad_slices: list[tuple[int, int]],
+    window_start_s: float,
+    window_end_s: float,
+    sample_rate: int,
+) -> float:
+    """Total seconds of overlap between a time window and the VAD slices.
+
+    Slices are ``(start_sample, end_sample)`` pairs on the recording
+    timeline; the window is a half-open ``[window_start_s, window_end_s)``
+    interval in seconds. Overlapping intervals are clipped to the window
+    bounds and summed. This is the primary speech signal for
+    :func:`retry_lost_windows` when *vad_slices* is available.
+    """
+    total = 0.0
+    for s, e in vad_slices:
+        slice_start_s = s / sample_rate
+        slice_end_s = e / sample_rate
+        overlap_start = max(window_start_s, slice_start_s)
+        overlap_end = min(window_end_s, slice_end_s)
+        if overlap_end > overlap_start:
+            total += overlap_end - overlap_start
+    return total
+
+
+def _window_has_speech(window_audio: np.ndarray) -> bool:
+    """Frame-RMS fallback gate for a 0-segment window (issue #152).
+
+    Splits *window_audio* into :data:`FALLBACK_FRAME_SECONDS` frames, computes
+    per-frame RMS, and returns True if at least 5% of frames have RMS ≥
+    :data:`FALLBACK_SILENT_RMS` (-40 dBFS). A hiss-only window (room noise,
+    RMS ~-55…-65 dBFS) has 0 active frames; a window with a 3 s quiet speech
+    burst (RMS ~-35 dBFS) has ~10% active frames. Used only when VAD slices
+    are unavailable at the seam; never as a general speech detector.
+    """
+    if len(window_audio) == 0:
+        return False
+    frame_len = int(FALLBACK_FRAME_SECONDS * SAMPLE_RATE)
+    if len(window_audio) < frame_len:
+        # Too short for even one frame: use peak as a conservative fallback.
+        return float(np.abs(window_audio).max()) >= FALLBACK_SILENT_RMS
+    n_frames = len(window_audio) // frame_len
+    window_trimmed = window_audio[: n_frames * frame_len]
+    rms = np.sqrt((window_trimmed.reshape(n_frames, frame_len) ** 2).mean(axis=1))
+    # Speech iff the fraction of "active" frames (RMS >= FALLBACK_SILENT_RMS,
+    # -40 dBFS) is at least 5%. A 30 s window of room-noise hiss (RMS ~-55 dBFS)
+    # has 0 active frames. A 30 s window with a 3 s quiet speech burst (RMS ~-35 dBFS)
+    # has ~100 active frames out of 1000 total (10%), well above the 5% threshold.
+    active = rms >= FALLBACK_SILENT_RMS
+    return bool(active.sum() / len(rms) >= 0.05)

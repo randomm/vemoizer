@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+from _whisper_helpers import _audio, _raw, _seg
 
 from vemoizer.echo_filter import echo_vocabulary, filter_echo_segments
 from vemoizer.whisper_transcriber import (
@@ -25,23 +26,6 @@ from vemoizer.whisper_transcriber import (
     decode_meeting,
     slice_records_from_words,
 )
-
-
-def _raw(segments):
-    return {
-        "text": " ".join(s["text"] for s in segments),
-        "language": "fi",
-        "segments": segments,
-    }
-
-
-def _seg(text, words):
-    return {
-        "text": text,
-        "start": words[0]["start"],
-        "end": words[-1]["end"],
-        "words": words,
-    }
 
 
 def _mock_whisper(raw):
@@ -59,10 +43,6 @@ def _kw(call, name: str) -> object:
     per-window assertion.
     """
     return call.kwargs[name]
-
-
-def _audio(seconds: float) -> np.ndarray:
-    return np.zeros(int(seconds * 16_000), dtype=np.float32)
 
 
 def test_model_is_revision_pinned_turbo() -> None:
@@ -288,7 +268,12 @@ def test_conditioning_on_with_fallback_ladder() -> None:
     assert kwargs["compression_ratio_threshold"] == 2.4
     assert kwargs["logprob_threshold"] == -1.0
     assert kwargs["no_speech_threshold"] == 0.6
-    assert kwargs["hallucination_silence_threshold"] == 2.0
+    # issue #152: hallucination_silence_threshold is intentionally ABSENT.
+    # With 30 s per-call windows its silence heuristics are meaningless
+    # (the "surrounded by silence" test is always true by construction)
+    # and it deletes real speech. Loops are handled by the temperature
+    # ladder, compression/logprob thresholds, echo filter and self-heal.
+    assert "hallucination_silence_threshold" not in kwargs
 
 
 def test_segment_confidence_is_kept() -> None:

@@ -50,7 +50,7 @@ from .lang_filter import filter_language_lines
 from .models import get_model, resolve_model_path
 from .selfheal import heal
 from .transcriber import TranscriptionResult
-from .whisper_windows import process_window_raws
+from .whisper_windows import process_window_raws, retry_lost_windows
 
 if TYPE_CHECKING:
     from .progress import ProgressDisplay
@@ -135,6 +135,7 @@ class WhisperTranscriber:
         audio: np.ndarray,
         *,
         display: ProgressDisplay | None = None,
+        vad_slices: list[tuple[int, int]] | None = None,
         **kwargs: Any,
     ) -> TranscriptionResult:
         """Transcribe the recording in :data:`WINDOW_SECONDS` windows.
@@ -175,13 +176,18 @@ class WhisperTranscriber:
         # transcribe() call, the glossary re-seeds at each boundary;
         # when the ladder still fails, the self-heal stage re-decodes the
         # wall with conditioning off via the kwargs override.
+        # hallucination_silence_threshold is intentionally ABSENT (issue #152):
+        # with 30 s per-call windows its silence heuristics are meaningless —
+        # the "surrounded by silence" test is always true by construction for
+        # a window that spans ~0–30 s — and it deletes real speech. Loops are
+        # handled by the temperature ladder, the compression and logprob
+        # thresholds, the #109 echo filter and self-heal.
         options: dict[str, Any] = {
             "temperature": (0.0, 0.2, 0.4),
             "condition_on_previous_text": True,
             "compression_ratio_threshold": 2.4,
             "logprob_threshold": -1.0,
             "no_speech_threshold": 0.6,
-            "hallucination_silence_threshold": 2.0,
             "initial_prompt": self._initial_prompt,
         }
         # verbose=False (issue #147): in mlx-whisper 0.4.3 this ENABLES the
@@ -196,6 +202,15 @@ class WhisperTranscriber:
         options["verbose"] = False
 
         window_frames = int(WINDOW_SECONDS * SAMPLE_RATE)
+        # Common kwargs for every window's transcribe() call (the retry path
+        # reuses this dict with ``initial_prompt`` overridden to None, so a
+        # signature or window-sizing change is kept in one place, issue #152).
+        window_kwargs: dict[str, Any] = {
+            "path_or_hf_repo": self._model_path,
+            "word_timestamps": True,
+            "language": self._language,
+            "task": "transcribe",
+        }
         raws: list[dict[str, Any]] = []
         # The display (when threaded in) is driven by the shim: it patches
         # the tqdm referenced by mlx_whisper.transcribe for the duration of
@@ -233,10 +248,7 @@ class WhisperTranscriber:
                 mark_window(offset / SAMPLE_RATE)
                 raw = self._mlx_whisper.transcribe(
                     audio[offset : offset + window_frames],
-                    path_or_hf_repo=self._model_path,
-                    word_timestamps=True,
-                    language=self._language,
-                    task="transcribe",
+                    **window_kwargs,
                     **options,
                 )
                 if raw is None:
@@ -245,6 +257,31 @@ class WhisperTranscriber:
                         "returned None"
                     )
                 raws.append(raw)
+
+        # Fail-safe retry (issue #152): a window that VAD says contains
+        # speech (or, when VAD is unavailable, the fallback frame-RMS gate)
+        # but returned 0 segments is re-decoded once without the glossary
+        # prompt. The retry lives in whisper_windows.py (not in this class)
+        # so a future non-whisper backend doesn't inherit a whisper-specific
+        # contract; it reuses the main loop's window_kwargs + offsets and the
+        # same stdout filter (the progress shim is intentionally NOT
+        # re-entered — see the comment above the main loop).
+        #
+        # vad_slices are passed as a kwarg so the Transcriber Protocol is
+        # unchanged (optional keyword, default None): other backends and
+        # test callers that don't set it fall back to the RMS gate.
+        lost_windows = retry_lost_windows(
+            raws,
+            audio,
+            lambda window_audio, opts: self._mlx_whisper.transcribe(
+                window_audio,
+                **window_kwargs,
+                **{**options, **opts},
+            ),
+            window_frames=window_frames,
+            window_seconds=WINDOW_SECONDS,
+            vad_slices=vad_slices,
+        )
         transcribe_time = time.time() - start
         audio_duration = len(audio) / SAMPLE_RATE
 
@@ -255,6 +292,12 @@ class WhisperTranscriber:
             transcribe_time=transcribe_time,
             audio_duration=audio_duration,
         )
+        if lost_windows:
+            # Quality-report signal for the TranscriptionResult contract
+            # (issue #152, see transcriber.py): windows that contained
+            # speech but returned 0 segments even after the prompt-free
+            # retry.
+            result["lost_windows"] = lost_windows
         return result
 
     def cleanup(self) -> None:
@@ -315,6 +358,7 @@ def decode_meeting(
     initial_prompt: str | None = None,
     display: ProgressDisplay | None = None,
     language: str | None = None,
+    vad_slices: list[tuple[int, int]] | None = None,
 ) -> dict[str, Any] | None:
     """Per-window Whisper decode A for the meeting profile (fail-open).
 
@@ -335,15 +379,24 @@ def decode_meeting(
     on — Whisper detects per window, matching invariant #3 (language is a
     property of a span, not of a file). A non-None value (e.g. ``"fi"``)
     pins every window to that language.
+
+    ``vad_slices`` (issue #152, explicit signal) carries the lost-window
+    retry gate's speech signal from the seam that knows: the VAD's real
+    ``(start_sample, end_sample)`` speech spans (trust them — even a
+    single span covering the whole file is a genuine all-speech memo), or
+    ``None`` when the VAD produced no usable information (unavailable,
+    or ran and found nothing; the slice list in that case is the
+    full-recording fallback and carries no speech information) — the gate
+    then falls back to the frame-RMS energy gate.
     """
     transcriber: WhisperTranscriber | None = None
     try:
         transcriber = WhisperTranscriber(
             language=language, initial_prompt=initial_prompt
         )
-        # Widen from the TranscriptionResult TypedDict: the slice records are
-        # a pipeline-internal extension, not part of the transcriber contract.
-        result: dict[str, Any] = dict(transcriber.transcribe(audio, display=display))
+        result: dict[str, Any] = dict(
+            transcriber.transcribe(audio, display=display, vad_slices=vad_slices)
+        )
         # Hallucination walls (context-fed repetition loops) are repaired
         # by re-decoding only the slices under them with conditioning off;
         # heal() is a no-op on a clean decode and fail-open otherwise.
