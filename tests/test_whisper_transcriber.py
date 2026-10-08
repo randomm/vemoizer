@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+from _whisper_helpers import _audio, _raw, _seg
 
 from vemoizer.echo_filter import echo_vocabulary, filter_echo_segments
 from vemoizer.whisper_transcriber import (
@@ -25,23 +26,6 @@ from vemoizer.whisper_transcriber import (
     decode_meeting,
     slice_records_from_words,
 )
-
-
-def _raw(segments):
-    return {
-        "text": " ".join(s["text"] for s in segments),
-        "language": "fi",
-        "segments": segments,
-    }
-
-
-def _seg(text, words):
-    return {
-        "text": text,
-        "start": words[0]["start"],
-        "end": words[-1]["end"],
-        "words": words,
-    }
 
 
 def _mock_whisper(raw):
@@ -59,10 +43,6 @@ def _kw(call, name: str) -> object:
     per-window assertion.
     """
     return call.kwargs[name]
-
-
-def _audio(seconds: float) -> np.ndarray:
-    return np.zeros(int(seconds * 16_000), dtype=np.float32)
 
 
 def test_model_is_revision_pinned_turbo() -> None:
@@ -793,145 +773,3 @@ def test_prompt_has_no_sanasto_prefix() -> None:
     assert prompt is not None
     assert not prompt.startswith("Sanasto")
     assert "Sanasto" not in prompt
-
-
-# -- fail-safe retry for 0-segment windows (issue #152) -------------------
-
-
-def _speech_audio(seconds: float) -> np.ndarray:
-    """Non-silent audio (sine wave) that passes the energy check."""
-    t = np.linspace(0, seconds, int(seconds * 16_000), endpoint=False, dtype=np.float32)
-    return (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
-
-
-def test_zero_segment_window_triggers_prompt_free_retry() -> None:
-    """A window that returns 0 segments (and has speech energy) triggers a
-    retry without the glossary prompt; the retry's text is kept."""
-    empty_raw = {"text": "", "language": "fi", "segments": []}
-    good_raw = _raw(
-        [
-            _seg(
-                "tässä oli puhetta",
-                [
-                    {"word": " tässä", "start": 0.0, "end": 0.3},
-                    {"word": " oli", "start": 0.4, "end": 0.5},
-                    {"word": " puhetta", "start": 0.6, "end": 0.9},
-                ],
-            )
-        ]
-    )
-    mock = MagicMock()
-    # First call (window 0) returns empty; retry (window 0, no prompt) returns good.
-    mock.transcribe = MagicMock(side_effect=[empty_raw, good_raw])
-    with (
-        patch.dict("sys.modules", {"mlx_whisper": mock}),
-        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
-    ):
-        t = WhisperTranscriber(initial_prompt="Sanasto: Flagship.")
-        t._model_path = "/tmp/turbo"
-        t._mlx_whisper = mock
-        result = t.transcribe(_speech_audio(10.0))
-    # Two calls: initial decode + prompt-free retry.
-    assert mock.transcribe.call_count == 2
-    # The retry dropped the prompt.
-    retry_kwargs = mock.transcribe.call_args_list[1].kwargs
-    assert retry_kwargs["initial_prompt"] is None
-    # The retry's text is in the result.
-    assert "tässä oli puhetta" in result["text"]
-    # No lost_windows key (the retry succeeded).
-    assert "lost_windows" not in result
-
-
-def test_silent_zero_segment_window_does_not_retry() -> None:
-    """A genuinely silent window (all zeros) that returns 0 segments does NOT
-    trigger a retry — there's nothing to decode."""
-    empty_raw = {"text": "", "language": "fi", "segments": []}
-    mock = MagicMock()
-    mock.transcribe = MagicMock(return_value=empty_raw)
-    with (
-        patch.dict("sys.modules", {"mlx_whisper": mock}),
-        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
-    ):
-        t = WhisperTranscriber()
-        t._model_path = "/tmp/turbo"
-        t._mlx_whisper = mock
-        result = t.transcribe(np.zeros(int(10 * 16_000), dtype=np.float32))
-    # Only one call (no retry for silent audio).
-    assert mock.transcribe.call_count == 1
-    assert result["text"] == ""
-
-
-def test_zero_segment_retry_fails_open() -> None:
-    """If the prompt-free retry also returns 0 segments, the window is
-    recorded in lost_windows (fail-open: the transcript is incomplete but
-    the run continues)."""
-    empty_raw = {"text": "", "language": "fi", "segments": []}
-    mock = MagicMock()
-    # Both calls return empty (initial + retry).
-    mock.transcribe = MagicMock(return_value=empty_raw)
-    with (
-        patch.dict("sys.modules", {"mlx_whisper": mock}),
-        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
-    ):
-        t = WhisperTranscriber(initial_prompt="Sanasto: Flagship.")
-        t._model_path = "/tmp/turbo"
-        t._mlx_whisper = mock
-        result = t.transcribe(_speech_audio(10.0))
-    # Two calls: initial + retry.
-    assert mock.transcribe.call_count == 2
-    # The window is recorded as lost with (start_s, end_s) time range.
-    assert "lost_windows" in result
-    assert len(result["lost_windows"]) == 1
-    start_s, end_s = result["lost_windows"][0]
-    assert start_s == 0.0  # window 0 starts at 0s
-    assert end_s == 30.0  # 30 s window
-
-
-def test_zero_segment_retry_none_records_lost() -> None:
-    """A retry that returns None (mlx-whisper's documented failure mode)
-    is a real failure for a window with confirmed speech energy: it is
-    recorded in lost_windows (never silent), not silently skipped."""
-    empty_raw = {"text": "", "language": "fi", "segments": []}
-    mock = MagicMock()
-    mock.transcribe = MagicMock(side_effect=[empty_raw, None])
-    with (
-        patch.dict("sys.modules", {"mlx_whisper": mock}),
-        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
-    ):
-        t = WhisperTranscriber(initial_prompt="Sanasto: Flagship.")
-        t._model_path = "/tmp/turbo"
-        t._mlx_whisper = mock
-        result = t.transcribe(_speech_audio(10.0))
-    assert mock.transcribe.call_count == 2
-    # Fail-open: transcript is incomplete but the run continued; and the
-    # loss is observable (a gap is never silent).
-    assert "lost_windows" in result
-    assert result["lost_windows"] == [(0.0, 30.0)]
-    assert result["text"] == ""
-
-
-def test_no_retry_when_all_windows_have_segments() -> None:
-    """When all windows return segments, no retry calls are made."""
-    raw = _raw(
-        [
-            _seg(
-                "moro vaan",
-                [
-                    {"word": " moro", "start": 0.0, "end": 0.5},
-                    {"word": " vaan", "start": 0.6, "end": 1.0},
-                ],
-            )
-        ]
-    )
-    mock = MagicMock()
-    mock.transcribe = MagicMock(return_value=raw)
-    with (
-        patch.dict("sys.modules", {"mlx_whisper": mock}),
-        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
-    ):
-        t = WhisperTranscriber(initial_prompt="Sanasto: Flagship.")
-        t._model_path = "/tmp/turbo"
-        t._mlx_whisper = mock
-        t.transcribe(_speech_audio(60.0))
-    # Exactly 2 calls (one per 30 s window), no retries.
-    assert mock.transcribe.call_count == 2
