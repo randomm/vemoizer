@@ -73,6 +73,13 @@ SAMPLE_RATE = 16_000
 #: boundary artifacts (mitigated by whisper's own segmentation).
 WINDOW_SECONDS = 30.0
 
+#: Peak absolute amplitude below which a 0-segment window is treated as
+#: genuinely silent (skip the prompt-free retry, issue #152) rather than as
+#: a lost window. A deliberately crude energy heuristic — it is a fail-safe
+#: gate, not a speech detector: the real presence/absence of speech comes
+#: from whisper's own decode (segments) and from the VAD slices downstream.
+SILENT_PEAK_THRESHOLD = 1e-6
+
 
 class WhisperTranscriber:
     """Whisper-large-v3-turbo speech-to-text via mlx-whisper (decode A)."""
@@ -261,31 +268,49 @@ class WhisperTranscriber:
         for index, raw in enumerate(raws):
             if raw.get("segments"):
                 continue
-            # Skip genuinely silent windows (all-zero or near-zero energy).
             offset_samples = index * window_frames
             window_audio = audio[offset_samples : offset_samples + window_frames]
-            if len(window_audio) == 0 or float(np.abs(window_audio).max()) < 1e-6:
+            if not _window_has_speech(window_audio):
+                # Genuinely silent window: nothing to retry, not a loss.
                 continue
+            offset_s = index * WINDOW_SECONDS
             logger.warning(
                 "whisper window %d (offset %.0fs) returned no segments; "
                 "retrying without glossary prompt",
                 index,
-                index * WINDOW_SECONDS,
+                offset_s,
             )
-            retry_raw = self._mlx_whisper.transcribe(
-                window_audio,
-                path_or_hf_repo=self._model_path,
-                word_timestamps=True,
-                language=self._language,
-                task="transcribe",
-                **retry_options,
-            )
+            # The retry is a second decode call, so it honors the same
+            # stdout contract as the window loop above: the per-window
+            # "Detected language: X" line is filtered. The progress shim is
+            # intentionally NOT re-entered — it tracks the main window loop
+            # one window at a time, and a retry re-marking the same window
+            # would regress the bar; the retry is a rare fail-safe path so
+            # the cosmetic impact of skipping it is negligible.
+            with filter_language_lines():
+                retry_raw = self._mlx_whisper.transcribe(
+                    window_audio,
+                    path_or_hf_repo=self._model_path,
+                    word_timestamps=True,
+                    language=self._language,
+                    task="transcribe",
+                    **retry_options,
+                )
             if retry_raw is None:
-                # Fail-open: keep the original empty result.
+                # A None from mlx-whisper is a real failure of the retry,
+                # not a silent no-op: the window had confirmed speech
+                # energy, so record it as lost (fail-open: transcript is
+                # incomplete but the run continues; never silent).
+                logger.error(
+                    "retry for window %d (offset %.0fs) returned None; "
+                    "recording as lost",
+                    index,
+                    offset_s,
+                )
+                lost_windows.append((offset_s, offset_s + WINDOW_SECONDS))
                 continue
             raws[index] = retry_raw
             if not retry_raw.get("segments"):
-                offset_s = index * WINDOW_SECONDS
                 lost_windows.append((offset_s, offset_s + WINDOW_SECONDS))
         transcribe_time = time.time() - start
         audio_duration = len(audio) / SAMPLE_RATE
@@ -298,11 +323,10 @@ class WhisperTranscriber:
             audio_duration=audio_duration,
         )
         if lost_windows:
-            # Pipeline-internal signal for the quality report (issue #152):
-            # windows that contained speech but returned 0 segments even
-            # after the prompt-free retry. The TypedDict contract does not
-            # include this key; it is read by the pipeline, not by the
-            # Transcriber protocol.
+            # Quality-report signal for the TranscriptionResult contract
+            # (issue #152, see transcriber.py): windows that contained
+            # speech but returned 0 segments even after the prompt-free
+            # retry.
             result["lost_windows"] = lost_windows
         return result
 
@@ -321,6 +345,19 @@ class WhisperTranscriber:
         self._model_path = None
         self._mlx_whisper = None
         mx.clear_cache()
+
+
+def _window_has_speech(window_audio: np.ndarray) -> bool:
+    """True if a 0-segment window carries audible signal.
+
+    Peak-amplitude test against :data:`SILENT_PEAK_THRESHOLD`. Only used
+    as the fail-safe gate for the prompt-free retry (issue #152): it
+    decides whether an empty window is "nothing to decode" or a candidate
+    for retry — never as a speech detector in its own right.
+    """
+    if len(window_audio) == 0:
+        return False
+    return float(np.abs(window_audio).max()) >= SILENT_PEAK_THRESHOLD
 
 
 def slice_records_from_words(

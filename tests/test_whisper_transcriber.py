@@ -887,6 +887,29 @@ def test_zero_segment_retry_fails_open() -> None:
     assert end_s == 30.0  # 30 s window
 
 
+def test_zero_segment_retry_none_records_lost() -> None:
+    """A retry that returns None (mlx-whisper's documented failure mode)
+    is a real failure for a window with confirmed speech energy: it is
+    recorded in lost_windows (never silent), not silently skipped."""
+    empty_raw = {"text": "", "language": "fi", "segments": []}
+    mock = MagicMock()
+    mock.transcribe = MagicMock(side_effect=[empty_raw, None])
+    with (
+        patch.dict("sys.modules", {"mlx_whisper": mock}),
+        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
+    ):
+        t = WhisperTranscriber(initial_prompt="Sanasto: Flagship.")
+        t._model_path = "/tmp/turbo"
+        t._mlx_whisper = mock
+        result = t.transcribe(_speech_audio(10.0))
+    assert mock.transcribe.call_count == 2
+    # Fail-open: transcript is incomplete but the run continued; and the
+    # loss is observable (a gap is never silent).
+    assert "lost_windows" in result
+    assert result["lost_windows"] == [(0.0, 30.0)]
+    assert result["text"] == ""
+
+
 def test_no_retry_when_all_windows_have_segments() -> None:
     """When all windows return segments, no retry calls are made."""
     raw = _raw(
