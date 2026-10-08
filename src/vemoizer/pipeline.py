@@ -57,6 +57,7 @@ from .speaker_align import assign_word_speakers, split_segments_at_speaker_chang
 from .vad import SpeechSegment, vad_segments
 from .vad import load_model as load_vad_model
 from .whisper_transcriber import decode_meeting
+from .whisper_windows import normalize_lost_windows
 
 logger = logging.getLogger(__name__)
 
@@ -223,19 +224,11 @@ def _assemble(
     # Lost windows (issue #152): decode A's whisper windows that contained
     # speech but returned 0 segments even after the prompt-free retry.
     # Carried onto the run dict so the quality report can render them.
-    # Entries are normalized to (int|float, int|float) pairs at the boundary
-    # so a malformed backend value (a list, a string, a triple) is dropped
-    # rather than passing through to the report, where the tuple unpack would
-    # raise.
+    # normalize_lost_windows (FIX 3) drops malformed entries (bool, str, NaN,
+    # negative, start > end) so the report never sees garbage.
     lost_windows = base.get("lost_windows")
-    if isinstance(lost_windows, list) and lost_windows:
-        normalized = [
-            p
-            for p in lost_windows
-            if isinstance(p, (tuple, list))
-            and len(p) == 2
-            and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in p)
-        ]
+    if lost_windows:
+        normalized = normalize_lost_windows(lost_windows)
         if normalized:
             result["lost_windows"] = normalized
     if segments:

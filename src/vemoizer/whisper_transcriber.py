@@ -135,6 +135,7 @@ class WhisperTranscriber:
         audio: np.ndarray,
         *,
         display: ProgressDisplay | None = None,
+        vad_slices: list[tuple[int, int]] | None = None,
         **kwargs: Any,
     ) -> TranscriptionResult:
         """Transcribe the recording in :data:`WINDOW_SECONDS` windows.
@@ -257,13 +258,18 @@ class WhisperTranscriber:
                     )
                 raws.append(raw)
 
-        # Fail-safe retry (issue #152): a window that VAD/energy says contains
-        # speech but returned 0 segments is re-decoded once without the glossary
-        # prompt. The retry lives in whisper_windows.py (not in this class) so a
-        # future non-whisper backend doesn't inherit a whisper-specific contract;
-        # it reuses the main loop's window_kwargs + offsets and the same stdout
-        # filter (the progress shim is intentionally NOT re-entered — see the
-        # comment above the main loop).
+        # Fail-safe retry (issue #152): a window that VAD says contains
+        # speech (or, when VAD is unavailable, the fallback frame-RMS gate)
+        # but returned 0 segments is re-decoded once without the glossary
+        # prompt. The retry lives in whisper_windows.py (not in this class)
+        # so a future non-whisper backend doesn't inherit a whisper-specific
+        # contract; it reuses the main loop's window_kwargs + offsets and the
+        # same stdout filter (the progress shim is intentionally NOT
+        # re-entered — see the comment above the main loop).
+        #
+        # vad_slices are passed as a kwarg so the Transcriber Protocol is
+        # unchanged (optional keyword, default None): other backends and
+        # test callers that don't set it fall back to the RMS gate.
         lost_windows = retry_lost_windows(
             raws,
             audio,
@@ -274,6 +280,7 @@ class WhisperTranscriber:
             ),
             window_frames=window_frames,
             window_seconds=WINDOW_SECONDS,
+            vad_slices=vad_slices,
         )
         transcribe_time = time.time() - start
         audio_duration = len(audio) / SAMPLE_RATE
@@ -379,7 +386,16 @@ def decode_meeting(
         )
         # Widen from the TranscriptionResult TypedDict: the slice records are
         # a pipeline-internal extension, not part of the transcriber contract.
-        result: dict[str, Any] = dict(transcriber.transcribe(audio, display=display))
+        #
+        # vad_slices: convert VAD ``slices`` (``(offset, slice_audio)``)
+        # to ``(start_sample, end_sample)`` pairs so the lost-window retry
+        # gate can use the real VAD signal (issue #152 FIX 1). The windows
+        # are cut from the FULL audio (not the VAD-sliced audio), so the
+        # sample offsets map directly onto the recording timeline.
+        vad_slices = [(s, s + len(a)) for s, a in slices]
+        result: dict[str, Any] = dict(
+            transcriber.transcribe(audio, display=display, vad_slices=vad_slices)
+        )
         # Hallucination walls (context-fed repetition loops) are repaired
         # by re-decoding only the slices under them with conditioning off;
         # heal() is a no-op on a clean decode and fail-open otherwise.

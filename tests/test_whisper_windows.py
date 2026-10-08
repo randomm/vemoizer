@@ -91,3 +91,34 @@ def test_language_summary_absent_on_empty_audio() -> None:
     assert "language" not in result
     assert "language_summary" not in result
     assert result["text"] == ""
+
+
+def test_normalize_lost_windows_valid_and_garbage() -> None:
+    """FIX 3: normalize_lost_windows drops bool, str, None, NaN, inf,
+    negative, and start > end entries; keeps valid (int|float, int|float)
+    pairs. The three layers (pipeline, report, formatters) all use this
+    helper, so they agree on the same garbage set."""
+    from vemoizer.whisper_windows import normalize_lost_windows
+
+    valid = [(0.0, 30.0), (60, 90.5)]
+    assert normalize_lost_windows(valid) == [(0.0, 30.0), (60.0, 90.5)]
+
+    garbage = [
+        (True, 30.0),  # bool
+        ("0", 30.0),  # str
+        (None, 30.0),  # None
+        (float("nan"), 30.0),  # NaN
+        (float("inf"), 30.0),  # inf
+        (-1.0, 30.0),  # negative
+        (60.0, 30.0),  # start > end
+        (0.0, 30.0, 60.0),  # triple
+        ["a", "b"],  # list of strings
+    ]
+    assert normalize_lost_windows(garbage) == []
+    assert normalize_lost_windows(None) == []
+    assert normalize_lost_windows("not a list") == []
+    assert normalize_lost_windows([]) == []
+
+    # Mixed: valid entries survive, garbage is dropped.
+    mixed = [(0.0, 30.0), (True, 60.0), (30.0, 60.0), (float("nan"), 90.0)]
+    assert normalize_lost_windows(mixed) == [(0.0, 30.0), (30.0, 60.0)]

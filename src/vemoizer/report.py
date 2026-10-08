@@ -25,6 +25,7 @@ from typing import Any
 
 from .output.markdown import _clock_or_none
 from .selfheal import find_degenerate_windows
+from .whisper_windows import normalize_lost_windows
 
 #: Stable warning anchors (substring match) → report category. The
 #: classification keys off the stable prefix of each warning, not the
@@ -245,18 +246,11 @@ def render_report(
     # -- Lost windows (issue #152) ------------------------------------
     # Windows that VAD/energy flagged as speech but returned 0 segments
     # even after the prompt-free retry. Rendered so a gap is never silent.
-    # Entries are validated to (int|float, int|float) pairs — a malformed
-    # entry (a list, a string, a triple) degrades the report to nothing
-    # rather than raising, preserving render_report's fail-open contract.
+    # normalize_lost_windows (FIX 3) drops malformed entries (bool, str, NaN,
+    # negative, start > end) so the report never sees garbage.
     lost = transcript.get("lost_windows")
-    if isinstance(lost, list) and lost:
-        valid_pairs = [
-            p
-            for p in lost
-            if isinstance(p, (tuple, list))
-            and len(p) == 2
-            and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in p)
-        ]
+    if lost:
+        valid_pairs = normalize_lost_windows(lost)
         if valid_pairs:
             label = {"fi": "Häviäkkäiset ikkunat", "en": "Lost windows"}[lang]
             window_lines = []
