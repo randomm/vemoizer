@@ -253,7 +253,7 @@ def render_report(
         valid_pairs = [
             p
             for p in lost
-            if isinstance(p, tuple)
+            if isinstance(p, (tuple, list))
             and len(p) == 2
             and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in p)
         ]

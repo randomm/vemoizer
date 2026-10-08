@@ -220,6 +220,14 @@ def format_json(transcript: dict[str, Any]) -> str:
     glossary = transcript.get("glossary_source")
     if isinstance(glossary, str) and glossary:
         out["glossary_source"] = glossary
+    # Issue #152: lost windows (windows with speech but 0 segments even after
+    # the prompt-free retry). Mirrored present-only: absent on clean runs and
+    # pre-#152 sidecars. TYPE-guarded: a hand-edited or corrupted sidecar with
+    # a non-list lost_windows cannot raise in a later render — the mirror is
+    # list-only, matching the ``source``/``options`` guards above.
+    lost = transcript.get("lost_windows")
+    if isinstance(lost, list) and lost:
+        out["lost_windows"] = lost
     return json.dumps(out, ensure_ascii=False, indent=2) + "\n"
 
 
