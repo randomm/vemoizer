@@ -305,7 +305,10 @@ pure function of the dict):
 
 **Run-dict keys added by the pipeline** (`transcribe_file`, stage 10):
 `duration_s` (decoded-audio seconds, `len(audio) / SAMPLE_RATE` — never
-ffprobe) and `language` (`"fi"` / `"en"`). The gate resolution for the
+ffprobe), `language` (`"fi"` / `"en"`), and `lost_windows` (a list of
+`(start_s, end_s)` float pairs for windows that contained speech but
+returned 0 segments even after the prompt-free retry, issue #152;
+absent on clean runs). The gate resolution for the
 original "pipeline.py is not touched" constraint is superseded: the
 decoded audio exists only inside `transcribe_file`, so the duration rides
 on the dict rather than being passed as a parameter.
@@ -375,6 +378,10 @@ them (present-only, so old JSON without the keys and the expert
   the run used. Set by the preset seam when a glossary was present;
   absent otherwise. Render reproduces the `Sanasto: …` header line
   from it.
+- `lost_windows` — a list of `[start_s, end_s]` float pairs for windows
+  that contained speech but returned 0 segments even after the prompt-free
+  retry (issue #152). Present-only: absent on clean runs. Added by issue
+  #152; JSON round-trip lists are accepted (tuples become lists in JSON).
 
 **`glossary_sha256` — prompt-term-set hash (issue #107)**: the
 hash covers only the glossary *prompt terms* — the non-correction
@@ -528,6 +535,13 @@ is a run of ≥ 2 terms or carries the label (a single bare term is kept).
 The filter is fail-open: on any error the segments are returned unfiltered,
 with one warning logged, or — if the words-extraction fallback also
 fails — two warnings (one for the error, one for the words degradation).
+
+`hallucination_silence_threshold` is not passed per window (issue #152):
+with 30 s per-call windows its silence heuristics are meaningless — the
+"surrounded by silence" test is always true by construction for a window
+that spans ~0–30 s — and it deletes real speech. Loops are handled by the
+temperature ladder, the compression and logprob thresholds, the echo
+filter, and self-heal.
 
 ## CLI spec
 
