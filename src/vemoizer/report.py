@@ -259,10 +259,14 @@ def render_report(
         ]
         if valid_pairs:
             label = {"fi": "Häviäkkäiset ikkunat", "en": "Lost windows"}[lang]
-            window_lines = [
-                f"- {_clock_or_none(s) or '?'} → {_clock_or_none(e) or '?'}"
-                for s, e in valid_pairs
-            ]
+            window_lines = []
+            for s, e in valid_pairs:
+                start_str = _clock_or_none(s)
+                end_str = _clock_or_none(e)
+                window_lines.append(
+                    f"- {start_str if start_str is not None else '?'} "
+                    f"→ {end_str if end_str is not None else '?'}"
+                )
             sections.append(
                 f"{label}: {len(valid_pairs)} (puhetta, ei tekstiä)\n"
                 + "\n".join(window_lines)
