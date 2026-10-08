@@ -12,13 +12,23 @@ mlx_whisper is mocked throughout: no downloads, no GPU.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+from _cli_helpers import isolate_home
 from _whisper_helpers import _audio, _raw, _seg, _speech_audio
+from test_pipeline import _patch_ingest, _patch_preflight_pass, _patch_vad
+from typer.testing import CliRunner
 
+import vemoizer.pipeline as vemoizer_pipeline
+from vemoizer.vad import SpeechSegment
 from vemoizer.whisper_transcriber import WhisperTranscriber
-from vemoizer.whisper_windows import MIN_VAD_OVERLAP_S, _window_has_speech
+from vemoizer.whisper_windows import (
+    MIN_VAD_OVERLAP_S,
+    _window_has_speech,
+    normalize_lost_windows,
+)
 
 # -- fail-safe retry for 0-segment windows (issue #152) -------------------
 
@@ -168,9 +178,11 @@ def _run_transcribe(
 ):
     """Drive ``WhisperTranscriber.transcribe`` with a mocked mlx_whisper.
 
-    ``vad_slices`` (``(offset, seconds)`` pairs) is threaded to the
-    transcriber as the seam's VAD availability signal (issue #152 FIX 1);
-    ``None`` means the caller did not ask for the seam to be exercised.
+    ``vad_slices`` (``(start_sample, end_sample)`` sample-index pairs on the
+    recording timeline) is threaded to the transcriber as the seam's VAD
+    availability signal (issue #152 FIX 1): ``None`` means "no usable VAD
+    information — use the frame-RMS fallback", while a (possibly empty)
+    list means "the VAD ran and these are its speech spans — trust them".
     """
     mock = MagicMock()
     mock.transcribe = MagicMock(side_effect=side_effect)
@@ -398,22 +410,56 @@ def test_vad_slice_spanning_two_windows_counts_both(caplog) -> None:
     assert sorted(result["lost_windows"]) == [(0.0, 30.0), (30.0, 60.0)]
 
 
-def test_vad_zero_slices_falls_back_to_rms_gate(caplog) -> None:
-    """FIX 1: an empty slices list means VAD is unavailable: the fallback
-    frame-RMS gate applies. Hiss alone -> silent (no retry, no loss); the
-    same audio with a speech-like burst -> speech (retry, lost when empty)."""
+def test_vad_empty_list_means_no_speech_nowhere(caplog) -> None:
+    """FIX 1 (explicit signal): an EMPTY vad_slices list means "the VAD ran
+    and found zero speech spans" — every window is non-speech regardless of
+    energy: no retry, no loss, even for a loud speech-like signal. (The
+    "no VAD information at all" case is ``vad_slices=None``, which the
+    ``_run_transcribe`` default exercises throughout this module.)"""
     empty_raw = {"text": "", "language": "fi", "segments": []}
-    rng = np.random.default_rng(10)
-    hiss = (rng.standard_normal(30 * 16_000) * 5e-3).astype(np.float32)
     with caplog.at_level(logging.WARNING):
-        mock, result = _run_transcribe(hiss, [empty_raw], vad_slices=())
-    assert mock.transcribe.call_count == 1  # hiss only: silent under the RMS gate
+        mock, result = _run_transcribe(
+            _hiss_with_speech_speech_seconds(30.0), [empty_raw], vad_slices=[]
+        )
+    assert mock.transcribe.call_count == 1  # VAD ran, zero spans: no retry
     assert "lost_windows" not in result
-    speech = _hiss_with_speech_speech_seconds(3.0)
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and "returned no segments" in r.getMessage()
+    ]
+    assert warnings == []
+
+
+def test_all_speech_recording_quiet_signal_is_retried(caplog) -> None:
+    """FIX 1 (explicit signal): a genuine short all-speech recording whose
+    single VAD slice covers the whole file ((0, len)) with a quiet speech
+    signal (~-45 dBFS RMS, BELOW the -40 dBFS fallback floor) and an empty
+    decode: the old shape heuristic mistook the full-coverage slice for the
+    "VAD found nothing" fallback and the RMS gate wrongly called the quiet
+    speech silent (no retry). The explicit VAD signal says speech — the
+    window is retried, and the empty retry is recorded as lost."""
+    t = np.linspace(0, 30.0, 30 * 16_000, endpoint=False)
+    quiet = (0.006 * np.sin(2 * np.pi * 300.0 * t)).astype(np.float32)  # ~-44.4 dBFS
+    n = len(quiet)
+    rms = float(np.sqrt((np.square(quiet).astype(np.float64)).mean()))
+    assert 0.004 < rms < 0.008  # below the 1e-2 (-40 dBFS) fallback floor
+    empty_raw = {"text": "", "language": "fi", "segments": []}
     with caplog.at_level(logging.WARNING):
-        mock2, result2 = _run_transcribe(speech, [empty_raw, empty_raw], vad_slices=())
-    assert mock2.transcribe.call_count == 2  # speech burst: retried
-    assert result2["lost_windows"] == [(0.0, 30.0)]
+        mock, result = _run_transcribe(
+            quiet,
+            [empty_raw, empty_raw],
+            prompt="Sanasto: Flagship.",
+            vad_slices=[(0, n)],
+        )
+    assert mock.transcribe.call_count == 2  # VAD says speech: retried
+    assert result["lost_windows"] == [(0.0, 30.0)]
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and "returned no segments" in r.getMessage()
+    ]
+    assert len(warnings) == 1
 
 
 def test_retry_zero_segments_logs_warning(caplog) -> None:
@@ -449,7 +495,7 @@ def test_fallback_rms_gate_levels() -> None:
     t = np.linspace(0, 30.0, 30 * 16_000, endpoint=False)
     modulated = 0.1 * (0.5 + 0.5 * np.sin(2 * np.pi * 4.0 * t)) * np.sin(200.0 * t)
     assert _window_has_speech(modulated.astype(np.float32)) is True
-    quiet = (0.015 * np.sin(2 * np.pi * 300.0 * t)).astype(np.float32)  # ~-28 dBFS
+    quiet = (0.015 * np.sin(2 * np.pi * 300.0 * t)).astype(np.float32)  # ~-39.5 dBFS
     assert _window_has_speech(quiet) is True
     assert _window_has_speech(np.zeros(0, dtype=np.float32)) is False
 
@@ -481,3 +527,164 @@ def test_window_has_speech_min_vad_overlap_constant() -> None:
     """The VAD overlap gate is a documented positive constant (seconds)."""
     assert MIN_VAD_OVERLAP_S > 0
     assert MIN_VAD_OVERLAP_S <= 1.0
+
+
+# -- numpy-scalar acceptance (issue #152, fix pass 3) ----------------------
+
+
+def test_normalize_lost_windows_accepts_numpy_numeric_scalars() -> None:
+    """numpy numeric scalars (np.float32/np.int64/np.float64) are real
+    numerics and are accepted, exactly as with plain int/float; bool (a
+    bool subclass of int, still excluded) and the existing garbage rules
+    (NaN, negative, start > end) are unchanged."""
+    for a, b in (
+        (np.float32(1.5), np.float64(30.0)),
+        (np.int64(2), np.int64(30)),
+        (np.float64(0.0), np.float32(30.0)),
+    ):
+        assert normalize_lost_windows([(a, b)]) == [(float(a), float(b))]
+    # bool is still excluded even in numpy form.
+    assert normalize_lost_windows([(np.bool_(True), np.int32(2))]) == []
+    # Garbage rules unchanged under numpy scalars.
+    assert normalize_lost_windows([(np.float64(float("nan")), np.float64(2.0))]) == []
+    assert normalize_lost_windows([(np.float64(-1.0), np.float64(2.0))]) == []
+    assert normalize_lost_windows([(np.float64(5.0), np.float64(4.0))]) == []
+
+
+# -- pipeline-level seam: the explicit signal decode_meeting threads -------
+
+
+def _spy_decode_meeting(monkeypatch, seen: dict) -> None:
+    """Record every ``decode_meeting`` call's kwargs (``vad_slices``
+    threaded via the ``transcribe`` kwarg the seam adds) and return a
+    valid meeting result so the run never touches decode B."""
+    import vemoizer.pipeline as pipeline_module
+
+    def fake_decode_meeting(audio, slices, initial_prompt=None, **kwargs):
+        seen["calls"].append(kwargs)
+        return {
+            "text": "hei maailma",
+            "words": [{"word": "hei", "start": 0.0, "end": 0.4}],
+            "segments": [{"start": 0.0, "end": 1.0, "text": "hei maailma"}],
+            "slices": [],
+        }
+
+    monkeypatch.setattr(pipeline_module, "decode_meeting", fake_decode_meeting)
+
+
+def _run_real_meeting_pipeline(
+    monkeypatch, tmp_path: Path, *, extra_args=None, vad_patch=None
+):
+    """Invoke ``meeting`` with the REAL ``transcribe_file`` body.
+
+    The heavy stages are faked at the module seams as
+    ``test_meeting_language`` does (preflight forced green, ingest and VAD
+    patched); only ``decode_meeting`` is the spy, so the REAL
+    ``_speech_slices`` decides the three VAD cases. ``vad_patch`` is an
+    optional callable applied AFTER the default VAD patch so it wins.
+    Returns the spy's recorded kwargs.
+    """
+    import vemoizer.pipeline as pipeline_module
+
+    _patch_preflight_pass(monkeypatch)
+    _patch_ingest(monkeypatch)
+    _patch_vad(monkeypatch)
+    if vad_patch is not None:
+        vad_patch(monkeypatch)
+    # Import the HF token helper BEFORE the test's logging snapshot (the
+    # autouse guard in conftest) so a StreamHandler the import attaches
+    # predates the snapshot and cannot look like a leak.
+    from huggingface_hub import get_token  # noqa: F401
+
+    import vemoizer.preflight as preflight_module
+
+    monkeypatch.setattr(preflight_module, "hf_token_present", lambda: True)
+    seen: dict = {"calls": []}
+    _spy_decode_meeting(monkeypatch, seen)
+
+    import vemoizer.ingest as ingest_module
+
+    monkeypatch.setattr(ingest_module, "pcm_duration_seconds", lambda path, **kw: 2.0)
+
+    def fake_diarize(audio, speakers=None):
+        return [(0.0, 2.0, "SPEAKER_00")]
+
+    monkeypatch.setattr(pipeline_module, "run_diarization_stage", fake_diarize)
+    _config_no_llm(tmp_path)
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    args = ["meeting", "a.m4a"] + (extra_args or [])
+    from vemoizer.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, args, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    return seen
+
+
+def _config_no_llm(tmp_path: Path) -> None:
+    """Home-layer config with a valid ``[llm]`` section pointing at an
+    unroutable host: the layered search accepts it and every LLM call
+    fails open (no network needed)."""
+    home = tmp_path / "home"
+    (home / ".vemoizer").mkdir(parents=True, exist_ok=True)
+    (home / ".vemoizer" / "config.toml").write_text(
+        "[llm]\n"
+        'base_url = "https://llm.invalid/v1"\n'
+        'model = "no-network"\n'
+        'api_key_env = "K"\n'
+        "timeout_seconds = 0.05\n",
+        encoding="utf-8",
+    )
+
+
+def test_pipeline_passes_real_vad_slices_to_decode_meeting(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Case 1 (VAD found real speech, even full-file coverage): the spy
+    decode_meeting receives the explicit (start, end) sample pairs —
+    a genuine single full-recording slice is NOT mistaken for the
+    "VAD found nothing" fallback."""
+    seen = _run_real_meeting_pipeline(
+        monkeypatch,
+        tmp_path,
+        vad_patch=lambda m: m.setattr(
+            vemoizer_pipeline,
+            "vad_segments",
+            lambda a, mod: [SpeechSegment(160, 16000)],
+        ),
+    )
+    assert len(seen["calls"]) == 1
+    assert seen["calls"][0]["vad_slices"] == [(160, 16000)]
+
+
+def test_pipeline_passes_empty_slice_list_when_vad_finds_no_speech(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Case 2 (VAD ran, zero speech spans): the explicit signal is the
+    EMPTY LIST, not None — every window is non-speech, no RMS fallback."""
+    seen = _run_real_meeting_pipeline(
+        monkeypatch,
+        tmp_path,
+        vad_patch=lambda m: m.setattr(
+            vemoizer_pipeline, "vad_segments", lambda a, mod: []
+        ),
+    )
+    assert len(seen["calls"]) == 1
+    assert seen["calls"][0]["vad_slices"] is None
+
+
+def test_pipeline_passes_none_when_vad_unavailable(monkeypatch, tmp_path: Path) -> None:
+    """Case 3 (VAD unavailable — the full-file slice the pipeline
+    substitutes is NOT VAD output): the explicit signal is None, so the
+    frame-RMS fallback gate decides inside the transcriber."""
+
+    def broken_vad(a, m):
+        raise RuntimeError("onnx session init failed")
+
+    seen = _run_real_meeting_pipeline(
+        monkeypatch,
+        tmp_path,
+        vad_patch=lambda m: m.setattr(vemoizer_pipeline, "vad_segments", broken_vad),
+    )
+    assert len(seen["calls"]) == 1
+    assert seen["calls"][0]["vad_slices"] is None
