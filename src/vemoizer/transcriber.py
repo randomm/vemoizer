@@ -52,6 +52,11 @@ class TranscriptionResult(_TranscriptionBase, total=False):
     # tuple — the window's time range on the recording timeline. Present
     # only when at least one window was lost; absent on a clean decode.
     # Consumed only by the quality report; backends may omit it.
+    #
+    # Unlike language_summary (present-on-clean), lost_windows is
+    # absent-on-clean: the key is omitted when no window was lost, so
+    # callers should use .get('lost_windows') or isinstance checks rather
+    # than assuming its presence.
     lost_windows: list[tuple[float, float]]
     transcribe_time: float
     audio_duration: float

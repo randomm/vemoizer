@@ -223,9 +223,21 @@ def _assemble(
     # Lost windows (issue #152): decode A's whisper windows that contained
     # speech but returned 0 segments even after the prompt-free retry.
     # Carried onto the run dict so the quality report can render them.
+    # Entries are normalized to (int|float, int|float) pairs at the boundary
+    # so a malformed backend value (a list, a string, a triple) is dropped
+    # rather than passing through to the report, where the tuple unpack would
+    # raise.
     lost_windows = base.get("lost_windows")
     if isinstance(lost_windows, list) and lost_windows:
-        result["lost_windows"] = lost_windows
+        normalized = [
+            p
+            for p in lost_windows
+            if isinstance(p, tuple)
+            and len(p) == 2
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in p)
+        ]
+        if normalized:
+            result["lost_windows"] = normalized
     if segments:
         result["paragraphs"] = tidy_paragraphs(paragraphs(segments))
     return result

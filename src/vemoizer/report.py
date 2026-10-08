@@ -245,16 +245,28 @@ def render_report(
     # -- Lost windows (issue #152) ------------------------------------
     # Windows that VAD/energy flagged as speech but returned 0 segments
     # even after the prompt-free retry. Rendered so a gap is never silent.
+    # Entries are validated to (int|float, int|float) pairs — a malformed
+    # entry (a list, a string, a triple) degrades the report to nothing
+    # rather than raising, preserving render_report's fail-open contract.
     lost = transcript.get("lost_windows")
     if isinstance(lost, list) and lost:
-        label = {"fi": "Häviäkkäiset ikkunat", "en": "Lost windows"}[lang]
-        window_lines = [
-            f"- {_clock_or_none(s) or '?'} → {_clock_or_none(e) or '?'}"
-            for s, e in lost
+        valid_pairs = [
+            p
+            for p in lost
+            if isinstance(p, tuple)
+            and len(p) == 2
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in p)
         ]
-        sections.append(
-            f"{label}: {len(lost)} (puhetta, ei tekstiä)\n" + "\n".join(window_lines)
-        )
+        if valid_pairs:
+            label = {"fi": "Häviäkkäiset ikkunat", "en": "Lost windows"}[lang]
+            window_lines = [
+                f"- {_clock_or_none(s) or '?'} → {_clock_or_none(e) or '?'}"
+                for s, e in valid_pairs
+            ]
+            sections.append(
+                f"{label}: {len(valid_pairs)} (puhetta, ei tekstiä)\n"
+                + "\n".join(window_lines)
+            )
 
     # -- Warnings -------------------------------------------------------
     warnings = transcript.get("warnings")

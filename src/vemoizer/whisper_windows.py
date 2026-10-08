@@ -18,12 +18,23 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
+from collections.abc import Callable
 from typing import Any
 
+import numpy as np
+
 from .echo_filter import filter_echo_segments
+from .lang_filter import filter_language_lines
 from .transcriber import TranscriptionResult
 
 logger = logging.getLogger(__name__)
+
+#: Peak absolute amplitude below which a 0-segment window is treated as
+#: genuinely silent (skip the prompt-free retry, issue #152) rather than as
+#: a lost window. A deliberately crude energy heuristic — it is a fail-safe
+#: gate, not a speech detector: the real presence/absence of speech comes
+#: from whisper's own decode (segments) and from the VAD slices downstream.
+SILENT_PEAK_THRESHOLD = 1e-6
 
 
 def process_window_raws(
@@ -118,3 +129,82 @@ def process_window_raws(
         result["language_summary"] = ", ".join(parts)
 
     return result
+
+
+def retry_lost_windows(
+    raws: list[dict[str, Any]],
+    audio: np.ndarray,
+    transcribe_fn: Callable[[np.ndarray, dict[str, Any]], Any],
+    *,
+    window_frames: int,
+    window_seconds: float,
+) -> list[tuple[float, float]]:
+    """Prompt-free fail-safe retry for 0-segment windows with speech energy.
+
+    A window that the energy check (peak amplitude vs
+    :data:`SILENT_PEAK_THRESHOLD`) says contains speech but that returned
+    0 segments is re-decoded once via *transcribe_fn* without the glossary
+    prompt. The prompt is the remaining suspect: whisper can echo the
+    glossary instead of transcribing, and the echo filter (post-decode) would
+    then drop the only segment. A retry that returns None (a real mlx-whisper
+    failure) or 0 segments records the window as lost and fails open. Returns
+    the list of ``(start_s, end_s)`` tuples for windows that were lost.
+    """
+    lost_windows: list[tuple[float, float]] = []
+    for index, raw in enumerate(raws):
+        if raw.get("segments"):
+            continue
+        offset_samples = index * window_frames
+        window_audio = audio[offset_samples : offset_samples + window_frames]
+        if not _window_has_speech(window_audio):
+            # Genuinely silent window: nothing to retry, not a loss.
+            continue
+        offset_s = index * window_seconds
+        logger.warning(
+            "whisper window %d (offset %.0fs) returned no segments; "
+            "retrying without glossary prompt",
+            index,
+            offset_s,
+        )
+        # The retry is a second decode call, so it honors the same stdout
+        # contract as the main window loop: the per-window "Detected
+        # language: X" line is filtered. The progress shim is intentionally
+        # NOT re-entered — it tracks the main window loop one window at a
+        # time, and a retry re-marking the same window would regress the
+        # bar; the retry is a rare fail-safe path so the cosmetic impact of
+        # skipping it is negligible.
+        with filter_language_lines():
+            retry_raw = transcribe_fn(window_audio, {"initial_prompt": None})
+        if retry_raw is None:
+            # A None from mlx-whisper is a real failure of the retry, not a
+            # silent no-op: the window had confirmed speech energy, so record
+            # it as lost (fail-open: the transcript is incomplete but the run
+            # continues; never silent). mlx-whisper returns None for a failed
+            # decode (e.g. an empty/no-speech classification), not an
+            # exception — the log explains the mechanism, not just the
+            # observation.
+            logger.error(
+                "retry for window %d (offset %.0fs) returned None "
+                "(mlx-whisper decode failure); recording as lost",
+                index,
+                offset_s,
+            )
+            lost_windows.append((offset_s, offset_s + window_seconds))
+            continue
+        raws[index] = retry_raw
+        if not retry_raw.get("segments"):
+            lost_windows.append((offset_s, offset_s + window_seconds))
+    return lost_windows
+
+
+def _window_has_speech(window_audio: np.ndarray) -> bool:
+    """True if a 0-segment window carries audible signal.
+
+    Peak-amplitude test against :data:`SILENT_PEAK_THRESHOLD`. Only used as
+    the fail-safe gate for the prompt-free retry (issue #152): it decides
+    whether an empty window is "nothing to decode" or a candidate for retry
+    — never as a speech detector in its own right.
+    """
+    if len(window_audio) == 0:
+        return False
+    return float(np.abs(window_audio).max()) >= SILENT_PEAK_THRESHOLD
