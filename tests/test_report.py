@@ -476,3 +476,56 @@ def test_build_quality_report_includes_language_summary() -> None:
     t = _transcript(language_summary="fi 10/10")
     result = build_quality_report(t)
     assert "Kielet: fi 10/10" in result
+
+
+# -- lost windows (issue #152) -------------------------------------------
+
+
+def test_lost_windows_rendered_in_report() -> None:
+    """A run dict with lost_windows gets a Häviäkkäiset ikkunat section."""
+    # (start_s, end_s) tuples: window 0–30s and 60–90s.
+    t = _transcript(lost_windows=[(0.0, 30.0), (60.0, 90.0)])
+    result = render_report(t)
+    assert "Häviäkkäiset ikkunat: 2" in result
+    assert "puhetta, ei tekstiä" in result
+    # The time range is rendered with clock format.
+    assert "[00:00:00]" in result
+    assert "[00:00:30]" in result
+
+
+def test_lost_windows_english_label() -> None:
+    """The lost windows section uses the English label in English mode."""
+    t = _transcript(lost_windows=[(30.0, 60.0)])
+    result = render_report(t, language="en")
+    assert "Lost windows: 1" in result
+
+
+def test_lost_windows_absent_omits_section() -> None:
+    """A run dict without lost_windows has no section."""
+    t = _transcript()
+    result = render_report(t)
+    assert "Häviäkkäiset ikkunat" not in result
+    assert "Lost windows" not in result
+
+
+def test_lost_windows_empty_list_omits_section() -> None:
+    """An empty lost_windows list omits the section (no false alarm)."""
+    t = _transcript(lost_windows=[])
+    result = render_report(t)
+    assert "Häviäkkäiset ikkunat" not in result
+
+
+def test_lost_windows_shares_clock_format() -> None:
+    """The lost windows section uses the same [hh:mm:ss] clock format."""
+    t = _transcript(lost_windows=[(180.0, 210.0)])  # 3–3.5 minutes
+    result = render_report(t)
+    assert "[00:03:00]" in result
+    assert "[00:03:30]" in result
+
+
+def test_build_quality_report_includes_lost_windows() -> None:
+    """build_quality_report (the fail-open wrapper) passes lost_windows
+    through to the rendered report."""
+    t = _transcript(lost_windows=[(60.0, 90.0)])
+    result = build_quality_report(t)
+    assert "Häviäkkäiset ikkunat: 1" in result

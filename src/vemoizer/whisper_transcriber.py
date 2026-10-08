@@ -175,13 +175,18 @@ class WhisperTranscriber:
         # transcribe() call, the glossary re-seeds at each boundary;
         # when the ladder still fails, the self-heal stage re-decodes the
         # wall with conditioning off via the kwargs override.
+        # hallucination_silence_threshold is intentionally ABSENT (issue #152):
+        # with 30 s per-call windows its silence heuristics are meaningless —
+        # the "surrounded by silence" test is always true by construction for
+        # a window that spans ~0–30 s — and it deletes real speech. Loops are
+        # handled by the temperature ladder, the compression and logprob
+        # thresholds, the #109 echo filter and self-heal.
         options: dict[str, Any] = {
             "temperature": (0.0, 0.2, 0.4),
             "condition_on_previous_text": True,
             "compression_ratio_threshold": 2.4,
             "logprob_threshold": -1.0,
             "no_speech_threshold": 0.6,
-            "hallucination_silence_threshold": 2.0,
             "initial_prompt": self._initial_prompt,
         }
         # verbose=False (issue #147): in mlx-whisper 0.4.3 this ENABLES the
@@ -245,6 +250,43 @@ class WhisperTranscriber:
                         "returned None"
                     )
                 raws.append(raw)
+
+        # Fail-safe retry (issue #152): a window that VAD/energy says
+        # contains speech but returned 0 segments is re-decoded once
+        # without the glossary prompt. The prompt is the remaining suspect:
+        # whisper can echo the glossary instead of transcribing, and the
+        # echo filter (post-decode) would then drop the only segment.
+        retry_options = {**options, "initial_prompt": None}
+        lost_windows: list[tuple[float, float]] = []
+        for index, raw in enumerate(raws):
+            if raw.get("segments"):
+                continue
+            # Skip genuinely silent windows (all-zero or near-zero energy).
+            offset_samples = index * window_frames
+            window_audio = audio[offset_samples : offset_samples + window_frames]
+            if len(window_audio) == 0 or float(np.abs(window_audio).max()) < 1e-6:
+                continue
+            logger.warning(
+                "whisper window %d (offset %.0fs) returned no segments; "
+                "retrying without glossary prompt",
+                index,
+                index * WINDOW_SECONDS,
+            )
+            retry_raw = self._mlx_whisper.transcribe(
+                window_audio,
+                path_or_hf_repo=self._model_path,
+                word_timestamps=True,
+                language=self._language,
+                task="transcribe",
+                **retry_options,
+            )
+            if retry_raw is None:
+                # Fail-open: keep the original empty result.
+                continue
+            raws[index] = retry_raw
+            if not retry_raw.get("segments"):
+                offset_s = index * WINDOW_SECONDS
+                lost_windows.append((offset_s, offset_s + WINDOW_SECONDS))
         transcribe_time = time.time() - start
         audio_duration = len(audio) / SAMPLE_RATE
 
@@ -255,6 +297,13 @@ class WhisperTranscriber:
             transcribe_time=transcribe_time,
             audio_duration=audio_duration,
         )
+        if lost_windows:
+            # Pipeline-internal signal for the quality report (issue #152):
+            # windows that contained speech but returned 0 segments even
+            # after the prompt-free retry. The TypedDict contract does not
+            # include this key; it is read by the pipeline, not by the
+            # Transcriber protocol.
+            result["lost_windows"] = lost_windows
         return result
 
     def cleanup(self) -> None:

@@ -242,6 +242,20 @@ def render_report(
         label = {"fi": "Kielet", "en": "Languages"}[lang]
         sections.append(f"{label}: {lang_summary}")
 
+    # -- Lost windows (issue #152) ------------------------------------
+    # Windows that VAD/energy flagged as speech but returned 0 segments
+    # even after the prompt-free retry. Rendered so a gap is never silent.
+    lost = transcript.get("lost_windows")
+    if isinstance(lost, list) and lost:
+        label = {"fi": "Häviäkkäiset ikkunat", "en": "Lost windows"}[lang]
+        window_lines = [
+            f"- {_clock_or_none(s) or '?'} → {_clock_or_none(e) or '?'}"
+            for s, e in lost
+        ]
+        sections.append(
+            f"{label}: {len(lost)} (puhetta, ei tekstiä)\n" + "\n".join(window_lines)
+        )
+
     # -- Warnings -------------------------------------------------------
     warnings = transcript.get("warnings")
     warnings = [w for w in warnings] if isinstance(warnings, list) else []

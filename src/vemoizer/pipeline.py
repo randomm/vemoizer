@@ -220,6 +220,12 @@ def _assemble(
     lang_summary = base.get("language_summary")
     if isinstance(lang_summary, str) and lang_summary:
         result["language_summary"] = lang_summary
+    # Lost windows (issue #152): decode A's whisper windows that contained
+    # speech but returned 0 segments even after the prompt-free retry.
+    # Carried onto the run dict so the quality report can render them.
+    lost_windows = base.get("lost_windows")
+    if isinstance(lost_windows, list) and lost_windows:
+        result["lost_windows"] = lost_windows
     if segments:
         result["paragraphs"] = tidy_paragraphs(paragraphs(segments))
     return result
