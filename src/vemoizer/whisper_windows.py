@@ -20,6 +20,7 @@ import logging
 import math
 from collections import Counter
 from collections.abc import Callable
+from numbers import Real
 from typing import Any
 
 import numpy as np
@@ -54,13 +55,12 @@ MIN_VAD_OVERLAP_S = 0.5
 #:   RMS; quiet real speech (whispered) sits around -35…-30 dBFS RMS, so
 #:   -40 dBFS separates the two with margin on both sides.
 #:
-#: - :data:`FALLBACK_MIN_SILENT_FRAMES` (3 consecutive silent frames = 90 ms
-#:   of continuous sub-threshold energy) is the hysteresis that stops a
-#:   1-frame glitch from counting as speech. Real speech at any level
-#:   sustains energy over many frames; a single transient click does not.
+#: The gate is a 5%-of-frames rule: a window is speech if at least 5% of its
+#:   30 ms frames have RMS ≥ :data:`FALLBACK_SILENT_RMS`. A 30 s window of
+#:   room-noise hiss has 0 active frames; a window with a 3 s quiet speech
+#:   burst (RMS ~-35 dBFS) has ~100 active frames out of 1000 (10%).
 FALLBACK_FRAME_SECONDS = 0.03
 FALLBACK_SILENT_RMS = 1e-2  # = -40 dBFS (frame considered "active")
-FALLBACK_MIN_SILENT_FRAMES = 3
 
 
 def process_window_raws(
@@ -162,10 +162,12 @@ def normalize_lost_windows(
 ) -> list[tuple[float, float]]:
     """Validate and normalize ``lost_windows`` entries.
 
-    Accepts a list of ``(start_s, end_s)`` pairs (tuples or lists, ints or
-    floats). Drops entries that are not 2-element pairs, have non-numeric
-    values, bool values, NaN/inf, negative values, or start > end. Returns
-    a list of ``tuple[float, float]``. Empty list on empty/invalid input.
+    Accepts a list of ``(start_s, end_s)`` pairs (tuples or lists, any
+    real numeric scalar — Python int/float, numpy float32/float64/
+    int64, …). Drops entries that are not 2-element pairs, have
+    non-numeric values, bool values (a bool is a Real, still excluded),
+    NaN/inf, negative values, or start > end. Returns a list of
+    ``tuple[float, float]``. Empty list on empty/invalid input.
     """
     if not isinstance(value, list):
         return []
@@ -175,7 +177,7 @@ def normalize_lost_windows(
             continue
         a, b = p
         for v in (a, b):
-            if isinstance(v, bool) or not isinstance(v, (int, float)):
+            if isinstance(v, bool) or not isinstance(v, Real):
                 break
             fv = float(v)
             if not math.isfinite(fv) or fv < 0:
@@ -208,22 +210,20 @@ def retry_lost_windows(
     open. Returns the list of ``(start_s, end_s)`` tuples for windows that
     were lost.
 
-    *vad_slices* are ``(start_sample, end_sample)`` pairs on the recording
-    timeline. When present and non-empty, a window is speech only if the
-    sum of its overlaps with the slices is ≥ :data:`MIN_VAD_OVERLAP_S` —
-    this is the real "was there speech here?" signal the seam has access to
-    (pipeline.py computes ``slices = _speech_slices(audio)`` BEFORE
-    ``decode_meeting``). When absent or empty (dictation/transcribe path,
-    tests, or a run where VAD found nothing and fell back to a single
-    full-recording slice — the latter still passes here as ``(0, len(audio))``
-    which is correct: if VAD found no speech, the fallback RMS gate is what
-    decides, so an all-coverage VAD slice is treated as "no VAD info").
+    *vad_slices* is an EXPLICIT signal from the seam (issue #152, fix pass
+    3): ``None`` means "no usable VAD information — the slice list the
+    caller holds is the full-recording fallback (VAD unavailable or VAD ran
+    and found no speech), so use the frame-RMS fallback gate"; a (possibly
+    empty) list means "the VAD ran and these are its real speech spans
+    (``(start_sample, end_sample)`` pairs on the recording timeline) —
+    trust them". Trusting the list is what makes a genuine short all-speech
+    recording work: its single slice covering (almost) the whole file is
+    real VAD output, not the "VAD found nothing" fallback shape, so a quiet
+    window (-45 dBFS, below the RMS floor) is still retried. An empty list
+    (the VAD ran and found zero speech spans) means no window is speech —
+    no retries, no losses.
     """
-    # use_vad is True when VAD slices were actually computed and represent
-    # real speech boundaries (not the "VAD found nothing" single full-file
-    # fallback). A single (0, len(audio)) slice is the fallback — in that
-    # case the RMS gate is the real signal.
-    use_vad = bool(vad_slices) and any((e - s) < len(audio) for s, e in vad_slices)
+    use_vad = vad_slices is not None
     lost_windows: list[tuple[float, float]] = []
     for index, raw in enumerate(raws):
         if raw.get("segments"):
@@ -319,12 +319,11 @@ def _window_has_speech(window_audio: np.ndarray) -> bool:
     """Frame-RMS fallback gate for a 0-segment window (issue #152).
 
     Splits *window_audio* into :data:`FALLBACK_FRAME_SECONDS` frames, computes
-    per-frame RMS, and returns True only if the number of consecutive
-    below-threshold frames stays below :data:`FALLBACK_MIN_SILENT_FRAMES` for
-    the entire window. A hiss-only window (room noise, peak ~5e-3, RMS
-    ~-55…-65 dBFS) fails the gate; quiet-but-real speech (RMS ~-35 dBFS)
-    passes. Used only when VAD slices are unavailable at the seam; never as
-    a general speech detector.
+    per-frame RMS, and returns True if at least 5% of frames have RMS ≥
+    :data:`FALLBACK_SILENT_RMS` (-40 dBFS). A hiss-only window (room noise,
+    RMS ~-55…-65 dBFS) has 0 active frames; a window with a 3 s quiet speech
+    burst (RMS ~-35 dBFS) has ~10% active frames. Used only when VAD slices
+    are unavailable at the seam; never as a general speech detector.
     """
     if len(window_audio) == 0:
         return False
@@ -341,10 +340,3 @@ def _window_has_speech(window_audio: np.ndarray) -> bool:
     # has ~100 active frames out of 1000 total (10%), well above the 5% threshold.
     active = rms >= FALLBACK_SILENT_RMS
     return bool(active.sum() / len(rms) >= 0.05)
-
-
-def _window_has_speech_legacy(window_audio: np.ndarray) -> bool:
-    """Legacy peak-amplitude rule (for break-and-fail testing only)."""
-    if len(window_audio) == 0:
-        return False
-    return float(np.abs(window_audio).max()) >= 1e-6
