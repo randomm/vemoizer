@@ -174,8 +174,49 @@ def test_parse_loudnorm_json_accepts_true_peak_above_full_scale() -> None:
     m = parse_loudnorm_json(block)
     assert m is not None
     assert m.input_tp == pytest.approx(0.03)
-    # The upper bound still rejects an absurd peak (about +20 dBTP is 10x FS).
     assert parse_loudnorm_json(block.replace("0.03", "30.0")) is None
+
+
+@pytest.mark.parametrize("tp", ["0.03", "6.0"])
+def test_true_peak_cap_accepts_up_to_plus_6_dbtp(tp: str) -> None:
+    block = _block_with(input_tp=tp)
+    m = parse_loudnorm_json(block)
+    assert m is not None
+    assert m.input_tp == pytest.approx(float(tp))
+
+
+@pytest.mark.parametrize("tp", ["6.01", "30.0", "nan", "inf", "-inf"])
+def test_true_peak_cap_rejects_above_6_dbtp_and_non_finite(tp: str) -> None:
+    assert parse_loudnorm_json(_block_with(input_tp=tp)) is None
+
+
+def test_other_loudnorm_bounds_are_unchanged() -> None:
+    assert parse_loudnorm_json(_block_with(input_i="0.5")) is None
+    assert parse_loudnorm_json(_block_with(input_i="-100.5")) is None
+    assert parse_loudnorm_json(_block_with(input_tp="-100.5")) is None
+    assert parse_loudnorm_json(_block_with(input_lra="100.5")) is None
+    assert parse_loudnorm_json(_block_with(input_lra="-0.5")) is None
+    assert parse_loudnorm_json(_block_with(input_thresh="100.5")) is None
+    assert parse_loudnorm_json(_block_with(offset="100.5")) is None
+    assert parse_loudnorm_json(_block_with(input_i="nan")) is None
+
+
+def _block_with(
+    *,
+    input_i: str = "-18.00",
+    input_tp: str = "0.03",
+    input_lra: str = "2.80",
+    input_thresh: str = "-27.81",
+    offset: str = "0.82",
+) -> str:
+    return (
+        "[Parsed_loudnorm_0 @ 0x0]\n{\n"
+        f'\t"input_i" : "{input_i}",\n'
+        f'\t"input_tp" : "{input_tp}",\n'
+        f'\t"input_lra" : "{input_lra}",\n'
+        f'\t"input_thresh" : "{input_thresh}",\n'
+        f'\t"target_offset" : "{offset}"\n}}\n'
+    )
 
 
 def test_parse_loudnorm_json_malformed_returns_none() -> None:

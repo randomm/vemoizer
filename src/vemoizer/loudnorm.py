@@ -86,10 +86,13 @@ _MEASURE_CACHE: dict[tuple[str, int, int], LoudnormMeasurement | None] = {}
 _MIN_I = -100.0
 _MAX_I = 0.0
 _MIN_TP = -100.0
-# A true peak above 0 dBTP is normal on hot recordings (inter-sample overs);
-# the upper bound only rejects absurd values. A positive peak implies an
-# attenuation, so it cannot cause an unbounded gain.
-_MAX_TP = 20.0
+# A sanity cap, NOT a limiter. Decoded clips sit in [-1, 1] before inter-sample
+# overshoot, and that overshoot is a fraction of a dB (the real eval clip
+# measures +0.03 dBTP). +6 dBTP is about 2x full scale: a value above it means
+# a broken measurement, which is treated as no measurement. The cap does not
+# bound the gain: ffmpeg 9.0.1 linear pass 2 ignores measured_TP for the gain,
+# which is bounded by the I/LRA/thresh/offset bounds below.
+_MAX_TP = 6.0
 _MIN_LRA = 0.0
 _MAX_LRA = 100.0
 _MAX_ABS_THRESH = 100.0
