@@ -865,7 +865,7 @@ Exit codes: `0` on success; `2` for usage errors (unknown or empty profile,
 failure, loudnorm measurement or pass-2 failure, backend crash, empty clean
 transcript, I/O error). Any other exception is a bug and exits non-zero with a
 traceback. A known exit `134` after a successful table is the Metal teardown
-quirk, not a result. Seeds derive from base seed 154, the profile and the clip
+quirk, not a result. A SIGTERM exits `143` and a SIGINT exits `130`, both after the scratch directory is removed and with no traceback. Seeds derive from base seed 154, the profile and the clip
 stem (`src/vemoizer/degrade_signal.py`).
 
 ## Configuration
