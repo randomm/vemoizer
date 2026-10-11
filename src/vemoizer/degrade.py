@@ -145,7 +145,9 @@ def _score(directory: Path, transcribe: Callable[[Path], str], *, clean: bool) -
     hyps: dict[str, str] = {}
     try:
         mean = run_eval(directory, recording, hyps)[AGGREGATE_KEY]
-    except Exception as exc:
+    except OSError as exc:
+        # Only I/O while reading the clips is an expected failure here; any
+        # other exception from the scoring path is a bug and must raise.
         raise DegradeError(
             f"scoring failed on {directory.name} ({type(exc).__name__}): {exc}"
         ) from exc

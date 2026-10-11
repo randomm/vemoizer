@@ -14,8 +14,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from typer.testing import CliRunner
+from typer.testing import CliRunner, Result
 
+import vemoizer.degrade as degrade
 import vemoizer.eval_cli as eval_cli
 import vemoizer.ingest as ingest
 import vemoizer.loudnorm as loudnorm
@@ -222,3 +223,96 @@ def test_unknown_profile_refuses_before_writing_variants(tmp_path: Path) -> None
             corpus, "", {"fake": lambda wav: "hello"}, tmp_path / "w", _ingest
         )
     assert not (tmp_path / "w").exists()
+
+
+def _cli(corpus: Path, *extra: str) -> Result:
+    from vemoizer.cli import app
+
+    args = ["eval", "--corpus", str(corpus), "--backend", "fake", "--degrade", "far"]
+    return CliRunner().invoke(app, [*args, *extra])
+
+
+def test_scoring_bug_is_not_relabelled_as_degrade_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    corpus = _corpus(tmp_path)
+
+    def buggy_run_eval(*args: object, **kwargs: object) -> dict[str, float]:
+        raise ValueError("scoring bug")
+
+    monkeypatch.setattr(degrade, "run_eval", buggy_run_eval)
+    with pytest.raises(ValueError, match="scoring bug"):
+        run_degrade_eval(
+            corpus, "noisy", {"fake": lambda wav: "hello"}, tmp_path / "w", _ingest
+        )
+
+
+def test_cli_lets_programming_errors_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    corpus = _corpus(tmp_path)
+    monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
+
+    def bug(*args: object, **kwargs: object) -> list[object]:
+        raise ValueError("programming bug")
+
+    monkeypatch.setattr(degrade, "run_degrade_eval", bug)
+    result = _cli(corpus)
+    assert isinstance(result.exception, ValueError)
+
+
+@pytest.mark.parametrize(
+    "flag", ["--check", "--update-baseline", "--agreement", "--llm"]
+)
+def test_cli_refuses_gate_flags_with_degrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str
+) -> None:
+    corpus = _corpus(tmp_path)
+    monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
+    assert _cli(corpus, flag).exit_code == 2
+
+
+def test_cli_exits_2_without_traceback_when_ffmpeg_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    corpus = _corpus(tmp_path)
+    monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
+
+    def no_ffmpeg(path: Path) -> np.ndarray:
+        raise IngestError("ffmpeg not found on PATH")
+
+    monkeypatch.setattr(ingest, "ingest_audio", no_ffmpeg)
+    result = _cli(corpus)
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+
+
+def test_cli_exits_2_without_traceback_when_variant_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    corpus = _corpus(tmp_path)
+    monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
+    monkeypatch.setattr(ingest, "ingest_audio", _ingest)
+
+    def disk_full(path: Path, x: np.ndarray) -> Path:
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(degrade, "write_wav", disk_full)
+    result = _cli(corpus)
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+
+
+def test_cli_exits_2_without_traceback_when_backend_crashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    corpus = _corpus(tmp_path)
+    monkeypatch.setattr(ingest, "ingest_audio", _ingest)
+
+    def model_missing(wav: Path) -> str:
+        raise RuntimeError("model not cached")
+
+    monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": model_missing})
+    result = _cli(corpus)
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)

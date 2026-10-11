@@ -825,11 +825,20 @@ the per-backend WER output. It does not affect the baseline file or the
 <far|noisy|far-noisy>` scores each backend on seeded degraded copies of the
 committed clips, plain and with `loudnorm`. It is informational and never
 gated: it does not read or write `wer_baseline.json`, and changing a default
-is a separate decision. Degraded and loudnorm variants are 16-bit PCM WAVs
-re-decoded by the backends. This is an eval-only exception to the float32
-boundary (invariant #6 is unchanged for the pipeline; see AGENTS.md). Flag
-conflicts, the failure policy and the seed derivation are documented in
-`src/vemoizer/eval_cli.py` and `src/vemoizer/degrade.py`.
+is a separate decision. Variants are 16-bit PCM WAVs in a temp directory
+(removed afterwards) and are re-decoded by the backends: an eval-only
+exception to the float32 boundary (invariant #6 is unchanged for the
+pipeline). The degraded clip is the source file of the loudnorm arm, an
+ingest-time input; no pipeline stage re-reads a file.
+
+Exit codes: `0` on success; `2` for usage errors (unknown or empty profile,
+`--check`, `--update-baseline`, `--agreement` or `--llm` combined with
+`--degrade`) and for expected failures (unpaired clip, ffmpeg or decode
+failure, loudnorm measurement or pass-2 failure, backend crash, empty clean
+transcript, I/O error). Any other exception is a bug and exits non-zero with a
+traceback. A known exit `134` after a successful table is the Metal teardown
+quirk, not a result. Seeds derive from base seed 154, the profile and the clip
+stem (`src/vemoizer/degrade_signal.py`).
 
 ## Configuration
 

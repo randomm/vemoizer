@@ -260,7 +260,7 @@ def _emit_degrade(corpus: Path, names: list[str], profile: str) -> None:
         rows = run_degrade_eval(
             corpus, profile, {n: BACKENDS[n] for n in names}, work, ingest_audio
         )
-    except (DegradeError, IngestError, OSError, ValueError) as exc:
+    except (DegradeError, IngestError, OSError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from None
     finally:
