@@ -24,6 +24,7 @@ from vemoizer.audio_contract import SAMPLE_RATE, write_wav
 from vemoizer.degrade import (
     DegradeError,
     build_variants,
+    gain_corpus,
     loudnorm_corpus,
     run_degrade_eval,
 )
@@ -49,6 +50,10 @@ def _ingest(path: Path) -> np.ndarray:
     with wave.open(str(path), "rb") as w:
         raw = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
     return raw.astype(np.float32) / 32767.0
+
+
+def _rms(x: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(x**2)))
 
 
 def _no_measurement(path: Path) -> None:
@@ -82,6 +87,33 @@ def test_build_variants_writes_only_into_work_dir(tmp_path: Path) -> None:
     assert all(p.is_file() for p in variants)
     txt = tmp_path / "work" / "far" / "a.txt"
     assert txt.read_text(encoding="utf-8") == "hello a\n"
+
+
+def test_gain_control_restores_clean_rms(tmp_path: Path) -> None:
+    corpus = _corpus(tmp_path)
+    build_variants(corpus, "far", tmp_path / "work", _ingest)
+    out = gain_corpus(corpus, tmp_path / "work" / "far", tmp_path / "gain", _ingest)
+    clean = _ingest(corpus / "a.wav").astype(np.float64)
+    got = _ingest(out / "a.wav").astype(np.float64)
+    assert _rms(got) == pytest.approx(_rms(clean), rel=0.01)
+    assert (out / "a.txt").read_text(encoding="utf-8") == "hello a\n"
+
+
+def test_cli_prints_reproducibility_header_and_gain_column(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    corpus = _corpus(tmp_path)
+    monkeypatch.setattr(ingest, "ingest_audio", _ingest)
+    monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
+    result = _cli(corpus)
+    assert result.exit_code == 0
+    assert "base_seed=154" in result.output
+    assert "ffmpeg=" in result.output
+    assert (
+        "parakeet=mlx-community/parakeet-tdt-0.6b-v3@"
+        "ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15" in result.output
+    )
+    assert "profile\tbackend\tplain\tgain\tloudnorm\tdelta" in result.output
 
 
 def test_unpaired_wav_refuses_instead_of_skipping(tmp_path: Path) -> None:
@@ -194,6 +226,35 @@ def test_cli_rejects_llm_with_degrade(
         ],
     )
     assert result.exit_code == 2
+
+
+def test_clean_plain_and_clean_loudnorm_consume_identical_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    corpus = _corpus(tmp_path)
+    plain_bytes: dict[str, bytes] = {}
+    loudnorm_input_bytes: dict[str, bytes] = {}
+
+    def measure(path: Path) -> LoudnormMeasurement:
+        p = Path(path)
+        if p.parent.name == "clean":
+            loudnorm_input_bytes[p.name] = p.read_bytes()
+        return _MEAS
+
+    def plain(wav: Path) -> str:
+        if wav.parent.name == "clean":
+            plain_bytes[wav.name] = wav.read_bytes()
+        return "hello"
+
+    monkeypatch.setattr(loudnorm, "_measurement_for", measure)
+    run_degrade_eval(corpus, "far", {"fake": plain}, tmp_path / "work", _ingest)
+
+    assert sorted(plain_bytes) == ["a.wav", "b.wav"]
+    assert plain_bytes == loudnorm_input_bytes
+    # Both arms see the 16-bit write path of the decoded clip, not the
+    # committed file's bytes.
+    ref = write_wav(tmp_path / "ref.wav", _ingest(corpus / "a.wav"))
+    assert plain_bytes["a.wav"] == ref.read_bytes()
 
 
 def test_empty_clean_transcript_refuses_instead_of_scoring(tmp_path: Path) -> None:

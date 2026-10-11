@@ -251,12 +251,18 @@ def _emit_degrade(corpus: Path, names: list[str], profile: str) -> None:
     refusals (DegradeError), ingest/loudnorm failures, and I/O or decode
     errors while writing or reading the variants.
     """
-    from vemoizer.degrade import DegradeError, format_table, run_degrade_eval
-    from vemoizer.degrade_signal import BASE_SEED, NOISE_SNR_DB
+    from vemoizer.degrade import (
+        DegradeError,
+        format_table,
+        run_degrade_eval,
+        run_header,
+    )
     from vemoizer.ingest import IngestError, ingest_audio
 
-    work = Path(tempfile.mkdtemp(prefix="vemoizer-degrade-"))
+    work: Path | None = None
     try:
+        # Inside the try: an OSError creating the scratch dir is exit 2 too.
+        work = Path(tempfile.mkdtemp(prefix="vemoizer-degrade-"))
         rows = run_degrade_eval(
             corpus, profile, {n: BACKENDS[n] for n in names}, work, ingest_audio
         )
@@ -264,12 +270,9 @@ def _emit_degrade(corpus: Path, names: list[str], profile: str) -> None:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from None
     finally:
-        shutil.rmtree(work, ignore_errors=True)
-    typer.echo(
-        f"# degrade={profile} base_seed={BASE_SEED} snr_db={NOISE_SNR_DB} "
-        "(informational, not gated)"
-    )
-    for line in format_table(rows):
+        if work is not None:
+            shutil.rmtree(work, ignore_errors=True)
+    for line in [*run_header(profile), *format_table(rows)]:
         typer.echo(line)
 
 

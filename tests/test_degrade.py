@@ -96,11 +96,14 @@ def test_write_wav_is_16k_mono_16bit(tmp_path: Path) -> None:
 
 def test_format_table_reports_delta_and_clean_reference() -> None:
     lines = format_table(
-        [Row("clean", "parakeet", 0.05, 0.06), Row("far", "parakeet", 0.30, 0.20)]
+        [
+            Row("clean", "parakeet", 0.05, None, 0.06),
+            Row("far", "parakeet", 0.30, 0.25, 0.20),
+        ]
     )
-    assert lines[0] == "profile\tbackend\tplain\tloudnorm\tdelta"
-    assert lines[1] == "clean\tparakeet\t0.0500\t0.0600\t+0.0100"
-    assert lines[2] == "far\tparakeet\t0.3000\t0.2000\t-0.1000"
+    assert lines[0] == "profile\tbackend\tplain\tgain\tloudnorm\tdelta"
+    assert lines[1] == "clean\tparakeet\t0.0500\t-\t0.0600\t+0.0100"
+    assert lines[2] == "far\tparakeet\t0.3000\t0.2500\t0.2000\t-0.1000"
 
 
 def test_noise_is_uncorrelated_with_reverb_excitation() -> None:

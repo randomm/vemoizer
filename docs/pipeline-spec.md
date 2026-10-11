@@ -831,6 +831,21 @@ exception to the float32 boundary (invariant #6 is unchanged for the
 pipeline). The degraded clip is the source file of the loudnorm arm, an
 ingest-time input; no pipeline stage re-reads a file.
 
+Each profile prints four arms per backend: `plain` (the degraded clip as
+decoded), `gain` (the degraded clip scaled to its clean RMS, no loudnorm: the
+level-only control), `loudnorm`, and `delta` (`loudnorm - plain`). The `gain`
+arm isolates level restoration: most of loudnorm's effect on the `far`
+profile is the 20 dB level loss, and `loudnorm - gain` is the only part that
+can be attributed to loudnorm's own processing. Nothing here measures
+dereverberation by itself. The clean reference row is the committed clips
+passed through the same 16-bit write as every degraded arm, so its delta is
+comparable with the degraded rows; its plain number can differ slightly from
+the gate's per-clip WER for the same clips. The header prints the base seed
+and the per-clip seed rule, the profile steps in order (`far->noisy` for
+`far-noisy`), the profile parameters (attenuation dB, reverb T60 and length,
+SNR dB, white noise), the ffmpeg version and every pinned model as
+`name=repo@revision` (read from `src/vemoizer/models.py`).
+
 Exit codes: `0` on success; `2` for usage errors (unknown or empty profile,
 `--check`, `--update-baseline`, `--agreement` or `--llm` combined with
 `--degrade`) and for expected failures (unpaired clip, ffmpeg or decode

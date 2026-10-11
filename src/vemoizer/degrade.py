@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
@@ -33,8 +34,19 @@ import numpy as np
 
 from vemoizer import loudnorm
 from vemoizer.audio_contract import write_wav
-from vemoizer.degrade_signal import PROFILES, clip_seed, degrade
+from vemoizer.degrade_signal import (
+    ATTENUATION_DB,
+    BASE_SEED,
+    NOISE_SNR_DB,
+    PROFILES,
+    REVERB_LEN_S,
+    REVERB_T60_S,
+    STEPS,
+    clip_seed,
+    degrade,
+)
 from vemoizer.eval_harness import AGGREGATE_KEY, run_eval
+from vemoizer.models import MODELS
 
 logger = logging.getLogger(__name__)
 
@@ -47,11 +59,15 @@ class DegradeError(RuntimeError):
 
 
 class Row(NamedTuple):
-    """One result: a backend's WER plain and with loudnorm on *profile*."""
+    """One result: a backend's WER plain, level-only and with loudnorm.
+
+    ``gain_wer`` is ``None`` on the clean reference, where no control applies.
+    """
 
     profile: str
     backend: str
     plain_wer: float
+    gain_wer: float | None
     loudnorm_wer: float
 
 
@@ -123,6 +139,49 @@ def loudnorm_corpus(src: Path, out_dir: Path) -> Path:
     return out_dir
 
 
+def requantise_corpus(
+    corpus: Path, out_dir: Path, decode: Callable[[Path], np.ndarray]
+) -> Path:
+    """Mirror *corpus* with every clip passed through the 16-bit write path.
+
+    The clean reference goes through the same :func:`write_wav` as the
+    degraded arms, so no arm gets a quantisation the others do not. The
+    committed fixtures are 16-bit already, but ``decode`` -> ``write_wav`` is
+    not byte-identical to them (the rounding differs), so the copy is needed.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for wav, txt in _corpus_pairs(corpus):
+        write_wav(out_dir / wav.name, np.asarray(decode(wav), dtype=np.float32))
+        shutil.copyfile(txt, out_dir / txt.name)
+    return out_dir
+
+
+def _rms(x: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(x**2))) or 1.0
+
+
+def gain_corpus(
+    corpus: Path,
+    deg_dir: Path,
+    out_dir: Path,
+    decode: Callable[[Path], np.ndarray],
+) -> Path:
+    """Mirror *deg_dir* with each clip's RMS scaled to its clean counterpart.
+
+    The level-only control: a plain gain change with no loudnorm and no
+    dereverberation, so the table can separate level restoration from what
+    loudnorm adds. Clipped to [-1, 1] and written as 16-bit like the variants.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for wav, txt in _corpus_pairs(corpus):
+        clean = np.asarray(decode(wav), dtype=np.float64)
+        deg = np.asarray(decode(deg_dir / wav.name), dtype=np.float64)
+        scaled = np.clip(deg * (_rms(clean) / _rms(deg)), -1.0, 1.0)
+        write_wav(out_dir / wav.name, scaled.astype(np.float32))
+        shutil.copyfile(txt, out_dir / txt.name)
+    return out_dir
+
+
 def _score(directory: Path, transcribe: Callable[[Path], str], *, clean: bool) -> float:
     """Mean WER of *transcribe* over *directory*, refusing artefacts.
 
@@ -173,14 +232,15 @@ def run_degrade_eval(
     work_dir: Path,
     decode: Callable[[Path], np.ndarray],
 ) -> list[Row]:
-    """Score each backend plain and with loudnorm on *profile* variants.
+    """Score each backend plain, level-only and with loudnorm on *profile*.
 
     Returns the clean-reference rows followed by the degraded rows, for
-    :func:`format_table`. The clean reference uses the committed clips
-    unchanged; the degraded arm uses the seeded variants written under
-    *work_dir*. Each arm is walked by :func:`vemoizer.eval_harness.run_eval`
-    on a directory, so the plain and loudnorm numbers come from the same
-    harness as the gate.
+    :func:`format_table`. The clean reference is the committed clips passed
+    through the same 16-bit write as every degraded arm (see
+    :func:`requantise_corpus`); the degraded arm uses the seeded variants
+    written under *work_dir*. Each arm is walked by
+    :func:`vemoizer.eval_harness.run_eval` on a directory, so the plain and
+    loudnorm numbers come from the same harness as the gate.
     """
     if profile not in PROFILES:
         known = ", ".join(PROFILES)
@@ -189,29 +249,72 @@ def run_degrade_eval(
     if not degraded:
         raise DegradeError(f"no <stem>.wav + <stem>.txt pair in {corpus}")
     deg_dir = work_dir / profile
-    clean_ln = loudnorm_corpus(corpus, work_dir / "clean-loudnorm")
+    clean_dir = requantise_corpus(corpus, work_dir / "clean", decode)
+    clean_ln = loudnorm_corpus(clean_dir, work_dir / "clean-loudnorm")
     deg_ln = loudnorm_corpus(deg_dir, work_dir / f"{profile}-loudnorm")
+    gain_dir = gain_corpus(corpus, deg_dir, work_dir / f"{profile}-gain", decode)
     clean_rows: list[Row] = []
     degraded_rows: list[Row] = []
     for name, transcribe in backends.items():
-        clean_plain = _score(corpus, transcribe, clean=True)
+        clean_plain = _score(clean_dir, transcribe, clean=True)
         clean_norm = _score(clean_ln, transcribe, clean=True)
-        clean_rows.append(Row(CLEAN, name, clean_plain, clean_norm))
+        clean_rows.append(Row(CLEAN, name, clean_plain, None, clean_norm))
         plain = _score(deg_dir, transcribe, clean=False)
+        gain = _score(gain_dir, transcribe, clean=False)
         norm = _score(deg_ln, transcribe, clean=False)
-        degraded_rows.append(Row(profile, name, plain, norm))
+        degraded_rows.append(Row(profile, name, plain, gain, norm))
     return [*clean_rows, *degraded_rows]
 
 
 def format_table(rows: list[Row]) -> list[str]:
     """Format the informational table.
 
-    The delta is ``loudnorm - plain``: negative means loudnorm helped.
+    ``gain`` is the level-only control (``-`` on clean rows). ``delta`` is
+    ``loudnorm - plain``: negative means loudnorm helped. ``loudnorm - gain``
+    is the part of the loudnorm effect that level restoration does not explain.
     """
-    lines = ["profile\tbackend\tplain\tloudnorm\tdelta"]
+    lines = ["profile\tbackend\tplain\tgain\tloudnorm\tdelta"]
     for r in rows:
+        gain = "-" if r.gain_wer is None else f"{r.gain_wer:.4f}"
         delta = r.loudnorm_wer - r.plain_wer
         lines.append(
-            f"{r.profile}\t{r.backend}\t{r.plain_wer:.4f}\t{r.loudnorm_wer:.4f}\t{delta:+.4f}"
+            f"{r.profile}\t{r.backend}\t{r.plain_wer:.4f}\t{gain}\t"
+            f"{r.loudnorm_wer:.4f}\t{delta:+.4f}"
         )
     return lines
+
+
+def _ffmpeg_version() -> str:
+    """First line of ``ffmpeg -version``, or ``unknown`` if it cannot be read."""
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    first = proc.stdout.splitlines()[:1]
+    return first[0] if first else "unknown"
+
+
+def run_header(profile: str) -> list[str]:
+    """Reproducibility header printed above the table (issue #154, decision 2).
+
+    Seeds, profile parameters, the ffmpeg version and every pinned model
+    revision, so a printed table can be traced to its inputs.
+    """
+    steps = "->".join(STEPS[profile])
+    models = " ".join(f"{m.name}={m.repo_id}@{m.revision}" for m in MODELS)
+    return [
+        f"# degrade={profile} base_seed={BASE_SEED} steps={steps} "
+        "seed=clip_seed(stem, profile) (src/vemoizer/degrade_signal.py)",
+        f"# attenuation_db={ATTENUATION_DB} reverb_t60_s={REVERB_T60_S} "
+        f"reverb_len_s={REVERB_LEN_S} snr_db={NOISE_SNR_DB} noise=white",
+        f"# ffmpeg={_ffmpeg_version()}",
+        f"# models {models}",
+        "# informational, not gated. WER is uncapped: values above 1.0 come from "
+        "insertions (e.g. repetition loops); check per-clip output before citing.",
+    ]
