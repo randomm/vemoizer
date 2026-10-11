@@ -171,9 +171,11 @@ def gain_corpus(
     The oracle level-only control: a plain gain change with no loudnorm and no
     dereverberation, so the table can separate level restoration from what
     loudnorm adds. The target RMS comes from the clean reference, which an
-    inference-time system does not have, so this arm is an upper bound on what
-    level alone can recover. Clipped to [-1, 1] and written as 16-bit like the
-    variants. *corpus* must be the requantised clean reference.
+    inference-time system does not have, so this is an oracle control, not an
+    inference-time method. An RMS match is not WER-optimal, so it is not a
+    proven upper bound on what level alone can recover. Clipped to [-1, 1]
+    and written as 16-bit like the variants. *corpus* must be the requantised
+    clean reference.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     for wav, txt in _corpus_pairs(corpus):
@@ -319,9 +321,11 @@ def run_header(profile: str) -> list[str]:
         f"# ffmpeg={_ffmpeg_version()}",
         f"# models {models}",
         "# gain=oracle level control: each clip scaled to its clean RMS (needs the "
-        "clean reference, so it is an upper bound, not an inference-time method).",
-        "# far: loudnorm's benefit is mostly level restoration; compare the gain "
-        "column with loudnorm. whisper not covered (parakeet/canary/consensus only).",
+        "clean reference, so it is an oracle, not an inference-time method; "
+        "not a proven upper bound).",
+        "# far: level restoration explains most of loudnorm's benefit for parakeet "
+        "and consensus, about half for canary; compare the gain column with "
+        "loudnorm. whisper not covered (parakeet/canary/consensus only).",
         "# informational, not gated: no default changes. WER is uncapped: values "
         "above 1.0 come from insertions (e.g. repetition loops); check per-clip "
         "output before citing.",

@@ -49,6 +49,7 @@ def test_header_labels_gain_as_oracle_control() -> None:
     text = "\n".join(run_header("far"))
     assert "gain=oracle level control" in text
     assert "clean RMS" in text
+    assert "not a proven upper bound" in text
 
 
 def test_header_says_loudnorm_far_benefit_is_mostly_level_restoration() -> None:

@@ -826,7 +826,8 @@ the per-backend WER output. It does not affect the baseline file or the
 committed clips, plain and with `loudnorm`. It is informational and never
 gated: it does not read or write `wer_baseline.json`, and changing a default
 is a separate decision. Variants are 16-bit PCM WAVs in a temp directory
-(removed afterwards) and are re-decoded by the backends: an eval-only
+(removed afterwards, on normal exit, SIGINT and SIGTERM) and are re-decoded by
+the backends: an eval-only
 exception to the float32 boundary (invariant #6 is unchanged for the
 pipeline). The degraded clip is the source file of the loudnorm arm, an
 ingest-time input; no pipeline stage re-reads a file.
@@ -834,17 +835,25 @@ ingest-time input; no pipeline stage re-reads a file.
 Each profile prints four arms per backend: `plain` (the degraded clip as
 decoded), `gain` (the degraded clip scaled to its clean RMS, no loudnorm: the
 oracle level-only control: its target RMS is read from the clean reference,
-which an inference-time system does not have, so it bounds what level alone
-can recover), `loudnorm`, and `delta` (`loudnorm - plain`). The `gain`
-arm isolates level restoration. The `far` profile loses 20 dB, so loudnorm's
-benefit there is expected to be mostly level restoration; compare `loudnorm`
-with `gain` to see how much is left for loudnorm's own processing. Nothing here
+which an inference-time system does not have, so it is an oracle, not a
+deployable method. An RMS match is not WER-optimal, so it is not a proven upper
+bound on what level alone can recover), `loudnorm`, and `delta` (`loudnorm -
+plain`). The `gain` arm isolates level restoration. The `far` profile loses
+20 dB: for parakeet and consensus, level restoration explains most of
+loudnorm's benefit; for canary it explains about half. Compare `loudnorm`
+with `gain` to see what loudnorm adds beyond level. Nothing here
 measures dereverberation by itself. Whisper (the meeting pipeline's decoder) is
 not covered: only parakeet, canary and consensus are scored. No default changes
 because of this table. The clean reference row is the committed clips
 passed through the same 16-bit write as every degraded arm, so its delta is
 comparable with the degraded rows; its plain number can differ slightly from
-the gate's per-clip WER for the same clips. The header prints the base seed
+the gate's per-clip WER for the same clips. Its `loudnorm` figure is measured
+on that 16-bit copy, not on the committed file, so the clean plain and clean
+loudnorm arms consume identical bytes; the copy differs from the committed
+fixtures by up to 1 LSB, so the clean row is deterministic run to run but not
+identical to `eval --check` output. An unusable `$TMPDIR` is skipped by
+Python's `tempfile` (the run falls back to the system temp directory and
+completes); only an unusable explicit `tempfile.tempdir` exits 2. The header prints the base seed
 and the per-clip seed rule, the profile steps in order (`far->noisy` for
 `far-noisy`), the profile parameters (attenuation dB, reverb T60 and length,
 SNR dB, white noise), the ffmpeg version and every pinned model as

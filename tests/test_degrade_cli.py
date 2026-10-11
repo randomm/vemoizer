@@ -9,6 +9,8 @@ temp-dir cleanup on interrupt.
 
 from __future__ import annotations
 
+import os
+import signal
 import tempfile
 import wave
 from pathlib import Path
@@ -110,12 +112,25 @@ def test_cli_prints_header_then_table_on_stdout(tmp_path: Path) -> None:
     assert any(line.startswith("# ffmpeg=") for line in lines[:table])
 
 
-def test_missing_tmpdir_exits_2_with_one_line(
+def test_unusable_tempdir_override_exits_2_with_one_line(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # An explicit tempfile.tempdir override is used as-is: no fallback.
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "missing"))
     result = _invoke(_corpus(tmp_path))
     _assert_one_line_exit_2(result)
+
+
+def test_unusable_tmpdir_env_var_falls_back_to_system_tempdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The real TMPDIR path: tempfile skips a missing $TMPDIR and falls back,
+    # so the run completes (documented in docs/pipeline-spec.md).
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "missing"))
+    result = _invoke(_corpus(tmp_path))
+    assert result.exit_code == 0
+    assert "Traceback" not in result.output
 
 
 def test_readonly_tmpdir_exits_2_with_one_line(
@@ -138,6 +153,24 @@ def _assert_one_line_exit_2(result: Result) -> None:
     lines = result.output.strip().splitlines()
     assert len(lines) == 1
     assert lines[0].startswith("error:")
+
+
+def test_sigterm_during_run_removes_temp_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[Path] = []
+
+    def terminated(*args: object, **kwargs: object) -> None:
+        work = args[3]
+        assert isinstance(work, Path)
+        seen.append(work)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    monkeypatch.setattr(degrade, "run_degrade_eval", terminated)
+    result = _invoke(_corpus(tmp_path))
+    assert result.exit_code == 143
+    assert len(seen) == 1
+    assert not seen[0].exists()
 
 
 def test_interrupt_after_creating_temp_dir_removes_it(

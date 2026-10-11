@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -241,6 +242,11 @@ def register_eval(app) -> None:
             _check_baseline(baseline, fingerprint, measured)
 
 
+def _exit_on_term(signum: int, frame: object) -> None:
+    """Turn SIGTERM into a normal exit so the scratch dir's ``finally`` runs."""
+    raise SystemExit(128 + signum)
+
+
 def _emit_degrade(corpus: Path, names: list[str], profile: str) -> None:
     """Print the informational far-field table (issue #154).
 
@@ -260,6 +266,7 @@ def _emit_degrade(corpus: Path, names: list[str], profile: str) -> None:
     from vemoizer.ingest import IngestError, ingest_audio
 
     work: Path | None = None
+    previous = signal.signal(signal.SIGTERM, _exit_on_term)
     try:
         # Inside the try: an OSError creating the scratch dir is exit 2 too.
         work = Path(tempfile.mkdtemp(prefix="vemoizer-degrade-"))
@@ -270,6 +277,7 @@ def _emit_degrade(corpus: Path, names: list[str], profile: str) -> None:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from None
     finally:
+        signal.signal(signal.SIGTERM, previous)
         if work is not None:
             shutil.rmtree(work, ignore_errors=True)
     for line in [*run_header(profile), *format_table(rows)]:
