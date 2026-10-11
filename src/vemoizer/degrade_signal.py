@@ -31,8 +31,13 @@ REVERB_T60_S = 0.4
 REVERB_LEN_S = 0.5
 NOISE_SNR_DB = 10.0
 
-#: Known profile names. ``far`` and ``noisy`` are the '-'-separated parts.
-PROFILES: tuple[str, ...] = ("far", "noisy", "far-noisy")
+#: Profile name -> ordered processing steps. Unknown names are rejected.
+STEPS: dict[str, tuple[str, ...]] = {
+    "far": ("far",),
+    "noisy": ("noisy",),
+    "far-noisy": ("far", "noisy"),
+}
+PROFILES: tuple[str, ...] = tuple(STEPS)
 
 
 def clip_seed(stem: str, profile: str) -> int:
@@ -54,6 +59,10 @@ def reverb(x: np.ndarray, seed: int) -> np.ndarray:
     convolution runs in the frequency domain (zero-padded, then truncated to
     ``len(x)``), which equals the direct linear convolution up to float
     rounding and costs O(N log N) instead of O(N * M).
+
+    Memory is several full-length float64 copies of the clip: this is sized
+    for the seconds-long corpus clips. Reusing it on long memos needs
+    block-wise overlap-add first.
     """
     rng = np.random.default_rng(seed)
     n = int(REVERB_LEN_S * SAMPLE_RATE)
@@ -76,7 +85,7 @@ def add_noise(x: np.ndarray, seed: int, snr_db: float = NOISE_SNR_DB) -> np.ndar
     # generator would make the noise a known copy of the room impulse response.
     rng = np.random.default_rng([seed, 1])
     xd = x.astype(np.float64)
-    sig_power = float(np.mean(xd**2)) if len(xd) else 0.0
+    sig_power = float(np.mean(xd**2))
     noise = rng.standard_normal(len(xd))
     noise_power = float(np.mean(noise**2)) or 1.0
     target = sig_power / (10.0 ** (snr_db / 10.0))
@@ -86,15 +95,12 @@ def add_noise(x: np.ndarray, seed: int, snr_db: float = NOISE_SNR_DB) -> np.ndar
 
 def degrade(x: np.ndarray, profile: str, seed: int) -> np.ndarray:
     """Apply *profile* to the float32 clip *x*. Unknown profiles raise."""
-    if profile not in PROFILES:
+    if profile not in STEPS:
         known = ", ".join(PROFILES)
         raise ValueError(f"unknown degrade profile {profile!r} (known: {known})")
-    parts = profile.split("-")
     if len(x) == 0:
         return np.asarray(x, dtype=np.float32)
     y = x
-    if "far" in parts:
-        y = reverb(attenuate(y), seed)
-    if "noisy" in parts:
-        y = add_noise(y, seed)
+    for step in STEPS[profile]:
+        y = reverb(attenuate(y), seed) if step == "far" else add_noise(y, seed)
     return y

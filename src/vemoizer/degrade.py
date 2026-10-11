@@ -8,6 +8,13 @@ table is evidence, and the default stays a separate decision.
 The signal arithmetic lives in :mod:`vemoizer.degrade_signal`; this module
 owns the corpus I/O, the loudnorm arm and the table.
 
+Failure policy: the benchmark never reports a number that is a measurement
+artefact. Any of these raises :class:`DegradeError` (the CLI maps it to exit
+2): an unpaired WAV, an unknown profile, no clip pairs, a crashing backend
+(never scored as WER 1.0), an empty clean transcript (a fail-open decode),
+or a scoring failure. Loudnorm runs in strict mode, so a measurement or
+pass-2 failure raises instead of falling back to the plain decode.
+
 Variants are written to a caller-supplied scratch directory and are never
 committed (AGENTS.md: audio fixtures stay small). Degraded and loudnorm
 variants are 16-bit PCM WAVs re-decoded by the backends; see the eval-only
@@ -18,7 +25,6 @@ from __future__ import annotations
 
 import logging
 import shutil
-import wave
 from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
@@ -26,24 +32,22 @@ from typing import NamedTuple
 import numpy as np
 
 from vemoizer import loudnorm
-from vemoizer.audio_contract import SAMPLE_RATE
-from vemoizer.degrade_signal import clip_seed, degrade
+from vemoizer.audio_contract import write_wav
+from vemoizer.degrade_signal import PROFILES, clip_seed, degrade
 from vemoizer.eval_harness import AGGREGATE_KEY, run_eval
 
 logger = logging.getLogger(__name__)
 
+#: Profile label of the committed clips, unchanged (the reference arm).
+CLEAN = "clean"
+
 
 class DegradeError(RuntimeError):
-    """The degradation benchmark cannot produce a trustworthy number.
-
-    Raised instead of reporting a score that would be a measurement artefact
-    (empty corpus, a crashing backend scored as WER 1.0, a loudnorm
-    fallback reported as a loudnorm result).
-    """
+    """The degradation benchmark cannot produce a trustworthy number."""
 
 
-class DegradeRow(NamedTuple):
-    """One degraded-arm result: a backend's WER plain and with loudnorm."""
+class Row(NamedTuple):
+    """One result: a backend's WER plain and with loudnorm on *profile*."""
 
     profile: str
     backend: str
@@ -51,39 +55,20 @@ class DegradeRow(NamedTuple):
     loudnorm_wer: float
 
 
-class CleanRow(NamedTuple):
-    """One clean-arm reference result: a backend's WER plain and with loudnorm."""
-
-    backend: str
-    plain_wer: float
-    loudnorm_wer: float
-
-
-def write_wav(path: Path, x: np.ndarray) -> Path:
-    """Write *x* as 16 kHz mono 16-bit PCM WAV (deterministic bytes)."""
-    pcm = (np.clip(x, -1.0, 1.0) * 32767.0).round().astype("<i2")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with wave.open(str(path), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(SAMPLE_RATE)
-        w.writeframes(pcm.tobytes())
-    return path
-
-
 def _corpus_pairs(corpus: Path) -> list[tuple[Path, Path]]:
     """Stem-paired ``(wav, txt)`` clips in *corpus*, sorted by name.
 
-    A WAV without a sibling ``.txt`` is skipped with a warning, so the clip
-    drops out of every arm and the operator can see it happened.
+    An unpaired WAV raises: every arm must score the same samples.
     """
     pairs: list[tuple[Path, Path]] = []
     for wav in sorted(corpus.glob("*.wav")):
         txt = wav.with_suffix(".txt")
-        if txt.is_file():
-            pairs.append((wav, txt))
-        else:
-            logger.warning("degrade: skipping %s (no reference .txt)", wav.name)
+        if not txt.is_file():
+            raise DegradeError(
+                f"{wav.name} has no reference .txt in {corpus}; refusing to "
+                "benchmark unpaired clips"
+            )
+        pairs.append((wav, txt))
     return pairs
 
 
@@ -117,18 +102,11 @@ def build_variants(
 def loudnorm_copy(wav: Path, out_dir: Path) -> Path:
     """Write the loudnorm-processed audio of *wav* into *out_dir*; return it.
 
-    Measured once and never fail-open: a pass-1 failure raises
-    :class:`DegradeError`, and a pass-2 ffmpeg failure raises
-    :class:`vemoizer.ingest.IngestError`. Either would otherwise be reported
-    as a loudnorm result that is really the plain decode.
+    Strict: a measurement failure or a pass-2 ffmpeg failure raises
+    :class:`vemoizer.ingest.IngestError` rather than reporting the plain
+    decode as a loudnorm result.
     """
-    measurement = loudnorm.measurement_for(wav)
-    if measurement is None:
-        raise DegradeError(
-            f"loudnorm measurement failed for {wav.name}; refusing to report "
-            "a plain-decode fallback as a loudnorm result"
-        )
-    audio = loudnorm.decode_measured(wav, measurement)
+    audio = loudnorm.preprocess_audio(wav, "loudnorm", strict=True)
     return write_wav(out_dir / wav.name, audio)
 
 
@@ -148,17 +126,33 @@ def loudnorm_corpus(src: Path, out_dir: Path) -> Path:
 def _score(directory: Path, transcribe: Callable[[Path], str], *, clean: bool) -> float:
     """Mean WER of *transcribe* over *directory*, refusing artefacts.
 
-    A crash raises :class:`DegradeError` (``on_error="raise"``, so it is
-    never scored as WER 1.0). On the clean arm an empty transcript is also
-    refused: committed speech always decodes to text, so an empty result is
-    a backend failing open. Degraded-arm emptiness is the measured effect
-    and is scored as-is.
+    ``run_eval`` scores a crashing sample as an empty hypothesis, so the
+    wrapper records the first backend exception and it is re-checked after
+    the run: a crash never becomes a WER. On the clean arm an empty
+    transcript is also refused: committed speech always decodes to text, so
+    an empty result is a backend failing open. Degraded-arm emptiness is the
+    measured effect and is scored as-is.
     """
+    failures: list[Exception] = []
+
+    def recording(wav: Path) -> str:
+        try:
+            return transcribe(wav)
+        except Exception as exc:
+            failures.append(exc)
+            raise
+
     hyps: dict[str, str] = {}
     try:
-        mean = run_eval(directory, transcribe, hyps, on_error="raise")[AGGREGATE_KEY]
+        mean = run_eval(directory, recording, hyps)[AGGREGATE_KEY]
     except Exception as exc:
-        raise DegradeError(f"backend failed on {directory.name}: {exc}") from exc
+        raise DegradeError(
+            f"scoring failed on {directory.name} ({type(exc).__name__}): {exc}"
+        ) from exc
+    if failures:
+        raise DegradeError(
+            f"backend failed on {directory.name}: {failures[0]}"
+        ) from failures[0]
     if clean:
         empty = sorted(stem for stem, text in hyps.items() if not text.strip())
         if empty:
@@ -176,45 +170,43 @@ def run_degrade_eval(
     backends: dict[str, Callable[[Path], str]],
     work_dir: Path,
     decode: Callable[[Path], np.ndarray],
-) -> tuple[list[DegradeRow], list[CleanRow]]:
+) -> list[Row]:
     """Score each backend plain and with loudnorm on *profile* variants.
 
-    Returns ``(rows, clean_rows)`` for :func:`format_table`. The clean
-    reference uses the committed clips unchanged; the degraded arm uses
-    the seeded variants written under *work_dir*. Each arm is walked by
-    :func:`vemoizer.eval_harness.run_eval` on a directory, so the plain
-    and loudnorm numbers come from the same harness as the gate.
+    Returns the clean-reference rows followed by the degraded rows, for
+    :func:`format_table`. The clean reference uses the committed clips
+    unchanged; the degraded arm uses the seeded variants written under
+    *work_dir*. Each arm is walked by :func:`vemoizer.eval_harness.run_eval`
+    on a directory, so the plain and loudnorm numbers come from the same
+    harness as the gate.
     """
+    if profile not in PROFILES:
+        known = ", ".join(PROFILES)
+        raise DegradeError(f"unknown degrade profile {profile!r} (known: {known})")
     degraded = build_variants(corpus, profile, work_dir, decode)
     if not degraded:
         raise DegradeError(f"no <stem>.wav + <stem>.txt pair in {corpus}")
     deg_dir = work_dir / profile
     clean_ln = loudnorm_corpus(corpus, work_dir / "clean-loudnorm")
     deg_ln = loudnorm_corpus(deg_dir, work_dir / f"{profile}-loudnorm")
-    rows: list[DegradeRow] = []
-    clean_rows: list[CleanRow] = []
+    clean_rows: list[Row] = []
+    degraded_rows: list[Row] = []
     for name, transcribe in backends.items():
         clean_plain = _score(corpus, transcribe, clean=True)
         clean_norm = _score(clean_ln, transcribe, clean=True)
-        clean_rows.append(CleanRow(name, clean_plain, clean_norm))
+        clean_rows.append(Row(CLEAN, name, clean_plain, clean_norm))
         plain = _score(deg_dir, transcribe, clean=False)
         norm = _score(deg_ln, transcribe, clean=False)
-        rows.append(DegradeRow(profile, name, plain, norm))
-    return rows, clean_rows
+        degraded_rows.append(Row(profile, name, plain, norm))
+    return [*clean_rows, *degraded_rows]
 
 
-def format_table(rows: list[DegradeRow], clean_rows: list[CleanRow]) -> list[str]:
+def format_table(rows: list[Row]) -> list[str]:
     """Format the informational table.
 
     The delta is ``loudnorm - plain``: negative means loudnorm helped.
     """
-    header = "profile\tbackend\tplain\tloudnorm\tdelta"
-    lines = [header]
-    for c in clean_rows:
-        delta = c.loudnorm_wer - c.plain_wer
-        lines.append(
-            f"clean\t{c.backend}\t{c.plain_wer:.4f}\t{c.loudnorm_wer:.4f}\t{delta:+.4f}"
-        )
+    lines = ["profile\tbackend\tplain\tloudnorm\tdelta"]
     for r in rows:
         delta = r.loudnorm_wer - r.plain_wer
         lines.append(

@@ -273,6 +273,10 @@ promise that it exists yet. The canonical flag spec is
 6. **Audio contract: 16 kHz mono float32.** Decoding happens once, at ingest,
    via ffmpeg. Every internal boundary past that point speaks this format.
    No stage re-reads the source file.
+   *Eval-only exception (issue #154):* the informational `eval --degrade`
+   benchmark writes 16-bit PCM WAV variants and re-decodes them through the
+   backends. It never runs in the pipeline, and its output is advisory only.
+   See `docs/pipeline-spec.md`.
 
 7. **No model becomes a default without a WER run on our own corpus.**
    Published WERs come from model cards using different text-normalization

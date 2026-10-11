@@ -26,7 +26,6 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 from vemoizer.slice_align import slice_similarity
 from vemoizer.textnorm import textnorm
@@ -299,7 +298,6 @@ def run_eval(
     corpus_dir: Path,
     transcribe: Callable[[Path], str],
     hypotheses: dict[str, str] | None = None,
-    on_error: Literal["score", "raise"] = "score",
 ) -> dict[str, float]:
     """Walk *corpus_dir* and score *transcribe* against the references.
 
@@ -310,8 +308,7 @@ def run_eval(
     module stays free of model imports). A crashing backend scores that
     sample as an empty hypothesis (WER 1.0 against a non-empty reference)
     instead of aborting the run: one bad sample must not hide the other
-    numbers. *on_error* = "raise" re-raises the backend's exception instead,
-    for callers that must not score a crash as WER.
+    numbers.
 
     Returns the per-sample WER mapping (``{stem: wer}`` plus one
     ``"aggregate"`` key, macro average over samples). If a writable
@@ -333,8 +330,6 @@ def run_eval(
         try:
             hypothesis = transcribe(wav)
         except Exception:  # noqa: BLE001 - one sample must not abort the run
-            if on_error == "raise":
-                raise
             logger.warning("transcription failed for %s; scoring as empty", wav.name)
             hypothesis = ""
         if hypotheses is not None:

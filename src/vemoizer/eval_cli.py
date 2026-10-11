@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -191,10 +193,12 @@ def register_eval(app) -> None:
             raise typer.Exit(code=2)
 
         if degrade is not None:
-            if check or update_baseline or agreement:
+            # Informational and exclusive: the gate, agreement and LLM flags
+            # are refused (exit 2) rather than silently ignored.
+            if check or update_baseline or agreement or llm:
                 typer.echo(
                     "error: --degrade is informational; it cannot be combined "
-                    "with --check, --update-baseline or --agreement",
+                    "with --check, --update-baseline, --agreement or --llm",
                     err=True,
                 )
                 raise typer.Exit(code=2)
@@ -243,27 +247,20 @@ def _emit_degrade(corpus: Path, names: list[str], profile: str) -> None:
     Variants are written to a temp dir that is removed afterwards; nothing
     is committed or written under the corpus. Audio decodes once at ingest
     (the ingest contract); loudnorm is applied only in the loudnorm arm.
+    Every failure exits 2 with a message, never a traceback: benchmark
+    refusals (DegradeError), ingest/loudnorm failures, and I/O or decode
+    errors while writing or reading the variants.
     """
-    import shutil
-    import tempfile
-
     from vemoizer.degrade import DegradeError, format_table, run_degrade_eval
-    from vemoizer.degrade_signal import BASE_SEED, NOISE_SNR_DB, PROFILES
+    from vemoizer.degrade_signal import BASE_SEED, NOISE_SNR_DB
     from vemoizer.ingest import IngestError, ingest_audio
 
-    if profile not in PROFILES:
-        known = ", ".join(PROFILES)
-        typer.echo(
-            f"error: unknown degrade profile {profile!r} (known: {known})",
-            err=True,
-        )
-        raise typer.Exit(code=2)
     work = Path(tempfile.mkdtemp(prefix="vemoizer-degrade-"))
     try:
-        rows, clean_rows = run_degrade_eval(
+        rows = run_degrade_eval(
             corpus, profile, {n: BACKENDS[n] for n in names}, work, ingest_audio
         )
-    except (DegradeError, IngestError) as exc:
+    except (DegradeError, IngestError, OSError, ValueError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from None
     finally:
@@ -272,7 +269,7 @@ def _emit_degrade(corpus: Path, names: list[str], profile: str) -> None:
         f"# degrade={profile} base_seed={BASE_SEED} snr_db={NOISE_SNR_DB} "
         "(informational, not gated)"
     )
-    for line in format_table(rows, clean_rows):
+    for line in format_table(rows):
         typer.echo(line)
 
 

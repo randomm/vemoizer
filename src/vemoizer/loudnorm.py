@@ -382,6 +382,8 @@ def _kill_and_reap(proc: subprocess.Popen) -> None:
 def preprocess_audio(
     path: Path | str,
     preprocess: str | None = None,
+    *,
+    strict: bool = False,
 ) -> np.ndarray:
     """Decode *path* to 16 kHz mono float32, applying ``loudnorm`` when
     *preprocess* is ``"loudnorm"`` (two-pass form, fail open).
@@ -390,6 +392,11 @@ def preprocess_audio(
     ``ingest_audio``'s argv unchanged. ``"loudnorm"``: two-pass
     normalization; any measurement failure falls back to the plain
     decode with ONE warning (file name only).
+
+    ``strict=True`` (benchmarks only) never falls back: a measurement
+    failure raises :class:`vemoizer.ingest.IngestError`, so a plain decode
+    cannot be reported as a loudnorm result. Pass 2 always raises on
+    failure, strict or not.
     """
     p = Path(path)
     if not p.is_file():
@@ -400,6 +407,13 @@ def preprocess_audio(
     if preprocess == "loudnorm":
         measurement = _measurement_for(p)
         if measurement is None:
+            if strict:
+                from .ingest import IngestError
+
+                raise IngestError(
+                    f"loudnorm measurement failed for {p.name}; refusing to "
+                    "fall back to the plain decode"
+                )
             # Fail open: the measurement failed (the warning was already
             # logged by _measurement_for on the cache MISS), run the
             # plain unprocessed decode.
@@ -459,14 +473,3 @@ def _decode_pass2(p: Path, measurement: LoudnormMeasurement) -> np.ndarray:
     if n == 0:
         return np.zeros(0, dtype=np.float32)
     return np.frombuffer(raw, dtype=np.float32, count=n).copy()
-
-
-def decode_measured(path: Path | str, measurement: LoudnormMeasurement) -> np.ndarray:
-    """Pass 2 only: the loudnorm decode for a known *measurement*.
-
-    Unlike :func:`preprocess_audio` this does NOT fail open: an ffmpeg
-    failure raises :class:`vemoizer.ingest.IngestError`. The degrade
-    benchmark needs that, because a plain-decode fallback would be
-    reported as a loudnorm result.
-    """
-    return _decode_pass2(Path(path), measurement)
