@@ -167,6 +167,13 @@ def register_eval(app) -> None:
             help="Emit the informational agreement-on-wrong metric "
             "(two decoders agree AND the shared text is wrong; issue #62).",
         ),
+        degrade: str = typer.Option(
+            "",
+            "--degrade",
+            help="Informational far-field benchmark (issue #154): profile "
+            "far, noisy, or far-noisy; prints plain vs loudnorm WER. "
+            "Never gated; skips the regular gate output.",
+        ),
     ) -> None:
         """Score decode backends over the fixture corpus (WER)."""
         if not corpus.is_dir():
@@ -182,6 +189,17 @@ def register_eval(app) -> None:
                 err=True,
             )
             raise typer.Exit(code=2)
+
+        if degrade:
+            if check or update_baseline or agreement:
+                typer.echo(
+                    "error: --degrade is informational; it cannot be combined "
+                    "with --check, --update-baseline or --agreement",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+            _emit_degrade(corpus, names, degrade)
+            return
 
         measured: dict[str, dict[str, float]] = {}
         if agreement:
@@ -217,6 +235,51 @@ def register_eval(app) -> None:
             typer.echo(f"baseline updated: {baseline}")
         if check:
             _check_baseline(baseline, fingerprint, measured)
+
+
+def _emit_degrade(corpus: Path, names: list[str], profile: str) -> None:
+    """Print the informational far-field table (issue #154).
+
+    Variants are written to a temp dir that is removed afterwards; nothing
+    is committed or written under the corpus. Audio decodes once at ingest
+    (the ingest contract); loudnorm is applied only in the loudnorm arm.
+    """
+    import shutil
+    import tempfile
+
+    from vemoizer.degrade import (
+        BASE_SEED,
+        NOISE_SNR_DB,
+        PROFILES,
+        DegradeError,
+        format_table,
+        run_degrade_eval,
+    )
+    from vemoizer.ingest import IngestError, ingest_audio
+
+    if profile not in PROFILES:
+        known = ", ".join(PROFILES)
+        typer.echo(
+            f"error: unknown degrade profile {profile!r} (known: {known})",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    work = Path(tempfile.mkdtemp(prefix="vemoizer-degrade-"))
+    try:
+        rows, clean_rows = run_degrade_eval(
+            corpus, profile, {n: BACKENDS[n] for n in names}, work, ingest_audio
+        )
+    except (DegradeError, IngestError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    typer.echo(
+        f"# degrade={profile} base_seed={BASE_SEED} snr_db={NOISE_SNR_DB} "
+        "(informational, not gated)"
+    )
+    for line in format_table(rows, clean_rows):
+        typer.echo(line)
 
 
 def _emit_meeting_term_hits(

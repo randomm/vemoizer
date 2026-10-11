@@ -821,6 +821,20 @@ the per-backend WER output. It does not affect the baseline file or the
   code-switching (Finnish with embedded English acronyms and product
   names); that measurement remains a known gap.
 
+**Informational far-field benchmark (issue #154).** `vemoizer eval --degrade
+<far|noisy|far-noisy> [--backend NAME]` builds seeded degraded copies of the
+committed clips in a temp directory (deleted afterwards; never committed):
+`far` = 20 dB attenuation plus a synthetic exponential-decay reverb (T60 0.4 s),
+`noisy` = white noise at 10 dB SNR, `far-noisy` = both. Each backend decodes
+the clean clips and the variant, plain and with `loudnorm` applied once, and
+the output is a table `profile\tbackend\tplain\tloudnorm\tdelta` (negative delta
+= loudnorm helped). If loudnorm pass 1 fails for any clip, a backend crashes on any
+clip, or no clip pair is found, the mode exits 2 with an error instead of
+reporting a fallback or a crash-as-WER as a result. `--degrade` cannot be
+combined with `--check`, `--update-baseline` or `--agreement`. Seeds derive from base seed 154, the profile name and the clip stem; reverb and noise use separate random streams. The
+mode never reads or writes `wer_baseline.json`, ignores `--check`, and its
+output is advisory only: changing a default is a separate decision.
+
 ## Configuration
 
 The LLM (adjudication / cleanup / summary) is selected by a user config
