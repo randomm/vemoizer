@@ -10,6 +10,7 @@ temp-dir cleanup on interrupt.
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import tempfile
 import wave
@@ -186,6 +187,78 @@ def test_interrupt_after_creating_temp_dir_removes_it(
 
     monkeypatch.setattr(degrade, "run_degrade_eval", interrupted)
     result = _invoke(_corpus(tmp_path))
-    assert result.exit_code != 0
+    assert result.exit_code == 130
+    assert "Traceback" not in result.output
     assert len(seen) == 1
     assert not seen[0].exists()
+
+
+def _fail_run(*args: object, **kwargs: object) -> None:
+    raise degrade.DegradeError("boom")
+
+
+def test_sigterm_restore_without_python_previous_handler_uses_sig_dfl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # signal.signal returns None when the previous handler was not set from
+    # Python; passing None back to signal.signal raises TypeError, so the
+    # restore must fall back to SIG_DFL.
+    calls: list[object] = []
+
+    def fake_signal(signum: int, handler: object) -> object:
+        assert signum == signal.SIGTERM
+        calls.append(handler)
+        if handler is None:
+            raise TypeError("signal handler must be callable or a signal constant")
+        return None
+
+    monkeypatch.setattr(eval_cli.signal, "signal", fake_signal)
+    monkeypatch.setattr(degrade, "run_degrade_eval", _fail_run)
+    result = _invoke(_corpus(tmp_path))
+    assert result.exit_code == 2
+    assert "Traceback" not in result.output
+    assert len(calls) == 2
+    assert calls[-1] is signal.SIG_DFL
+
+
+def test_sigterm_handler_restored_after_temp_dir_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log: list[str] = []
+    real_rmtree = shutil.rmtree
+
+    def fake_signal(signum: int, handler: object) -> object:
+        log.append("install" if handler is eval_cli._exit_on_term else "restore")
+        return None
+
+    def fake_rmtree(path: Path, ignore_errors: bool = False) -> None:
+        log.append("rmtree")
+        real_rmtree(path, ignore_errors=ignore_errors)
+
+    monkeypatch.setattr(eval_cli.signal, "signal", fake_signal)
+    monkeypatch.setattr(eval_cli.shutil, "rmtree", fake_rmtree)
+    monkeypatch.setattr(degrade, "run_degrade_eval", _fail_run)
+    result = _invoke(_corpus(tmp_path))
+    assert result.exit_code == 2
+    assert log == ["install", "rmtree", "restore"]
+
+
+def test_handler_restored_even_if_temp_dir_removal_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log: list[str] = []
+
+    def fake_signal(signum: int, handler: object) -> object:
+        log.append("install" if handler is eval_cli._exit_on_term else "restore")
+        return None
+
+    def failing_rmtree(path: Path, ignore_errors: bool = False) -> None:
+        log.append("rmtree")
+        raise RuntimeError("rmtree failed")
+
+    monkeypatch.setattr(eval_cli.signal, "signal", fake_signal)
+    monkeypatch.setattr(eval_cli.shutil, "rmtree", failing_rmtree)
+    monkeypatch.setattr(degrade, "run_degrade_eval", _fail_run)
+    result = _invoke(_corpus(tmp_path))
+    assert isinstance(result.exception, RuntimeError)
+    assert log == ["install", "rmtree", "restore"]

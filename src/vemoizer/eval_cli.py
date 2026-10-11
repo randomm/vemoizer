@@ -26,6 +26,7 @@ import signal
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+from types import FrameType
 
 import typer
 
@@ -247,6 +248,9 @@ def _exit_on_term(signum: int, frame: object) -> None:
     raise SystemExit(128 + signum)
 
 
+_Handler = Callable[[int, FrameType | None], object] | int
+
+
 def _emit_degrade(corpus: Path, names: list[str], profile: str) -> None:
     """Print the informational far-field table (issue #154).
 
@@ -266,20 +270,26 @@ def _emit_degrade(corpus: Path, names: list[str], profile: str) -> None:
     from vemoizer.ingest import IngestError, ingest_audio
 
     work: Path | None = None
-    previous = signal.signal(signal.SIGTERM, _exit_on_term)
+    previous: _Handler | None = signal.signal(signal.SIGTERM, _exit_on_term)
     try:
-        # Inside the try: an OSError creating the scratch dir is exit 2 too.
-        work = Path(tempfile.mkdtemp(prefix="vemoizer-degrade-"))
-        rows = run_degrade_eval(
-            corpus, profile, {n: BACKENDS[n] for n in names}, work, ingest_audio
-        )
-    except (DegradeError, IngestError, OSError) as exc:
-        typer.echo(f"error: {exc}", err=True)
-        raise typer.Exit(code=2) from None
+        try:
+            # Inside the try: an OSError creating the scratch dir is exit 2 too.
+            work = Path(tempfile.mkdtemp(prefix="vemoizer-degrade-"))
+            rows = run_degrade_eval(
+                corpus, profile, {n: BACKENDS[n] for n in names}, work, ingest_audio
+            )
+        except (DegradeError, IngestError, OSError) as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(code=2) from None
+        finally:
+            if work is not None:
+                shutil.rmtree(work, ignore_errors=True)
     finally:
-        signal.signal(signal.SIGTERM, previous)
-        if work is not None:
-            shutil.rmtree(work, ignore_errors=True)
+        # Restore only after the scratch dir is gone, so a SIGTERM in between
+        # cannot leak it. signal.signal() returns None for a handler that was
+        # not installed from Python, and None is not a valid argument back.
+        restore = previous if previous is not None else signal.SIG_DFL
+        signal.signal(signal.SIGTERM, restore)
     for line in [*run_header(profile), *format_table(rows)]:
         typer.echo(line)
 
