@@ -833,11 +833,15 @@ ingest-time input; no pipeline stage re-reads a file.
 
 Each profile prints four arms per backend: `plain` (the degraded clip as
 decoded), `gain` (the degraded clip scaled to its clean RMS, no loudnorm: the
-level-only control), `loudnorm`, and `delta` (`loudnorm - plain`). The `gain`
-arm isolates level restoration: most of loudnorm's effect on the `far`
-profile is the 20 dB level loss, and `loudnorm - gain` is the only part that
-can be attributed to loudnorm's own processing. Nothing here measures
-dereverberation by itself. The clean reference row is the committed clips
+oracle level-only control: its target RMS is read from the clean reference,
+which an inference-time system does not have, so it bounds what level alone
+can recover), `loudnorm`, and `delta` (`loudnorm - plain`). The `gain`
+arm isolates level restoration. The `far` profile loses 20 dB, so loudnorm's
+benefit there is expected to be mostly level restoration; compare `loudnorm`
+with `gain` to see how much is left for loudnorm's own processing. Nothing here
+measures dereverberation by itself. Whisper (the meeting pipeline's decoder) is
+not covered: only parakeet, canary and consensus are scored. No default changes
+because of this table. The clean reference row is the committed clips
 passed through the same 16-bit write as every degraded arm, so its delta is
 comparable with the degraded rows; its plain number can differ slightly from
 the gate's per-clip WER for the same clips. The header prints the base seed

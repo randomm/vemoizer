@@ -168,9 +168,12 @@ def gain_corpus(
 ) -> Path:
     """Mirror *deg_dir* with each clip's RMS scaled to its clean counterpart.
 
-    The level-only control: a plain gain change with no loudnorm and no
+    The oracle level-only control: a plain gain change with no loudnorm and no
     dereverberation, so the table can separate level restoration from what
-    loudnorm adds. Clipped to [-1, 1] and written as 16-bit like the variants.
+    loudnorm adds. The target RMS comes from the clean reference, which an
+    inference-time system does not have, so this arm is an upper bound on what
+    level alone can recover. Clipped to [-1, 1] and written as 16-bit like the
+    variants. *corpus* must be the requantised clean reference.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     for wav, txt in _corpus_pairs(corpus):
@@ -252,7 +255,7 @@ def run_degrade_eval(
     clean_dir = requantise_corpus(corpus, work_dir / "clean", decode)
     clean_ln = loudnorm_corpus(clean_dir, work_dir / "clean-loudnorm")
     deg_ln = loudnorm_corpus(deg_dir, work_dir / f"{profile}-loudnorm")
-    gain_dir = gain_corpus(corpus, deg_dir, work_dir / f"{profile}-gain", decode)
+    gain_dir = gain_corpus(clean_dir, deg_dir, work_dir / f"{profile}-gain", decode)
     clean_rows: list[Row] = []
     degraded_rows: list[Row] = []
     for name, transcribe in backends.items():
@@ -315,6 +318,11 @@ def run_header(profile: str) -> list[str]:
         f"reverb_len_s={REVERB_LEN_S} snr_db={NOISE_SNR_DB} noise=white",
         f"# ffmpeg={_ffmpeg_version()}",
         f"# models {models}",
-        "# informational, not gated. WER is uncapped: values above 1.0 come from "
-        "insertions (e.g. repetition loops); check per-clip output before citing.",
+        "# gain=oracle level control: each clip scaled to its clean RMS (needs the "
+        "clean reference, so it is an upper bound, not an inference-time method).",
+        "# far: loudnorm's benefit is mostly level restoration; compare the gain "
+        "column with loudnorm. whisper not covered (parakeet/canary/consensus only).",
+        "# informational, not gated: no default changes. WER is uncapped: values "
+        "above 1.0 come from insertions (e.g. repetition loops); check per-clip "
+        "output before citing.",
     ]
