@@ -86,7 +86,10 @@ _MEASURE_CACHE: dict[tuple[str, int, int], LoudnormMeasurement | None] = {}
 _MIN_I = -100.0
 _MAX_I = 0.0
 _MIN_TP = -100.0
-_MAX_TP = 0.0
+# A true peak above 0 dBTP is normal on hot recordings (inter-sample overs);
+# the upper bound only rejects absurd values. A positive peak implies an
+# attenuation, so it cannot cause an unbounded gain.
+_MAX_TP = 20.0
 _MIN_LRA = 0.0
 _MAX_LRA = 100.0
 _MAX_ABS_THRESH = 100.0
@@ -293,8 +296,8 @@ def _measurement_for(path: Path) -> LoudnormMeasurement | None:
         # since the file changed (the cache was either empty or the key
         # changed).
         logger.warning(
-            "loudnorm: measurement failed for %s; falling back to the "
-            "plain unprocessed decode (fail-open)",
+            "loudnorm: measurement failed for %s (fail-open to the plain "
+            "decode unless strict)",
             path.name,
         )
     if len(_MEASURE_CACHE) >= _MEASURE_CACHE_MAX:

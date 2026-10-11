@@ -159,6 +159,25 @@ def test_parse_loudnorm_json_last_block_wins() -> None:
     assert m.offset == pytest.approx(0.5)
 
 
+def test_parse_loudnorm_json_accepts_true_peak_above_full_scale() -> None:
+    # A hot recording measures a true peak a few hundredths of a dB above
+    # 0 dBTP (inter-sample overs). That is a real measurement: the gain it
+    # implies is an attenuation, so it must not be discarded.
+    block = (
+        "[Parsed_loudnorm_0 @ 0x0]\n{\n"
+        '\t"input_i" : "-18.00",\n'
+        '\t"input_tp" : "0.03",\n'
+        '\t"input_lra" : "2.80",\n'
+        '\t"input_thresh" : "-27.81",\n'
+        '\t"target_offset" : "0.82"\n}\n'
+    )
+    m = parse_loudnorm_json(block)
+    assert m is not None
+    assert m.input_tp == pytest.approx(0.03)
+    # The upper bound still rejects an absurd peak (about +20 dBTP is 10x FS).
+    assert parse_loudnorm_json(block.replace("0.03", "30.0")) is None
+
+
 def test_parse_loudnorm_json_malformed_returns_none() -> None:
     assert parse_loudnorm_json("no json here at all") is None
     assert parse_loudnorm_json("{ this is not json }") is None
