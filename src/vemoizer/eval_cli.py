@@ -167,8 +167,8 @@ def register_eval(app) -> None:
             help="Emit the informational agreement-on-wrong metric "
             "(two decoders agree AND the shared text is wrong; issue #62).",
         ),
-        degrade: str = typer.Option(
-            "",
+        degrade: str | None = typer.Option(
+            None,
             "--degrade",
             help="Informational far-field benchmark (issue #154): profile "
             "far, noisy, or far-noisy; prints plain vs loudnorm WER. "
@@ -190,7 +190,7 @@ def register_eval(app) -> None:
             )
             raise typer.Exit(code=2)
 
-        if degrade:
+        if degrade is not None:
             if check or update_baseline or agreement:
                 typer.echo(
                     "error: --degrade is informational; it cannot be combined "
@@ -247,14 +247,8 @@ def _emit_degrade(corpus: Path, names: list[str], profile: str) -> None:
     import shutil
     import tempfile
 
-    from vemoizer.degrade import (
-        BASE_SEED,
-        NOISE_SNR_DB,
-        PROFILES,
-        DegradeError,
-        format_table,
-        run_degrade_eval,
-    )
+    from vemoizer.degrade import DegradeError, format_table, run_degrade_eval
+    from vemoizer.degrade_signal import BASE_SEED, NOISE_SNR_DB, PROFILES
     from vemoizer.ingest import IngestError, ingest_audio
 
     if profile not in PROFILES:

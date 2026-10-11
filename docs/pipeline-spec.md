@@ -828,12 +828,18 @@ committed clips in a temp directory (deleted afterwards; never committed):
 `noisy` = white noise at 10 dB SNR, `far-noisy` = both. Each backend decodes
 the clean clips and the variant, plain and with `loudnorm` applied once, and
 the output is a table `profile\tbackend\tplain\tloudnorm\tdelta` (negative delta
-= loudnorm helped). If loudnorm pass 1 fails for any clip, a backend crashes on any
-clip, or no clip pair is found, the mode exits 2 with an error instead of
-reporting a fallback or a crash-as-WER as a result. `--degrade` cannot be
-combined with `--check`, `--update-baseline` or `--agreement`. Seeds derive from base seed 154, the profile name and the clip stem; reverb and noise use separate random streams. The
-mode never reads or writes `wer_baseline.json`, ignores `--check`, and its
-output is advisory only: changing a default is a separate decision.
+= loudnorm helped). If loudnorm pass 1 or pass 2 fails for any clip, a backend
+raises on any clip, a clean-clip transcript is empty (a fail-open decode), or no
+clip pair is found, the mode exits 2 with an error instead of reporting a
+fallback or a crash-as-WER as a result. `--degrade` cannot be combined with
+`--check`, `--update-baseline` or `--agreement` (exit 2), and an empty or unknown
+profile name is rejected with exit 2. Seeds derive from base seed 154, the
+profile name and the clip stem; reverb and noise use separate random streams.
+Degraded and loudnorm variants are written as 16-bit PCM WAV and re-decoded by
+the backends: this is an eval-only exception to the float32 boundary (invariant
+#6 is unchanged for the pipeline), and the clean plain arm reads the committed
+WAVs as-is. The mode never reads or writes `wer_baseline.json`, and its output
+is advisory only: changing a default is a separate decision.
 
 ## Configuration
 

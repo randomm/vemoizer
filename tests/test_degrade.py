@@ -12,7 +12,8 @@ import numpy as np
 import pytest
 
 from vemoizer.audio_contract import SAMPLE_RATE
-from vemoizer.degrade import (
+from vemoizer.degrade import CleanRow, DegradeRow, format_table, write_wav
+from vemoizer.degrade_signal import (
     ATTENUATION_DB,
     NOISE_SNR_DB,
     PROFILES,
@@ -20,8 +21,6 @@ from vemoizer.degrade import (
     attenuate,
     clip_seed,
     degrade,
-    format_table,
-    write_wav,
 )
 
 
@@ -97,8 +96,8 @@ def test_write_wav_is_16k_mono_16bit(tmp_path: Path) -> None:
 
 def test_format_table_reports_delta_and_clean_reference() -> None:
     lines = format_table(
-        rows=[("far", "parakeet", 0.30, 0.20)],
-        clean_rows=[("parakeet", 0.05, 0.06)],
+        rows=[DegradeRow("far", "parakeet", 0.30, 0.20)],
+        clean_rows=[CleanRow("parakeet", 0.05, 0.06)],
     )
     assert lines[0] == "profile\tbackend\tplain\tloudnorm\tdelta"
     assert lines[1] == "clean\tparakeet\t0.0500\t0.0600\t+0.0100"

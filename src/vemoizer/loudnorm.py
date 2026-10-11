@@ -459,3 +459,14 @@ def _decode_pass2(p: Path, measurement: LoudnormMeasurement) -> np.ndarray:
     if n == 0:
         return np.zeros(0, dtype=np.float32)
     return np.frombuffer(raw, dtype=np.float32, count=n).copy()
+
+
+def decode_measured(path: Path | str, measurement: LoudnormMeasurement) -> np.ndarray:
+    """Pass 2 only: the loudnorm decode for a known *measurement*.
+
+    Unlike :func:`preprocess_audio` this does NOT fail open: an ffmpeg
+    failure raises :class:`vemoizer.ingest.IngestError`. The degrade
+    benchmark needs that, because a plain-decode fallback would be
+    reported as a loudnorm result.
+    """
+    return _decode_pass2(Path(path), measurement)
