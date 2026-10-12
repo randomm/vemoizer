@@ -13,17 +13,15 @@ import os
 import shutil
 import signal
 import tempfile
-import wave
 from pathlib import Path
 
-import numpy as np
 import pytest
+from _degrade_helpers import make_corpus, read_wav_float
 from typer.testing import CliRunner, Result
 
 import vemoizer.degrade as degrade
 import vemoizer.eval_cli as eval_cli
 import vemoizer.ingest as ingest
-from vemoizer.audio_contract import SAMPLE_RATE, write_wav
 from vemoizer.cli import app
 from vemoizer.degrade_signal import (
     ATTENUATION_DB,
@@ -35,22 +33,6 @@ from vemoizer.degrade_signal import (
 from vemoizer.models import MODELS, ModelSpec
 
 
-def _corpus(root: Path) -> Path:
-    corpus = root / "corpus"
-    corpus.mkdir()
-    for stem in ("a", "b"):
-        x = (0.3 * np.sin(np.arange(SAMPLE_RATE // 2) / 10.0)).astype(np.float32)
-        write_wav(corpus / f"{stem}.wav", x)
-        (corpus / f"{stem}.txt").write_text(f"hello {stem}\n", encoding="utf-8")
-    return corpus
-
-
-def _ingest(path: Path) -> np.ndarray:
-    with wave.open(str(path), "rb") as w:
-        raw = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
-    return raw.astype(np.float32) / 32767.0
-
-
 def _invoke(corpus: Path, profile: str = "far") -> Result:
     return CliRunner().invoke(
         app,
@@ -60,7 +42,7 @@ def _invoke(corpus: Path, profile: str = "far") -> Result:
 
 @pytest.fixture(autouse=True)
 def _hermetic(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(ingest, "ingest_audio", _ingest)
+    monkeypatch.setattr(ingest, "ingest_audio", read_wav_float)
     monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
     scratch = tmp_path / "scratch"
     scratch.mkdir()
@@ -104,7 +86,7 @@ def test_header_lists_every_pinned_model_revision_from_registry() -> None:
 
 
 def test_cli_prints_header_then_table_on_stdout(tmp_path: Path) -> None:
-    result = _invoke(_corpus(tmp_path))
+    result = _invoke(make_corpus(tmp_path))
     assert result.exit_code == 0
     lines = result.output.splitlines()
     table = lines.index("profile\tbackend\tplain\tgain\tloudnorm\tdelta")
@@ -118,7 +100,7 @@ def test_unusable_tempdir_override_exits_2_with_one_line(
 ) -> None:
     # An explicit tempfile.tempdir override is used as-is: no fallback.
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "missing"))
-    result = _invoke(_corpus(tmp_path))
+    result = _invoke(make_corpus(tmp_path))
     _assert_one_line_exit_2(result)
 
 
@@ -129,7 +111,7 @@ def test_unusable_tmpdir_env_var_falls_back_to_system_tempdir(
     # so the run completes (documented in docs/pipeline-spec.md).
     monkeypatch.setattr(tempfile, "tempdir", None)
     monkeypatch.setenv("TMPDIR", str(tmp_path / "missing"))
-    result = _invoke(_corpus(tmp_path))
+    result = _invoke(make_corpus(tmp_path))
     assert result.exit_code == 0
     assert "Traceback" not in result.output
 
@@ -142,7 +124,7 @@ def test_readonly_tmpdir_exits_2_with_one_line(
     readonly.chmod(0o500)
     try:
         monkeypatch.setattr(tempfile, "tempdir", str(readonly))
-        result = _invoke(_corpus(tmp_path))
+        result = _invoke(make_corpus(tmp_path))
         _assert_one_line_exit_2(result)
     finally:
         readonly.chmod(0o700)
@@ -168,7 +150,7 @@ def test_sigterm_during_run_removes_temp_dir(
         os.kill(os.getpid(), signal.SIGTERM)
 
     monkeypatch.setattr(degrade, "run_degrade_eval", terminated)
-    result = _invoke(_corpus(tmp_path))
+    result = _invoke(make_corpus(tmp_path))
     assert result.exit_code == 143
     assert len(seen) == 1
     assert not seen[0].exists()
@@ -186,7 +168,7 @@ def test_interrupt_after_creating_temp_dir_removes_it(
         raise KeyboardInterrupt
 
     monkeypatch.setattr(degrade, "run_degrade_eval", interrupted)
-    result = _invoke(_corpus(tmp_path))
+    result = _invoke(make_corpus(tmp_path))
     assert result.exit_code == 130
     assert "Traceback" not in result.output
     assert len(seen) == 1
@@ -214,7 +196,7 @@ def test_sigterm_restore_without_python_previous_handler_uses_sig_dfl(
 
     monkeypatch.setattr(eval_cli.signal, "signal", fake_signal)
     monkeypatch.setattr(degrade, "run_degrade_eval", _fail_run)
-    result = _invoke(_corpus(tmp_path))
+    result = _invoke(make_corpus(tmp_path))
     assert result.exit_code == 2
     assert "Traceback" not in result.output
     assert len(calls) == 2
@@ -238,7 +220,7 @@ def test_sigterm_handler_restored_after_temp_dir_removed(
     monkeypatch.setattr(eval_cli.signal, "signal", fake_signal)
     monkeypatch.setattr(eval_cli.shutil, "rmtree", fake_rmtree)
     monkeypatch.setattr(degrade, "run_degrade_eval", _fail_run)
-    result = _invoke(_corpus(tmp_path))
+    result = _invoke(make_corpus(tmp_path))
     assert result.exit_code == 2
     assert log == ["install", "rmtree", "restore"]
 
@@ -259,6 +241,6 @@ def test_handler_restored_even_if_temp_dir_removal_raises(
     monkeypatch.setattr(eval_cli.signal, "signal", fake_signal)
     monkeypatch.setattr(eval_cli.shutil, "rmtree", failing_rmtree)
     monkeypatch.setattr(degrade, "run_degrade_eval", _fail_run)
-    result = _invoke(_corpus(tmp_path))
+    result = _invoke(make_corpus(tmp_path))
     assert isinstance(result.exception, RuntimeError)
     assert log == ["install", "rmtree", "restore"]
