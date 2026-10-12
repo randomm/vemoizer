@@ -88,6 +88,24 @@ def _corpus_pairs(corpus: Path) -> list[tuple[Path, Path]]:
     return pairs
 
 
+def _mirror_pairs(
+    corpus: Path,
+    out_dir: Path,
+    produce: Callable[[Path], np.ndarray],
+) -> list[Path]:
+    """Write ``produce(wav)`` as ``out_dir/<wav>`` for every clip in *corpus*.
+
+    The reference ``.txt`` is copied next to each output, so *out_dir* is a
+    valid corpus for :func:`vemoizer.eval_harness.run_eval`. The caller owns
+    *out_dir* (creation and any cleanup); this only fills it.
+    """
+    written: list[Path] = []
+    for wav, txt in _corpus_pairs(corpus):
+        written.append(write_wav(out_dir / wav.name, produce(wav)))
+        shutil.copyfile(txt, out_dir / txt.name)
+    return written
+
+
 def build_variants(
     corpus: Path,
     profile: str,
@@ -106,36 +124,28 @@ def build_variants(
     if target.exists():
         shutil.rmtree(target)
     target.mkdir(parents=True)
-    written: list[Path] = []
-    for wav, txt in _corpus_pairs(corpus):
+
+    def produce(wav: Path) -> np.ndarray:
         audio = np.asarray(decode(wav), dtype=np.float32)
-        seed = clip_seed(wav.stem, profile)
-        written.append(write_wav(target / wav.name, degrade(audio, profile, seed)))
-        shutil.copyfile(txt, target / txt.name)
-    return written
+        return degrade(audio, profile, clip_seed(wav.stem, profile))
 
-
-def loudnorm_copy(wav: Path, out_dir: Path) -> Path:
-    """Write the loudnorm-processed audio of *wav* into *out_dir*; return it.
-
-    Strict: a measurement failure or a pass-2 ffmpeg failure raises
-    :class:`vemoizer.ingest.IngestError` rather than reporting the plain
-    decode as a loudnorm result.
-    """
-    audio = loudnorm.preprocess_audio(wav, "loudnorm", strict=True)
-    return write_wav(out_dir / wav.name, audio)
+    return _mirror_pairs(corpus, target, produce)
 
 
 def loudnorm_corpus(src: Path, out_dir: Path) -> Path:
     """Mirror corpus *src* into *out_dir* with every WAV loudnorm-processed.
 
     The reference ``.txt`` files are copied unchanged, so the result is a
-    valid corpus for :func:`vemoizer.eval_harness.run_eval`.
+    valid corpus for :func:`vemoizer.eval_harness.run_eval`. Strict: a
+    measurement or pass-2 failure raises :class:`vemoizer.ingest.IngestError`
+    rather than reporting the plain decode as a loudnorm result.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    for wav, txt in _corpus_pairs(src):
-        loudnorm_copy(wav, out_dir)
-        shutil.copyfile(txt, out_dir / txt.name)
+    _mirror_pairs(
+        src,
+        out_dir,
+        lambda wav: loudnorm.preprocess_audio(wav, "loudnorm", strict=True),
+    )
     return out_dir
 
 
@@ -150,9 +160,9 @@ def requantise_corpus(
     not byte-identical to them (the rounding differs), so the copy is needed.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    for wav, txt in _corpus_pairs(corpus):
-        write_wav(out_dir / wav.name, np.asarray(decode(wav), dtype=np.float32))
-        shutil.copyfile(txt, out_dir / txt.name)
+    _mirror_pairs(
+        corpus, out_dir, lambda wav: np.asarray(decode(wav), dtype=np.float32)
+    )
     return out_dir
 
 
@@ -178,12 +188,14 @@ def gain_corpus(
     clean reference.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    for wav, txt in _corpus_pairs(corpus):
+
+    def produce(wav: Path) -> np.ndarray:
         clean = np.asarray(decode(wav), dtype=np.float64)
         deg = np.asarray(decode(deg_dir / wav.name), dtype=np.float64)
         scaled = np.clip(deg * (_rms(clean) / _rms(deg)), -1.0, 1.0)
-        write_wav(out_dir / wav.name, scaled.astype(np.float32))
-        shutil.copyfile(txt, out_dir / txt.name)
+        return scaled.astype(np.float32)
+
+    _mirror_pairs(corpus, out_dir, produce)
     return out_dir
 
 
@@ -323,9 +335,9 @@ def run_header(profile: str) -> list[str]:
         "# gain=oracle level control: each clip scaled to its clean RMS (needs the "
         "clean reference, so it is an oracle, not an inference-time method; "
         "not a proven upper bound).",
-        "# far: level restoration explains most of loudnorm's benefit for parakeet "
-        "and consensus, about half for canary; compare the gain column with "
-        "loudnorm. whisper not covered (parakeet/canary/consensus only).",
+        "# compare the gain column with loudnorm (same clips; measured results "
+        "in docs/pipeline-spec.md). whisper not covered "
+        "(parakeet/canary/consensus only).",
         "# informational, not gated: no default changes. WER is uncapped: values "
         "above 1.0 come from insertions (e.g. repetition loops); check per-clip "
         "output before citing.",

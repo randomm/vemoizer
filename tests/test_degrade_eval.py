@@ -9,18 +9,18 @@ back to the plain decode, and that the gate's corpus is left alone.
 
 from __future__ import annotations
 
-import wave
 from pathlib import Path
 
 import numpy as np
 import pytest
+from _degrade_helpers import make_corpus, read_wav_float, rms
 from typer.testing import CliRunner, Result
 
 import vemoizer.degrade as degrade
 import vemoizer.eval_cli as eval_cli
 import vemoizer.ingest as ingest
 import vemoizer.loudnorm as loudnorm
-from vemoizer.audio_contract import SAMPLE_RATE, write_wav
+from vemoizer.audio_contract import write_wav
 from vemoizer.degrade import (
     DegradeError,
     build_variants,
@@ -34,26 +34,6 @@ from vemoizer.loudnorm import LoudnormMeasurement
 _MEAS = LoudnormMeasurement(
     input_i=-20.0, input_tp=-3.0, input_lra=5.0, input_thresh=-30.0, offset=0.0
 )
-
-
-def _corpus(root: Path, stems: tuple[str, ...] = ("a", "b")) -> Path:
-    corpus = root / "corpus"
-    corpus.mkdir()
-    for stem in stems:
-        x = (0.3 * np.sin(np.arange(SAMPLE_RATE // 2) / 10.0)).astype(np.float32)
-        write_wav(corpus / f"{stem}.wav", x)
-        (corpus / f"{stem}.txt").write_text(f"hello {stem}\n", encoding="utf-8")
-    return corpus
-
-
-def _ingest(path: Path) -> np.ndarray:
-    with wave.open(str(path), "rb") as w:
-        raw = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
-    return raw.astype(np.float32) / 32767.0
-
-
-def _rms(x: np.ndarray) -> float:
-    return float(np.sqrt(np.mean(x**2)))
 
 
 def _no_measurement(path: Path) -> None:
@@ -72,16 +52,16 @@ def _fake_loudnorm(monkeypatch: pytest.MonkeyPatch) -> None:
         return _MEAS
 
     def pass2(path: Path, measurement: LoudnormMeasurement) -> np.ndarray:
-        return _ingest(Path(path))
+        return read_wav_float(Path(path))
 
     monkeypatch.setattr(loudnorm, "_measurement_for", measure)
     monkeypatch.setattr(loudnorm, "_decode_pass2", pass2)
 
 
 def test_build_variants_writes_only_into_work_dir(tmp_path: Path) -> None:
-    corpus = _corpus(tmp_path)
+    corpus = make_corpus(tmp_path)
     before = sorted(p.name for p in corpus.iterdir())
-    variants = build_variants(corpus, "far", tmp_path / "work", _ingest)
+    variants = build_variants(corpus, "far", tmp_path / "work", read_wav_float)
     assert sorted(p.name for p in corpus.iterdir()) == before
     assert {p.stem for p in variants} == {"a", "b"}
     assert all(p.is_file() for p in variants)
@@ -90,20 +70,22 @@ def test_build_variants_writes_only_into_work_dir(tmp_path: Path) -> None:
 
 
 def test_gain_control_restores_clean_rms(tmp_path: Path) -> None:
-    corpus = _corpus(tmp_path)
-    build_variants(corpus, "far", tmp_path / "work", _ingest)
-    out = gain_corpus(corpus, tmp_path / "work" / "far", tmp_path / "gain", _ingest)
-    clean = _ingest(corpus / "a.wav").astype(np.float64)
-    got = _ingest(out / "a.wav").astype(np.float64)
-    assert _rms(got) == pytest.approx(_rms(clean), rel=0.01)
+    corpus = make_corpus(tmp_path)
+    build_variants(corpus, "far", tmp_path / "work", read_wav_float)
+    out = gain_corpus(
+        corpus, tmp_path / "work" / "far", tmp_path / "gain", read_wav_float
+    )
+    clean = read_wav_float(corpus / "a.wav").astype(np.float64)
+    got = read_wav_float(out / "a.wav").astype(np.float64)
+    assert rms(got) == pytest.approx(rms(clean), rel=0.01)
     assert (out / "a.txt").read_text(encoding="utf-8") == "hello a\n"
 
 
 def test_cli_prints_reproducibility_header_and_gain_column(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    corpus = _corpus(tmp_path)
-    monkeypatch.setattr(ingest, "ingest_audio", _ingest)
+    corpus = make_corpus(tmp_path)
+    monkeypatch.setattr(ingest, "ingest_audio", read_wav_float)
     monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
     result = _cli(corpus)
     assert result.exit_code == 0
@@ -117,21 +99,21 @@ def test_cli_prints_reproducibility_header_and_gain_column(
 
 
 def test_unpaired_wav_refuses_instead_of_skipping(tmp_path: Path) -> None:
-    corpus = _corpus(tmp_path)
-    write_wav(corpus / "orphan.wav", _ingest(corpus / "a.wav"))
+    corpus = make_corpus(tmp_path)
+    write_wav(corpus / "orphan.wav", read_wav_float(corpus / "a.wav"))
     with pytest.raises(DegradeError, match="orphan.wav"):
-        build_variants(corpus, "far", tmp_path / "work", _ingest)
+        build_variants(corpus, "far", tmp_path / "work", read_wav_float)
 
 
 def test_loudnorm_applied_exactly_once_per_clip_and_only_in_its_arm(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    corpus = _corpus(tmp_path)
+    corpus = make_corpus(tmp_path)
     calls: list[str] = []
 
     def counting_pass2(path: Path, measurement: LoudnormMeasurement) -> np.ndarray:
         calls.append(f"{Path(path).name}:loudnorm")
-        return _ingest(Path(path))
+        return read_wav_float(Path(path))
 
     monkeypatch.setattr(loudnorm, "_decode_pass2", counting_pass2)
 
@@ -142,7 +124,7 @@ def test_loudnorm_applied_exactly_once_per_clip_and_only_in_its_arm(
         return "hello"
 
     rows = run_degrade_eval(
-        corpus, "noisy", {"fake": backend}, tmp_path / "work", _ingest
+        corpus, "noisy", {"fake": backend}, tmp_path / "work", read_wav_float
     )
 
     # One loudnorm call per clip per arm: clean (2 clips) + noisy (2 clips).
@@ -156,7 +138,7 @@ def test_loudnorm_applied_exactly_once_per_clip_and_only_in_its_arm(
 def test_failed_measurement_raises_instead_of_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    corpus = _corpus(tmp_path)
+    corpus = make_corpus(tmp_path)
     monkeypatch.setattr(loudnorm, "_measurement_for", _no_measurement)
     monkeypatch.setattr(
         loudnorm,
@@ -170,7 +152,7 @@ def test_failed_measurement_raises_instead_of_fallback(
 def test_failed_pass2_decode_raises_instead_of_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    corpus = _corpus(tmp_path)
+    corpus = make_corpus(tmp_path)
     monkeypatch.setattr(loudnorm, "_decode_pass2", _pass2_fails)
     with pytest.raises(IngestError, match="pass 2"):
         loudnorm_corpus(corpus, tmp_path / "out")
@@ -181,8 +163,8 @@ def test_cli_exits_2_when_loudnorm_pass2_fails(
 ) -> None:
     from vemoizer.cli import app
 
-    corpus = _corpus(tmp_path)
-    monkeypatch.setattr(ingest, "ingest_audio", _ingest)
+    corpus = make_corpus(tmp_path)
+    monkeypatch.setattr(ingest, "ingest_audio", read_wav_float)
     monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
     monkeypatch.setattr(loudnorm, "_decode_pass2", _pass2_fails)
     result = CliRunner().invoke(
@@ -197,7 +179,7 @@ def test_cli_rejects_empty_degrade_profile(
 ) -> None:
     from vemoizer.cli import app
 
-    corpus = _corpus(tmp_path)
+    corpus = make_corpus(tmp_path)
     monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
     result = CliRunner().invoke(
         app, ["eval", "--corpus", str(corpus), "--backend", "fake", "--degrade", ""]
@@ -210,7 +192,7 @@ def test_cli_rejects_llm_with_degrade(
 ) -> None:
     from vemoizer.cli import app
 
-    corpus = _corpus(tmp_path)
+    corpus = make_corpus(tmp_path)
     monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
     result = CliRunner().invoke(
         app,
@@ -231,7 +213,7 @@ def test_cli_rejects_llm_with_degrade(
 def test_clean_plain_and_clean_loudnorm_consume_identical_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    corpus = _corpus(tmp_path)
+    corpus = make_corpus(tmp_path)
     plain_bytes: dict[str, bytes] = {}
     loudnorm_input_bytes: dict[str, bytes] = {}
 
@@ -247,26 +229,30 @@ def test_clean_plain_and_clean_loudnorm_consume_identical_bytes(
         return "hello"
 
     monkeypatch.setattr(loudnorm, "_measurement_for", measure)
-    run_degrade_eval(corpus, "far", {"fake": plain}, tmp_path / "work", _ingest)
+    run_degrade_eval(corpus, "far", {"fake": plain}, tmp_path / "work", read_wav_float)
 
     assert sorted(plain_bytes) == ["a.wav", "b.wav"]
     assert plain_bytes == loudnorm_input_bytes
     # Both arms see the 16-bit write path of the decoded clip, not the
     # committed file's bytes.
-    ref = write_wav(tmp_path / "ref.wav", _ingest(corpus / "a.wav"))
+    ref = write_wav(tmp_path / "ref.wav", read_wav_float(corpus / "a.wav"))
     assert plain_bytes["a.wav"] == ref.read_bytes()
 
 
 def test_empty_clean_transcript_refuses_instead_of_scoring(tmp_path: Path) -> None:
-    corpus = _corpus(tmp_path)
+    corpus = make_corpus(tmp_path)
     with pytest.raises(DegradeError, match="empty transcript"):
         run_degrade_eval(
-            corpus, "noisy", {"silent": lambda wav: ""}, tmp_path / "work", _ingest
+            corpus,
+            "noisy",
+            {"silent": lambda wav: ""},
+            tmp_path / "work",
+            read_wav_float,
         )
 
 
 def test_crashing_backend_refuses_instead_of_scoring_wer(tmp_path: Path) -> None:
-    corpus = _corpus(tmp_path)
+    corpus = make_corpus(tmp_path)
 
     def crashing(wav: Path) -> str:
         if wav.parent.name.endswith("loudnorm"):
@@ -274,14 +260,16 @@ def test_crashing_backend_refuses_instead_of_scoring_wer(tmp_path: Path) -> None
         return "hello"
 
     with pytest.raises(DegradeError, match="backend failed"):
-        run_degrade_eval(corpus, "noisy", {"bad": crashing}, tmp_path / "work", _ingest)
+        run_degrade_eval(
+            corpus, "noisy", {"bad": crashing}, tmp_path / "work", read_wav_float
+        )
 
 
 def test_unknown_profile_refuses_before_writing_variants(tmp_path: Path) -> None:
-    corpus = _corpus(tmp_path)
+    corpus = make_corpus(tmp_path)
     with pytest.raises(DegradeError, match="unknown degrade profile"):
         run_degrade_eval(
-            corpus, "", {"fake": lambda wav: "hello"}, tmp_path / "w", _ingest
+            corpus, "", {"fake": lambda wav: "hello"}, tmp_path / "w", read_wav_float
         )
     assert not (tmp_path / "w").exists()
 
@@ -296,7 +284,7 @@ def _cli(corpus: Path, *extra: str) -> Result:
 def test_scoring_bug_is_not_relabelled_as_degrade_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    corpus = _corpus(tmp_path)
+    corpus = make_corpus(tmp_path)
 
     def buggy_run_eval(*args: object, **kwargs: object) -> dict[str, float]:
         raise ValueError("scoring bug")
@@ -304,14 +292,18 @@ def test_scoring_bug_is_not_relabelled_as_degrade_error(
     monkeypatch.setattr(degrade, "run_eval", buggy_run_eval)
     with pytest.raises(ValueError, match="scoring bug"):
         run_degrade_eval(
-            corpus, "noisy", {"fake": lambda wav: "hello"}, tmp_path / "w", _ingest
+            corpus,
+            "noisy",
+            {"fake": lambda wav: "hello"},
+            tmp_path / "w",
+            read_wav_float,
         )
 
 
 def test_cli_lets_programming_errors_raise(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    corpus = _corpus(tmp_path)
+    corpus = make_corpus(tmp_path)
     monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
 
     def bug(*args: object, **kwargs: object) -> list[object]:
@@ -328,7 +320,7 @@ def test_cli_lets_programming_errors_raise(
 def test_cli_refuses_gate_flags_with_degrade(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str
 ) -> None:
-    corpus = _corpus(tmp_path)
+    corpus = make_corpus(tmp_path)
     monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
     assert _cli(corpus, flag).exit_code == 2
 
@@ -336,7 +328,7 @@ def test_cli_refuses_gate_flags_with_degrade(
 def test_cli_exits_2_without_traceback_when_ffmpeg_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    corpus = _corpus(tmp_path)
+    corpus = make_corpus(tmp_path)
     monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
 
     def no_ffmpeg(path: Path) -> np.ndarray:
@@ -351,9 +343,9 @@ def test_cli_exits_2_without_traceback_when_ffmpeg_missing(
 def test_cli_exits_2_without_traceback_when_variant_write_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    corpus = _corpus(tmp_path)
+    corpus = make_corpus(tmp_path)
     monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
-    monkeypatch.setattr(ingest, "ingest_audio", _ingest)
+    monkeypatch.setattr(ingest, "ingest_audio", read_wav_float)
 
     def disk_full(path: Path, x: np.ndarray) -> Path:
         raise OSError("No space left on device")
@@ -367,8 +359,8 @@ def test_cli_exits_2_without_traceback_when_variant_write_fails(
 def test_cli_exits_2_without_traceback_when_backend_crashes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    corpus = _corpus(tmp_path)
-    monkeypatch.setattr(ingest, "ingest_audio", _ingest)
+    corpus = make_corpus(tmp_path)
+    monkeypatch.setattr(ingest, "ingest_audio", read_wav_float)
 
     def model_missing(wav: Path) -> str:
         raise RuntimeError("model not cached")

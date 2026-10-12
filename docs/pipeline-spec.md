@@ -839,9 +839,15 @@ which an inference-time system does not have, so it is an oracle, not a
 deployable method. An RMS match is not WER-optimal, so it is not a proven upper
 bound on what level alone can recover), `loudnorm`, and `delta` (`loudnorm -
 plain`). The `gain` arm isolates level restoration. The `far` profile loses
-20 dB: for parakeet and consensus, level restoration explains most of
-loudnorm's benefit; for canary it explains about half. Compare `loudnorm`
-with `gain` to see what loudnorm adds beyond level. Nothing here
+20 dB. Measured once (issue #155, single run, not a fixed property of the
+backends): far profile, WER plain / gain / loudnorm: parakeet 0.4723 / 0.2700 /
+0.2327; canary 0.7355 / 0.6997 / 0.6667; consensus 0.4595 / 0.3044 / 0.2475.
+The run used 28 FLEURS clips plus the Piper clips, synthetic degradations,
+white noise only, and the oracle gain control. On this run level restoration
+accounts for most of loudnorm's benefit for parakeet and consensus and about
+half for canary. Treat this as one measurement with those limits, not a
+general result; re-run the table to compare other corpora or profiles.
+Compare `loudnorm` with `gain` to see what loudnorm adds beyond level. Nothing here
 measures dereverberation by itself. Whisper (the meeting pipeline's decoder) is
 not covered: only parakeet, canary and consensus are scored. No default changes
 because of this table. The clean reference row is the committed clips
