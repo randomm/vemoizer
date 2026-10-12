@@ -21,8 +21,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import signal
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
+from types import FrameType
 
 import typer
 
@@ -167,6 +171,13 @@ def register_eval(app) -> None:
             help="Emit the informational agreement-on-wrong metric "
             "(two decoders agree AND the shared text is wrong; issue #62).",
         ),
+        degrade: str | None = typer.Option(
+            None,
+            "--degrade",
+            help="Informational far-field benchmark (issue #154): profile "
+            "far, noisy, or far-noisy; prints plain vs loudnorm WER. "
+            "Never gated; skips the regular gate output.",
+        ),
     ) -> None:
         """Score decode backends over the fixture corpus (WER)."""
         if not corpus.is_dir():
@@ -182,6 +193,19 @@ def register_eval(app) -> None:
                 err=True,
             )
             raise typer.Exit(code=2)
+
+        if degrade is not None:
+            # Informational and exclusive: the gate, agreement and LLM flags
+            # are refused (exit 2) rather than silently ignored.
+            if check or update_baseline or agreement or llm:
+                typer.echo(
+                    "error: --degrade is informational; it cannot be combined "
+                    "with --check, --update-baseline, --agreement or --llm",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+            _emit_degrade(corpus, names, degrade)
+            return
 
         measured: dict[str, dict[str, float]] = {}
         if agreement:
@@ -217,6 +241,57 @@ def register_eval(app) -> None:
             typer.echo(f"baseline updated: {baseline}")
         if check:
             _check_baseline(baseline, fingerprint, measured)
+
+
+def _exit_on_term(signum: int, frame: object) -> None:
+    """Turn SIGTERM into a normal exit so the scratch dir's ``finally`` runs."""
+    raise SystemExit(128 + signum)
+
+
+_Handler = Callable[[int, FrameType | None], object] | int
+
+
+def _emit_degrade(corpus: Path, names: list[str], profile: str) -> None:
+    """Print the informational far-field table (issue #154).
+
+    Variants are written to a temp dir that is removed afterwards; nothing
+    is committed or written under the corpus. Audio decodes once at ingest
+    (the ingest contract); loudnorm is applied only in the loudnorm arm.
+    Every failure exits 2 with a message, never a traceback: benchmark
+    refusals (DegradeError), ingest/loudnorm failures, and I/O or decode
+    errors while writing or reading the variants.
+    """
+    from vemoizer.degrade import (
+        DegradeError,
+        format_table,
+        run_degrade_eval,
+        run_header,
+    )
+    from vemoizer.ingest import IngestError, ingest_audio
+
+    work: Path | None = None
+    previous: _Handler | None = signal.signal(signal.SIGTERM, _exit_on_term)
+    try:
+        try:
+            # Inside the try: an OSError creating the scratch dir is exit 2 too.
+            work = Path(tempfile.mkdtemp(prefix="vemoizer-degrade-"))
+            rows = run_degrade_eval(
+                corpus, profile, {n: BACKENDS[n] for n in names}, work, ingest_audio
+            )
+        except (DegradeError, IngestError, OSError) as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(code=2) from None
+        finally:
+            if work is not None:
+                shutil.rmtree(work, ignore_errors=True)
+    finally:
+        # Restore only after the scratch dir is gone, so a SIGTERM in between
+        # cannot leak it. signal.signal() returns None for a handler that was
+        # not installed from Python, and None is not a valid argument back.
+        restore = previous if previous is not None else signal.SIG_DFL
+        signal.signal(signal.SIGTERM, restore)
+    for line in [*run_header(profile), *format_table(rows)]:
+        typer.echo(line)
 
 
 def _emit_meeting_term_hits(

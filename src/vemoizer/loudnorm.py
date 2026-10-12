@@ -86,7 +86,13 @@ _MEASURE_CACHE: dict[tuple[str, int, int], LoudnormMeasurement | None] = {}
 _MIN_I = -100.0
 _MAX_I = 0.0
 _MIN_TP = -100.0
-_MAX_TP = 0.0
+# A sanity cap, NOT a limiter. Decoded clips sit in [-1, 1] before inter-sample
+# overshoot, and that overshoot is a fraction of a dB (the real eval clip
+# measures +0.03 dBTP). +6 dBTP is about 2x full scale: a value above it means
+# a broken measurement, which is treated as no measurement. The cap does not
+# bound the gain: ffmpeg 9.0.1 linear pass 2 ignores measured_TP for the gain,
+# which is bounded by the I/LRA/thresh/offset bounds below.
+_MAX_TP = 6.0
 _MIN_LRA = 0.0
 _MAX_LRA = 100.0
 _MAX_ABS_THRESH = 100.0
@@ -293,8 +299,8 @@ def _measurement_for(path: Path) -> LoudnormMeasurement | None:
         # since the file changed (the cache was either empty or the key
         # changed).
         logger.warning(
-            "loudnorm: measurement failed for %s; falling back to the "
-            "plain unprocessed decode (fail-open)",
+            "loudnorm: measurement failed for %s (fail-open to the plain "
+            "decode unless strict)",
             path.name,
         )
     if len(_MEASURE_CACHE) >= _MEASURE_CACHE_MAX:
@@ -382,6 +388,8 @@ def _kill_and_reap(proc: subprocess.Popen) -> None:
 def preprocess_audio(
     path: Path | str,
     preprocess: str | None = None,
+    *,
+    strict: bool = False,
 ) -> np.ndarray:
     """Decode *path* to 16 kHz mono float32, applying ``loudnorm`` when
     *preprocess* is ``"loudnorm"`` (two-pass form, fail open).
@@ -390,6 +398,11 @@ def preprocess_audio(
     ``ingest_audio``'s argv unchanged. ``"loudnorm"``: two-pass
     normalization; any measurement failure falls back to the plain
     decode with ONE warning (file name only).
+
+    ``strict=True`` (benchmarks only) never falls back: a measurement
+    failure raises :class:`vemoizer.ingest.IngestError`, so a plain decode
+    cannot be reported as a loudnorm result. Pass 2 always raises on
+    failure, strict or not.
     """
     p = Path(path)
     if not p.is_file():
@@ -400,6 +413,13 @@ def preprocess_audio(
     if preprocess == "loudnorm":
         measurement = _measurement_for(p)
         if measurement is None:
+            if strict:
+                from .ingest import IngestError
+
+                raise IngestError(
+                    f"loudnorm measurement failed for {p.name}; refusing to "
+                    "fall back to the plain decode"
+                )
             # Fail open: the measurement failed (the warning was already
             # logged by _measurement_for on the cache MISS), run the
             # plain unprocessed decode.
