@@ -162,8 +162,7 @@ def test_parse_loudnorm_json_last_block_wins() -> None:
 def test_parse_loudnorm_json_accepts_true_peak_above_full_scale() -> None:
     # A hot recording measures a true peak a few hundredths of a dB above
     # 0 dBTP (inter-sample overs). That is a real measurement and must not be
-    # discarded. The gain comes from input_i (-18 to a -16 target: about +2 dB),
-    # not from the peak.
+    # discarded.
     block = (
         "[Parsed_loudnorm_0 @ 0x0]\n{\n"
         '\t"input_i" : "-18.00",\n'

@@ -244,7 +244,11 @@ def register_eval(app) -> None:
 
 
 def _exit_on_term(signum: int, frame: object) -> None:
-    """Turn SIGTERM into a normal exit so the scratch dir's ``finally`` runs."""
+    """Turn SIGTERM into a normal exit so the scratch dir's ``finally`` runs.
+
+    A single signal only: the handler is still installed while the ``finally``
+    removes the dir, so a second SIGTERM raises ``SystemExit`` in there.
+    """
     raise SystemExit(128 + signum)
 
 
@@ -285,9 +289,14 @@ def _emit_degrade(corpus: Path, names: list[str], profile: str) -> None:
             if work is not None:
                 shutil.rmtree(work, ignore_errors=True)
     finally:
-        # Restore only after the scratch dir is gone, so a SIGTERM in between
-        # cannot leak it. signal.signal() returns None for a handler that was
-        # not installed from Python, and None is not a valid argument back.
+        # Restore only after the scratch dir is gone, so a single SIGTERM
+        # arriving in between cannot leak it: the handler is still installed
+        # during rmtree, so a second SIGTERM there raises SystemExit and a
+        # second SIGINT arrives as KeyboardInterrupt, either of which can leave
+        # a partial vemoizer-degrade-* tree (rmtree uses ignore_errors=True, so
+        # cleanup itself does not raise). signal.signal() returns None for a
+        # handler that was not installed from Python, and None is not a valid
+        # argument back.
         restore = previous if previous is not None else signal.SIG_DFL
         signal.signal(signal.SIGTERM, restore)
     for line in [*run_header(profile), *format_table(rows)]:

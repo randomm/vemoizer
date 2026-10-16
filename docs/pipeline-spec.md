@@ -826,7 +826,9 @@ the per-backend WER output. It does not affect the baseline file or the
 committed clips, plain and with `loudnorm`. It is informational and never
 gated: it does not read or write `wer_baseline.json`, and changing a default
 is a separate decision. Variants are 16-bit PCM WAVs in a temp directory
-(removed afterwards, on normal exit, SIGINT and SIGTERM) and are re-decoded by
+(removed on normal exit, and on a single SIGINT or SIGTERM that arrives before
+cleanup begins; a second signal while the removal is running can leave a
+partial `vemoizer-degrade-*` tree in the temp location) and are re-decoded by
 the backends: an eval-only
 exception to the float32 boundary (invariant #6 is unchanged for the
 pipeline). The degraded clip is the source file of the loudnorm arm, an
@@ -872,7 +874,12 @@ Exit codes: `0` on success; `2` for usage errors (unknown or empty profile,
 failure, loudnorm measurement or pass-2 failure, backend crash, empty clean
 transcript, I/O error). Any other exception is a bug and exits non-zero with a
 traceback. A known exit `134` after a successful table is the Metal teardown
-quirk, not a result. A SIGTERM exits `143` and a SIGINT exits `130`, both after the scratch directory is removed and with no traceback. Seeds derive from base seed 154, the profile and the clip
+quirk, not a result. A single SIGTERM exits `143` and a single SIGINT exits
+`130`, both with no traceback, and the scratch directory is removed first when
+the signal arrives before cleanup begins. The handler is still installed during
+the removal, so a second SIGTERM there raises `SystemExit` and a second SIGINT
+raises `KeyboardInterrupt` inside `shutil.rmtree`, which can leave a partial
+`vemoizer-degrade-*` tree in the temp location. Seeds derive from base seed 154, the profile and the clip
 stem (`src/vemoizer/degrade_signal.py`).
 
 ## Configuration
