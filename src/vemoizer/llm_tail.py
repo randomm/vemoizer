@@ -47,6 +47,10 @@ def _run_repair(
     A wall-clock budget (``repair_budget_seconds``) bounds the whole loop:
     on expiry the stage fails open — the remaining paragraphs ship
     un-repaired and one warning is logged (invariant #5).
+
+    ``repair_concurrency`` rides straight through to the stage: the config
+    is the only place the worker count is decided, so a value dropped here
+    would silently make the config key a no-op.
     """
     fn = repair_paragraphs_fn or repair_paragraphs
     client_cls = llm_client_cls or LLMClient
@@ -74,6 +78,7 @@ def _run_repair(
             glossary=glossary or None,
             budget=budget,
             progress_cb=_report if display is not None else None,
+            concurrency=llm_config.repair_concurrency,
         )
     finally:
         repair_client.close()

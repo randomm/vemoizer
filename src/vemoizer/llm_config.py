@@ -29,6 +29,13 @@ LLM_CONFIG_SECTION: str = "llm"
 DEFAULT_REPAIR_BUDGET_S: float = 600.0
 DEFAULT_NOTES_BUDGET_S: float = 600.0
 
+#: How many repair calls may be in flight at once (issue #159). 1 is the
+#: serial loop the stage has always run. Kept here rather than beside the
+#: pool that reads it because ``repair`` imports this module — the bound
+#: has to live in the leaf both sides can reach.
+MAX_REPAIR_CONCURRENCY: int = 4
+DEFAULT_REPAIR_CONCURRENCY: int = 1
+
 
 @dataclass(frozen=True)
 class LLMConfig:
@@ -41,6 +48,11 @@ class LLMConfig:
     (issue #148): they cap a stage whose per-call timeout keeps resetting on
     a stalled connection. Both default to 600 s (10 min) when absent and
     fail open — the stage just runs to its natural end.
+
+    ``repair_concurrency`` (issue #159) is how many of the repair stage's
+    per-paragraph calls may be in flight at once: ``1`` (the default) is the
+    serial loop; the accepted set is the integers ``1..4``, and a malformed
+    value makes the whole section malformed exactly as a bad budget does.
     """
 
     base_url: str
@@ -49,6 +61,7 @@ class LLMConfig:
     timeout_seconds: float
     repair_budget_seconds: float = DEFAULT_REPAIR_BUDGET_S
     notes_budget_seconds: float = DEFAULT_NOTES_BUDGET_S
+    repair_concurrency: int = DEFAULT_REPAIR_CONCURRENCY
 
 
 def load_config(path: Path | str) -> LLMConfig | None:
@@ -93,6 +106,7 @@ _KNOWN_LLM_KEYS: frozenset[str] = frozenset(
         "timeout_seconds",
         "repair_budget_seconds",
         "notes_budget_seconds",
+        "repair_concurrency",
     }
 )
 #: Known ``[meeting]`` keys for strict validation (issue #108): the single
@@ -177,13 +191,40 @@ def _parse_llm_section(section: dict[str, Any]) -> LLMConfig | None:
                 return None
             budget_kwargs[budget_key] = float(budget)
 
+    concurrency = _parse_repair_concurrency(section)
+    if concurrency is None:
+        return None
+
     return LLMConfig(
         base_url=base_url.rstrip("/"),
         model=model.strip(),
         api_key_env=api_key_env,
         timeout_seconds=float(timeout),
+        repair_concurrency=concurrency,
         **budget_kwargs,
     )
+
+
+def _parse_repair_concurrency(section: dict[str, Any]) -> int | None:
+    """The validated ``repair_concurrency`` of an ``[llm]`` section.
+
+    ``None`` means the section is malformed (same fail-open/strict split as
+    every other key here). Absent -> the serial default. Present -> an
+    integer in ``1..MAX_REPAIR_CONCURRENCY``. ``True`` is an ``int`` in
+    Python, so the bool check carries the same weight it does for the
+    budgets: ``repair_concurrency = true`` is a typo, not a request for one
+    worker.
+    """
+    if "repair_concurrency" not in section:
+        return DEFAULT_REPAIR_CONCURRENCY
+    value = section["repair_concurrency"]
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not 1 <= value <= MAX_REPAIR_CONCURRENCY
+    ):
+        return None
+    return value
 
 
 def _strict_load_raw(path: Path) -> tuple[LLMConfig, dict[str, Any]]:

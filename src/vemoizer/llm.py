@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -92,23 +93,44 @@ class LLMClient:
     def __init__(self, config: LLMConfig) -> None:
         self._config = config
         self._client: httpx.Client | None = None
+        # Guards the lazy construction below. The repair stage (issue #159)
+        # hands this one client to several worker threads, and all of them
+        # can arrive here before any has finished — httpx itself is safe to
+        # share once built, but this ``if None`` was not.
+        self._client_lock = threading.Lock()
 
     @property
     def config(self) -> LLMConfig:
         return self._config
 
     def _get_client(self) -> httpx.Client:
-        """Shared httpx client, created on first use; :meth:`close` releases it."""
-        if self._client is None:
-            self._client = httpx.Client(timeout=self._config.timeout_seconds)
-        return self._client
+        """Shared httpx client, created once on first use; :meth:`close` releases it.
+
+        Thread-safe by construction (issue #159): the repair stage shares one
+        client across its worker threads, and httpx and httpcore document a
+        single Client as safe to share — its connection pool is the
+        thread-safety unit. What was not safe was this method's lazy init:
+        N threads racing the ``is None`` check would each build a Client and
+        leak N−1 pools whose sockets outlived :meth:`close`. The lock covers
+        only the construction; concurrent requests do not serialise on it.
+        """
+        with self._client_lock:
+            if self._client is None:
+                self._client = httpx.Client(timeout=self._config.timeout_seconds)
+            return self._client
 
     def close(self) -> None:
-        """Release the shared HTTP client. Idempotent; never raises."""
-        if self._client is not None:
+        """Release the shared HTTP client. Idempotent; never raises.
+
+        Called by the caller thread once every in-flight repair call has
+        settled — never from a worker, or a worker would close the pool out
+        from under its siblings.
+        """
+        with self._client_lock:
+            client, self._client = self._client, None
+        if client is not None:
             with contextlib.suppress(Exception):  # close is best-effort
-                self._client.close()
-            self._client = None
+                client.close()
 
     def _api_key(self) -> str | None:
         """API key from the env var named in config; ``None`` when unset."""

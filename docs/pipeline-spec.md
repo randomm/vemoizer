@@ -948,12 +948,42 @@ connection refused, HTTP error) also fails open per invariant #5.
 | `llm.timeout_seconds` | request timeout; must be set (unset = hang) |
 | `llm.repair_budget_seconds` | wall-clock budget for the whole repair stage (default 600, issue #148); it also cuts off the LLM call in flight via `complete(deadline_s=remaining)` (checked per streamed chunk), not just the gap between calls; on expiry the remaining paragraphs ship un-repaired (fail-open) |
 | `llm.notes_budget_seconds` | wall-clock budget for the whole notes stage (default 600, issue #148); it also cuts off the LLM call in flight via `complete(deadline_s=remaining)` (checked per streamed chunk), not just the gap between calls; on expiry the transcript ships without notes (fail-open) |
+| `llm.repair_concurrency` | how many repair calls may be in flight at once (default 1, accepted 1–4, issue #159). The repair stage is one HTTP call per paragraph — hundreds for a long meeting — so the loop, not the model, is the wall clock. At 1 the calls run on the caller's thread exactly as before; above it they run on a bounded worker pool and results are still assembled in paragraph order, with the guards, the stage budget, the progress display and the log all staying on the caller's thread. **The default stays 1 deliberately:** a single-slot local server (Ollama, llama.cpp) serialises the work anyway, so extra workers buy latency on one endpoint rather than throughput, and a rate-limited hosted endpoint can answer N concurrent requests with 429s. Raise it only against a server that serves concurrent requests. Validated like the budgets — a bool, float, string, 0, negative, or value above 4 makes the `[llm]` section malformed (fail-open to no LLM, or `ConfigError` on the strict search path) rather than being quietly ignored |
 | `language` | section language for the Markdown header and quality report: `"fi"` (default) or `"en"` (top-level key, issue #75) |
 | `meeting.language` | recognition-language override for the whisper meeting decode: `"auto"` (default, per-window detection), `"fi"`, or `"en"` pins every window (issue #108) |
 | `people` | top-level list of speaker names for the `names` command (the read path fails open to an empty list for a non-list value; issue #93) |
 
 When no config exists or the endpoint fails, every LLM call fails open and
 the un-adjudicated transcript is returned.
+
+### Shared HTTP client under a concurrent repair (issue #159)
+
+The repair worker pool shares **one** `LLMClient`, and therefore one
+`httpx.Client`, across its threads. The decision and its basis:
+
+- **`httpx.Client` is safe to share.** httpcore documents its connection
+  pool as thread-safe — one pool instance shared by multiple threads is the
+  supported pattern, and sharing one client (rather than one per thread) is
+  what keeps the connection pool warm. Verified against `httpx 0.28.1` /
+  `httpcore 1.0.9` (`python -m httpx --version` equivalent), whose sync
+  `ConnectionPool` wraps every state mutation in an
+  `_optional_thread_lock`.
+- **What was not safe was ours.** `LLMClient._get_client` built the client
+  lazily behind an unguarded `if self._client is None`, so N workers
+  arriving cold could each construct a `Client` and leak N−1 pools whose
+  sockets outlived `close()`. That construction is now under a lock; the
+  lock covers only the build, so concurrent requests do not serialise on
+  it.
+- **`close()` stays on the caller's thread**, after the pool has drained —
+  never from a worker, which would pull the pool out from under its
+  siblings.
+
+No lower bound is pinned on `httpx` for this: the property relied on is
+httpcore's documented pool contract rather than a version-specific fix, and
+the pool lock is present in the version this project resolves to today
+(`pyproject.toml` lists `httpx` unpinned, unchanged by this issue). If the
+pool contract ever changes, `tests/test_repair_concurrency.py`'s
+shared-client test is what fails.
 
 ### Config search order (issue #82)
 
