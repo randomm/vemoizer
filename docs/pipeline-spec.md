@@ -825,9 +825,18 @@ the per-backend WER output. It does not affect the baseline file or the
 <far|noisy|far-noisy>` scores each backend on seeded degraded copies of the
 committed clips, plain and with `loudnorm`. It is informational and never
 gated: it does not read or write `wer_baseline.json`, and changing a default
-is a separate decision. Variants are 16-bit PCM WAVs in a temp directory
-(removed afterwards, on normal exit, SIGINT and SIGTERM) and are re-decoded by
-the backends: an eval-only
+is a separate decision. Variants are 16-bit PCM WAVs in a temp
+directory of mode `0700` as created by `tempfile.mkdtemp` (this command does not
+chmod it) and removed afterwards: on normal exit,
+and on a single SIGINT or SIGTERM that arrives before cleanup begins. A second
+signal while the removal is running can leave a partial `vemoizer-degrade-*`
+tree, so cleanup is best-effort; nothing recovers such a tree and it is safe to
+delete by hand. It holds only derived copies of the committed corpus clips and
+their reference transcripts, never the only copy of anything. The location is
+the temp directory named by `$TMPDIR`, or the system temp directory when
+`$TMPDIR` is unset or unusable. The
+variants are re-decoded by the
+backends: an eval-only
 exception to the float32 boundary (invariant #6 is unchanged for the
 pipeline). The degraded clip is the source file of the loudnorm arm, an
 ingest-time input; no pipeline stage re-reads a file.
@@ -871,8 +880,22 @@ Exit codes: `0` on success; `2` for usage errors (unknown or empty profile,
 `--degrade`) and for expected failures (unpaired clip, ffmpeg or decode
 failure, loudnorm measurement or pass-2 failure, backend crash, empty clean
 transcript, I/O error). Any other exception is a bug and exits non-zero with a
-traceback. A known exit `134` after a successful table is the Metal teardown
-quirk, not a result. A SIGTERM exits `143` and a SIGINT exits `130`, both after the scratch directory is removed and with no traceback. Seeds derive from base seed 154, the profile and the clip
+traceback; the no-traceback exit codes below are for a single signal. A known
+exit `134` after a successful table is the Metal teardown
+quirk, not a result. A single SIGTERM exits `143` and a single SIGINT exits
+`130`, both with no traceback, and the scratch directory is removed first when
+the signal arrives before cleanup begins. The handler is still installed during
+the removal, so a second signal is delivered while `shutil.rmtree` is executing
+— the SIGTERM through the still-installed handler, the SIGINT through Python's
+default handler — and the resulting exception escapes the cleanup
+`finally` without interrupting the handler restore (which is its own `finally`
+and still runs), and the removal is left unfinished — a partial
+`vemoizer-degrade-*` tree (see the scratch-dir note above for where it lands
+and how to clear it). Measured under the real console entry point
+(typer 0.27.2 / click 8.5.0, Python 3.12): the second SIGINT exits `130` and the
+second SIGTERM exits `143` — the same codes as the single-signal case, and both
+silent on stderr. The exit code and the unfinished removal are what a second
+signal changes, not the output. Seeds derive from base seed 154, the profile and the clip
 stem (`src/vemoizer/degrade_signal.py`).
 
 ## Configuration

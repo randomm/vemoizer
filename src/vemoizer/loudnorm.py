@@ -12,9 +12,10 @@ form:
   ``target_offset``) arrives on stderr.
 * **Pass 2** is the normal decode with
   ``loudnorm=...:measured_I=..:measured_TP=..:measured_LRA=..:measured_thresh=..:offset=..:linear=true``
-  so the measured values drive a deterministic linear gain
-  (``linear=true`` never applies dynamic gain beyond the measurement —
-  silent input can never be amplified unboundedly).
+  so the measured values feed pass 2's linear-mode computation
+  (whether ``measured_TP`` also moves the applied gain was not established:
+  with ffmpeg 9.0.1 it did not change the output, per the PR #155 observation.
+  Within that linear mode, silent input can never be amplified unboundedly).
 
 The filter is appended AFTER ``-ar 16000 -ac 1`` (the resample/mono
 downmix happens first, chosen by measurement on a synthetic pink-noise
@@ -90,8 +91,9 @@ _MIN_TP = -100.0
 # overshoot, and that overshoot is a fraction of a dB (the real eval clip
 # measures +0.03 dBTP). +6 dBTP is about 2x full scale: a value above it means
 # a broken measurement, which is treated as no measurement. The cap does not
-# bound the gain. Observed in the tested cases only: pass-2 output peaks held
-# near -1.5 dBTP and no sample exceeded full scale. The mechanism behind the
+# bound the gain: with real ffmpeg 9.0.1, pass 2 ignores measured_TP for gain
+# in linear mode (measured and recorded in the PR #155 body), so this cap only
+# rejects absurd measurements — which is all it does. The mechanism behind the
 # pass-2 gain was not isolated.
 _MAX_TP = 6.0
 _MIN_LRA = 0.0
@@ -125,10 +127,11 @@ def loudnorm_pass1_filter() -> str:
 def loudnorm_pass2_filter(m: LoudnormMeasurement) -> str:
     """The loudnorm filter string for pass 2 (the actual normalization).
 
-    ``measured_*`` values drive a linear gain (``linear=true``): the gain
-    is computed from the measurement alone, so it is deterministic and
-    bounded — measurements that would imply an unbounded gain (silent
-    input) are rejected by :func:`_sanitize_measurement` before this
+    The ``measured_*`` values are passed to pass 2's linear-mode computation
+    (``linear=true``). Whether ``measured_TP`` also influences the applied gain
+    was not established — the PR #155 observation is that it did not change the
+    output with ffmpeg 9.0.1. Measurements that would imply an unbounded gain
+    (silent input) are rejected by :func:`_sanitize_measurement` before this
     string is ever built.
     """
     return (
