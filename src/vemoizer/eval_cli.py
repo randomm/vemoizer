@@ -260,9 +260,14 @@ _Handler = Callable[[int, FrameType | None], object] | int
 def _emit_degrade(corpus: Path, names: list[str], profile: str) -> None:
     """Print the informational far-field table (issue #154).
 
-    Variants are written to a ``0700`` temp dir that is removed on normal exit
-    and on a single SIGINT/SIGTERM, so nothing is committed or written under
-    the corpus. Cleanup is best-effort and never retried: a second signal that
+    Variants are written to a temp dir (mode 0700 as created by
+    ``tempfile.mkdtemp``; this command does not chmod it) that is removed on
+    normal exit and on a single signal, so nothing is committed or written under
+    the corpus. SIGTERM is handled here (exit 143); SIGINT is not handled here:
+    it unwinds as an ordinary ``KeyboardInterrupt`` (exit 130 via the entry
+    point), which still runs the cleanup ``finally`` — so the single-signal
+    removal holds for both, because the cleanup lives in a ``finally``.
+    Cleanup is best-effort and never retried: a second signal that
     lands inside the removal can leave a partial ``vemoizer-degrade-*`` tree
     behind, which no later run recovers and which is safe to delete by hand: it
     holds only derived copies of the committed corpus clips, never the only
@@ -297,8 +302,10 @@ def _emit_degrade(corpus: Path, names: list[str], profile: str) -> None:
             if work is not None:
                 shutil.rmtree(work, ignore_errors=True)
     finally:
-        # Restore only after the scratch dir is gone, so a single SIGTERM
-        # arriving in between cannot leak it: the handler is still installed
+        # Restore only after the scratch dir is gone. The cleanup lives in a
+        # finally, so ANY single signal — before or during the decode — still
+        # gets the directory removed; the only leak window is a second signal
+        # landing while rmtree runs: the handler is still installed
         # during rmtree, so a second SIGTERM there raises SystemExit and a
         # second SIGINT arrives as KeyboardInterrupt — either escapes this
         # finally with the removal unfinished, which can leave a partial
