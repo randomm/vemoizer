@@ -32,14 +32,14 @@ from vemoizer.progress_wiring import _close_run_display
 from vemoizer.run_log import file_log as file_log
 from vemoizer.sidecar import resolve_run_glossary_files
 
-# ``as``-bindings mark the intentional re-exports (ruff F401): the names the
-# moved plain loop (:mod:`vemoizer.preset_plain_loop`, issue #151) looks up on
-# THIS module, which are exactly the long-standing test seams. Nothing is
-# re-exported merely as a "patch target" — a name no code looks up here is
-# never reached by a patch and only manufactures vacuously-green tests.
-# The ``preset_final`` trio is imported inside :func:`_run_preset_groups`, the
-# only path here that calls it; re-exporting it for the plain loop would be a
-# name nothing looks up here, for the same reason as above.
+# The seam invariant this module keeps for the moved plain loop
+# (:mod:`vemoizer.preset_plain_loop`, issue #151): a name is re-exported here,
+# with an ``as``-binding (ruff F401), only because that loop looks it up on
+# THIS module — which is exactly where the long-standing test seams patch. A
+# name no code looks up here is never reached by a patch and only manufactures
+# vacuously-green tests, so it is not re-exported. The invariant is asserted,
+# not just claimed: ``tests/test_preset_plain_loop_seams.py`` parses both
+# modules and fails on a dead or missing seam re-export.
 from .preset_plain_loop import run_preset_plain_loop
 
 if TYPE_CHECKING:
@@ -86,6 +86,11 @@ def _run_preset_groups(
     to the command's handler.
     """
     from vemoizer.batch import run_batch
+
+    # Deferred for the same reason as the module-level seam rule above: this is
+    # the only path in THIS module that calls the ``preset_final`` trio, and the
+    # plain loop imports the same three from its own module. A re-export here
+    # would be a name nothing looks up — never reached by a patch.
     from vemoizer.preset_final import (
         print_final_line,
         print_wrote_lines,

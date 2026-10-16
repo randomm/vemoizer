@@ -96,8 +96,9 @@ def run_preset_plain_loop(
     # ``vemoizer.notify``: the suite stubs these posters by replacing the name
     # on that module, and a module-level ``from ... import`` binds the function
     # object once at import time, so that patch would never reach this loop.
-    # The same function-local import is what ``batch_plain.py:101`` does for
-    # its own failure notification.
+    # ``batch_plain._run_plain`` uses the same call-site-local idiom for its own
+    # failure notification; ``test_preset_plain_loop_seams.py`` fails if these
+    # two are ever hoisted to module level.
     from vemoizer.notify import notify_result, notify_write
     from vemoizer.progress_wiring import set_batch_prefix
 
