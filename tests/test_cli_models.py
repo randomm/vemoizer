@@ -570,11 +570,16 @@ def test_render_pull_report_failure_line() -> None:
 # ``models pull`` echoes library-owned exception text to the terminal. The
 # run log scrubs ``hf_…``/``Bearer …`` via ``run_log_io.RedactingFormatter``,
 # but that formatter only ever sees log records — stdout has no formatter, so
-# the formatters themselves must scrub. Break-and-fail holds per branch: each
-# of the four text-echoing sites below (``RepositoryNotFoundError``,
-# ``RevisionNotFoundError``, generic ``HfHubHTTPError``, ``GatedRepoError``)
-# has its own case, and removing that site's ``_scrub_credentials`` call fails
-# that case.
+# the formatters themselves must scrub. The shared helper is
+# :func:`vemoizer.run_log_io.scrub_credentials`, imported into
+# ``vemoizer.model_pull_report`` and called at the four sites that interpolate
+# library text into stdout: the ``RepositoryNotFoundError`` and
+# ``RevisionNotFoundError`` branches and the generic ``HfHubHTTPError`` branch
+# of ``_describe_hf_error``, and the ``GatedRepoError`` branch of
+# ``format_pull_error``. Each has its own case below, and deleting the
+# ``scrub_credentials(`` call at that site fails that case (the other branches
+# return fixed strings, so no scrub there is asserted — there is nothing to
+# leak).
 # ---------------------------------------------------------------------------
 
 _TOKEN = "hf_" + "T" * 34  # the HF token shape run_log_io matches
@@ -596,9 +601,12 @@ def test_describe_hf_error_scrubs_token_from_revision_not_found() -> None:
     """The ``RevisionNotFoundError`` branch scrubs too (issue #151 lens).
 
     ``_make_http_error`` resolves 404 to ``RepositoryNotFoundError``, so this
-    branch was never reached: removing its ``_scrub_credentials`` call kept
+    branch was never reached: deleting its ``scrub_credentials(`` call kept
     the whole suite green. The class is named explicitly to land on it.
-    Break-and-fail: deleting the call on that branch fails this test.
+    Break-and-fail: in ``src/vemoizer/model_pull_report.py``, in
+    ``_describe_hf_error``, in the ``isinstance(exc, RevisionNotFoundError)``
+    branch, replace ``scrub_credentials(getattr(exc, 'message', str(exc)))``
+    with ``getattr(exc, 'message', str(exc))`` — this test fails.
     """
     exc = _make_http_error(404, f"Revision {_TOKEN} missing", cls=RevisionNotFoundError)
     report = models_mod._describe_hf_error(exc)
