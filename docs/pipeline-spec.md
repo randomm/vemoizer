@@ -983,7 +983,8 @@ httpcore's documented pool contract rather than a version-specific fix, and
 the pool lock is present in the version this project resolves to today
 (`pyproject.toml` lists `httpx` unpinned, unchanged by this issue). If the
 pool contract ever changes, `tests/test_repair_concurrency.py`'s
-shared-client test is what fails.
+shared-client test is what fails (the case itself lives in
+`tests/test_llm_tail_repair.py`, which owns how the tail wires the stage).
 
 ### Config search order (issue #82)
 
