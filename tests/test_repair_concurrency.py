@@ -71,6 +71,31 @@ class _ConcurrencyFakeClock:
         with self._lock:
             self._now += seconds
 
+    def set_to(self, seconds: float) -> None:
+        """Jump the clock to an absolute reading.
+
+        Lets a test spend the budget at a moment it controls — while calls are
+        parked, say — without depending on how much time the other calls in the
+        window happened to burn.
+        """
+        with self._lock:
+            self._now = seconds
+
+    def charge(self, seconds: float) -> float:
+        """Advance the clock by *seconds* and return the reading it reached.
+
+        The monotonically increasing kind of advance: each call books its own
+        duration exactly once, so the stage's view of elapsed time is a running
+        total of the calls that actually ran. Advancing by a delta from every
+        worker would let N concurrent calls each charge the same interval, and
+        ``budget.remaining()`` handed to the next submission would then be a
+        fiction — the budget would look spent on calls still queued behind two
+        others.
+        """
+        with self._lock:
+            self._now += seconds
+            return self._now
+
 
 class ThreadRecordingClient:
     """A fake ``LLMClient`` that proves what ran where, and when.
@@ -90,6 +115,10 @@ class ThreadRecordingClient:
         failures: dict[str, BaseException] | None = None,
         clock: _ConcurrencyFakeClock | None = None,
         burn_s: float = 0.0,
+        honour_deadline: bool = False,
+        arrived: Any = None,
+        hold: Any = None,
+        real_time: bool = False,
     ) -> None:
         # *config* is accepted (and ignored) because ``_run_repair`` builds
         # the client as ``llm_client_cls(llm_config)``.
@@ -101,8 +130,41 @@ class ThreadRecordingClient:
         # stage clock, so budget tests need no subclass of their own.
         self._clock = clock
         self._burn_s = burn_s
+        #: When true, each call consumes *real* monotonic time as well as
+        #: charging the fake stage clock. A budget is a wall-clock allowance, so
+        #: a stage that decides "is there time left?" from a real clock must be
+        #: measured against one; a fake clock the workers never actually spend
+        #: makes every call finish at elapsed 0 and lets a stage that ignores
+        #: the gate look identical to one that honours it.
+        self._real_time = real_time
         self._replies = replies or {}
         self._failures = failures or {}
+        #: When set, ``complete`` honours the ``deadline_s`` the stage hands it
+        #: the way :class:`~vemoizer.llm.LLMClient` does: the call ends at its
+        #: deadline instead of hanging. The drain contract depends on it — a
+        #: fake that ignored the deadline would keep a worker alive past the
+        #: stage and make the drain's behaviour a function of the fake.
+        self._honour_deadline = honour_deadline
+        #: Called with the paragraph text the instant ``complete`` is entered,
+        #: before anything can block — the signal that a call is in flight.
+        self._arrived = arrived
+        #: Called with the paragraph text from inside ``complete`` and expected
+        #: to block until the test releases *this* call. Per-paragraph, so one
+        #: release cannot let every worker escape at once.
+        self._hold = hold
+        #: Call index -> how long that call actually occupied its worker,
+        #: measured rather than nominalised.
+        self.durations: dict[str, float] = {}
+        #: Wall-clock entry instant per call, kept apart from
+        #: :attr:`entered_at` (a fake-clock test reads that as a stage-clock
+        #: reading) so a measured duration is always a real delta.
+        self._entered_wall: dict[str, float] = {}
+        #: Call index -> the stage-clock reading at which ``complete`` was
+        #: *entered*. The submission-side evidence: a paragraph whose call
+        #: entered after the budget was gone was started past the stage.
+        self.entered_at: dict[str, float] = {}
+        #: Call index -> the clock reading at which its call finished.
+        self.finished_at: dict[str, float] = {}
         self._lock = threading.Lock()
         self._in_flight = 0
         self._peak = 0
@@ -119,26 +181,97 @@ class ThreadRecordingClient:
         deadline_s: float | None = None,
         **kw: Any,
     ) -> str | None:
+        # Arrival is reported *before* anything can block, so a caller can
+        # observe a call that is genuinely in flight. Had the park come first,
+        # "arrived" would mean "this call is over", and a test waiting on
+        # arrival while the stage waits on the call would deadlock.
+        if self._arrived is not None:
+            self._arrived(user)
+        if self._clock is not None:
+            # Booked under the same lock as the call record, so "entered at"
+            # and "was called" are one atomic fact rather than two reads a
+            # scheduling blip can separate.
+            with self._lock:
+                self.entered_at[user] = self._clock()
+        else:
+            # No fake stage clock in this test: record the real monotonic
+            # reading instead, so "when did this call start" stays answerable
+            # for a budget that runs on the wall clock.
+            with self._lock:
+                self.entered_at[user] = time.monotonic()
+                self._entered_wall[user] = time.monotonic()
         with self._lock:
             self.threads.append(threading.current_thread().name)
             self.calls.append((user, deadline_s))
             self._in_flight += 1
             self._peak = max(self._peak, self._in_flight)
         try:
+            if self._hold is not None:
+                self._hold(user)
+            if self._real_time:
+                # Spend the duration for real. Bounded by the deadline the stage
+                # handed over, so a call can never outlive the bound it was
+                # given — the same contract the real client keeps.
+                threading.Event().wait(
+                    min(self._burn_s, deadline_s) if deadline_s is not None else self._burn_s
+                )
+            if self._honour_deadline and deadline_s is not None:
+                # Behave like the real client: the call cannot outlive the
+                # bound the stage gave it. The bound is used *as given* — it is
+                # the stage's own ``budget.remaining()``, so truncating it to
+                # some fixed real-time cap would make every call finish in
+                # about nil time and turn a budget test into a coin flip. A
+                # test that passes a huge deadline is asking for a long call;
+                # the tests that do this pass a small one.
+                threading.Event().wait(deadline_s)
             if self.before is not None:
                 self.before(user)
-            if self._clock is not None:
-                self._clock.advance(self._burn_s)
             failure = self._failures.get(user)
             if failure is not None:
                 raise failure
             return self._replies.get(user, user + "x")
         finally:
+            # The call's cost is booked as it *leaves*, not as it arrives: a
+            # queue costs a paragraph its duration once, when it actually runs.
+            # The ``finally`` keeps the accounting honest for a call that raises.
+            entered = self._entered_wall.get(user)
+            if entered is not None:
+                with self._lock:
+                    self.durations[user] = time.monotonic() - entered
+            if self._clock is not None:
+                at = self._clock.charge(self._burn_s)
+                with self._lock:
+                    self.finished_at[user] = at
             with self._lock:
                 self._in_flight -= 1
 
     def close(self) -> None:
         self.closed += 1
+
+    def elapsed_work_s(self) -> float:
+        """Total time the calls actually occupied, summed over the pool.
+
+        The denominator the budget bound needs: what a paragraph really costs is
+        how long its call ran, not what the fixture asked it to pretend. Each
+        call books its own duration on leaving, so this is a sum of real
+        per-call spans rather than a clock delta that would double-count calls
+        running side by side.
+        """
+        with self._lock:
+            return sum(self.durations.values())
+
+    def mean_call_s(self) -> float:
+        """Average wall-clock duration of the calls that ran.
+
+        The denominator the budget bound needs: what a paragraph really costs
+        is how long its call ran, measured on the same wall clock the budget
+        reads, not the figure the fixture nominalised. Grading the stage
+        against a number the fixture invented would make a slightly slow call
+        look like a gate bug.
+        """
+        with self._lock:
+            n = len(self.durations)
+            return (sum(self.durations.values()) / n) if n else 0.0
 
     @property
     def peak_in_flight(self) -> int:
@@ -297,22 +430,100 @@ def test_concurrency_one_never_leaves_the_calling_thread() -> None:
 
 
 def test_no_worker_outlives_the_call() -> None:
-    """Every thread the stage starts is joined before it returns.
+    """Every thread the stage started is gone shortly after it returns.
 
     A leaked non-daemon worker outlives the CLI: ``concurrent.futures``
-    registers an atexit hook that joins pool threads, so a stuck one turns
-    the next Ctrl-C into a hang the user cannot explain.
+    registers an atexit hook that joins pool threads, so a stuck one turns the
+    next Ctrl-C into a hang the user cannot explain. The stage hands that wait
+    to the pool rather than sitting on it (PM decision (d)), so the claim is
+    that the workers *end* — bounded here by :data:`WAIT_S`, far inside any
+    plausible CLI lifetime — not that they are already gone at the instant the
+    call returns. A worker blocked forever on a socket is the give-up case the
+    next test pins; on a healthy run nothing survives.
     """
     before = {t.name for t in threading.enumerate()}
     client = ThreadRecordingClient()
     repair_paragraphs(client, _paras(12), concurrency=MAX_CONCURRENCY)
-    leaked = {
-        t.name
-        for t in threading.enumerate()
-        if t.name.startswith("vemoizer-repair") and t.name not in before
-    }
-    assert not leaked, f"worker threads outlived repair_paragraphs: {leaked}"
+    # A healthy pool has no work left when the stage returns, so its workers
+    # exit on their own almost immediately; the wait is bounded so a leak is a
+    # failure rather than a hang.
+    leaked = lambda: sorted(  # noqa: E731 - a probe, called under a deadline
+        thr.name
+        for thr in threading.enumerate()
+        if thr.name.startswith("vemoizer-repair") and thr.name not in before
+    )
+    assert _wait_until(lambda: not leaked()), (
+        f"worker threads outlived repair_paragraphs: {leaked()}"
+    )
+    assert {t.name for t in threading.enumerate()} == before
     assert client.peak_in_flight <= MAX_CONCURRENCY
+
+
+def test_budget_give_up_never_waits_for_a_worker_that_never_answers() -> None:
+    """The stage returns even when no worker ever answers.
+
+    The hang proof for PM decision (d). The pool's workers are non-daemon and
+    ``concurrent.futures`` registers an atexit hook that joins them, so the
+    only way the CLI stays interruptible is that this stage never *blocks* on a
+    call the budget has already refused. Three calls are parked on events that
+    nothing but this test ever sets — they answer to nobody, which is the
+    stalled-connection case the stage budget exists for — and the budget is
+    spent while all three are in flight. The stage must still walk away and
+    return within a bounded wait.
+
+    The events are released only after the stage has returned, so the release
+    can never be what let it return: if the stage waited on a parked call, this
+    test fails on the ``returned`` assertion rather than hanging.
+    """
+    release = {i: threading.Event() for i in range(9)}
+
+    class _Stalled(ThreadRecordingClient):
+        """Calls that answer to nobody until the test lets each one go.
+
+        Per-paragraph events, deliberately: a single shared event would release
+        every parked worker the moment the stage came back, and the leak check
+        would then be measuring the test's own cleanup. No deadline is honoured
+        here on purpose — this is the transport that ignores its own bound, the
+        worst case the drain has to survive.
+        """
+
+    client = _Stalled(
+        hold=lambda text: release[_index(text)].wait(timeout=WAIT_S),
+    )
+    clock = _ConcurrencyFakeClock()
+    budget = StageBudget(30.0, clock=clock)
+    returned = threading.Event()
+    out: list[dict[str, Any]] = []
+
+    def call() -> None:
+        out.extend(repair_paragraphs(client, _paras(9), concurrency=3, budget=budget))
+        returned.set()
+
+    caller = threading.Thread(target=call, name="budget-give-up-caller")
+    caller.start()
+    # The three slots genuinely filled with calls that answer to nobody…
+    assert _wait_until(lambda: client.call_count >= 3), "the pool never filled"
+    # …and the budget spent while they are all still in flight.
+    clock.advance(31.0)
+
+    # The stage must stop working and return rather than block on a call the
+    # budget refused — the property that keeps the CLI interruptible.
+    try:
+        caller.join(timeout=WAIT_S)
+        assert returned.is_set(), "the stage blocked on a call the budget refused"
+        assert not caller.is_alive(), "the caller thread never finished"
+    finally:
+        for ev in release.values():
+            ev.set()
+        caller.join(timeout=WAIT_S)
+
+    # The stage came back with every paragraph accounted for: the calls it was
+    # told to abandon are not trusted, and nothing is missing. The workers
+    # themselves are released by the ``finally`` above — asserting they are gone
+    # here would only be measuring that release, not the stage.
+    assert len(out) == 9, out
+    assert all(p["text"].startswith("lause ") for p in out), out
+    assert client.peak_in_flight <= 3
 
 
 # -- ordering ----------------------------------------------------------------
@@ -417,29 +628,79 @@ def test_heartbeat_counts_stay_on_the_calling_thread(caplog) -> None:
 # -- budget -------------------------------------------------------------------
 
 
-def test_budget_expiry_ships_the_tail_as_originals_with_one_warning(caplog) -> None:
-    """The budget gates before each submission and warns exactly once.
+def test_no_call_starts_after_the_budget_is_gone() -> None:
+    """The gate is a per-submission gate, which is what makes it mean anything.
 
-    Four paragraphs, each call burning 10 s, budget 25 s — the same script
-    as the serial oracle, which stops after 3 calls. The cut point must be
-    the same index: paragraphs pass the gate one at a time whether or not a
-    pool sits behind it.
+    PM decision (b)'s call *count* window is necessary but not sufficient: a
+    stage that opens the whole window before consulting the budget, or that
+    refills a freed slot without re-checking, can sit inside the count window
+    while still putting calls in flight after the allowance was spent — the
+    exact overshoot the stage budget exists to prevent.
+
+    So this pins the sharper thing, on a *real* clock: the stage budget is a
+    wall-clock allowance, so the budget here reads ``time.monotonic`` and each
+    call really takes the time it claims. No paragraph may be entered once the
+    allowance is gone. Deleting the gate, or moving it out of the refill path,
+    breaks this — with a fake clock that the workers never actually spend, every
+    call would finish at elapsed 0 and a stage that ignored the gate entirely
+    would pass.
     """
-    clock = _ConcurrencyFakeClock()
-    budget = StageBudget(25.0, clock=clock)
-    client = ThreadRecordingClient(clock=clock, burn_s=10.0)
-    with caplog.at_level(logging.WARNING, logger="vemoizer.repair"):
-        out = repair_paragraphs(client, _paras(4), concurrency=3, budget=budget)
+    # 20 ms per call against 320 ms of budget: the stage can settle about
+    # sixteen calls' worth of work in the window, so a stage that ignored the
+    # gate and ran all forty would be visible, and one that honoured it has
+    # room to be measured. A budget shorter than one full window cannot show
+    # any of this — at N=3 with a 20 ms call, a 120 ms budget lets all three
+    # slots be handed out before the gate has anything to say, so every
+    # paragraph is dispatched and "did it stop" has no answer.
+    per_call_s, budget_s, count = 0.02, 0.32, 40
+    started = time.monotonic()
+    budget = StageBudget(budget_s)
+    client = ThreadRecordingClient(burn_s=per_call_s, real_time=True)
 
-    assert client.call_count == 3, client.calls
-    assert [p["text"] for p in out] == ["lause 0x", "lause 1x", "lause 2x", "lause 3"]
-    stopped = [r for r in caplog.records if "repair stopped at" in r.getMessage()]
-    assert len(stopped) == 1, [r.getMessage() for r in caplog.records]
-    # Privacy: the warning carries counts, never transcript text.
-    assert "lause" not in stopped[0].getMessage()
+    out = repair_paragraphs(client, _paras(count), concurrency=3, budget=budget)
+
+    # Nothing may be *entered* long after the allowance has gone. Measured
+    # against the budget's own start, with one window of slack: a paragraph
+    # handed its deadline while budget remained is allowed to start, and the
+    # promise is that no *new* work begins after that — not that an in-flight
+    # call is torn off mid-request.
+    late = {
+        text: at - started
+        for text, at in client.entered_at.items()
+        if at - started >= budget_s + 3 * per_call_s
+    }
+    assert not late, f"calls started well after the budget expired: {late}"
+    # The stage has to stop, and stop close to the boundary. The yardstick is
+    # the budget's own wall clock: whatever the stage itself believed when it
+    # dispatched, divided by what a call actually took, is the most it could
+    # have paid for — plus one window, because N calls are legitimately in
+    # flight when the gate last spoke. Grading against time the stage actually
+    # spent (not the fixture's nominal figure, and not the paragraph count)
+    # means neither can be gamed: a stage that ignored the budget runs all
+    # forty paragraphs and trips this at once.
+    per_call_actual = client.mean_call_s()
+    spent = budget.elapsed()
+    affordable = spent / per_call_actual if per_call_actual else float("inf")
+    assert client.call_count <= affordable + 3, (
+        f"{client.call_count} calls in {spent:.3f}s at "
+        f"{per_call_actual * 1000:.1f}ms per call — the stage did not stop"
+    )
+    assert client.call_count < count, client.calls
+    assert client.call_count >= 1, client.calls
+    # The cut point is contiguous and index-correct: everything the stage
+    # settled is repaired in paragraph order, everything after it is its own
+    # original. ``call_count`` is not the cut point — a call can be handed one
+    # and then abandoned at the budget boundary — so the repaired prefix is
+    # read from the output, not inferred from the call log.
+    texts = [p["text"] for p in out]
+    repaired = [i for i, t in enumerate(texts) if t.endswith("x")]
+    assert repaired == list(range(len(repaired))), texts
+    assert all(texts[i] == f"lause {i}" for i in range(len(repaired), count)), texts
+    # Every call was handed a positive deadline read at its own submission.
+    assert all(d is not None and d >= 0.0 for _, d in client.calls), client.calls
 
 
-def test_budget_expiry_during_collection_does_not_wait_for_a_parked_call(
+def test_budget_stop_warns_once_and_the_wait_is_bounded_on_a_dead_call(
     caplog,
 ) -> None:
     """The budget cuts the *wait*, not just the gap between calls.
@@ -459,39 +720,52 @@ def test_budget_expiry_during_collection_does_not_wait_for_a_parked_call(
     clock = _ConcurrencyFakeClock()
     budget = StageBudget(30.0, clock=clock)
     parked = {i: threading.Event() for i in (0, 1)}
-    arrived = {i: threading.Event() for i in (0, 1)}
+    clock = _ConcurrencyFakeClock()
+    budget = StageBudget(30.0, clock=clock)
 
     class _Parked(ThreadRecordingClient):
-        def complete(self, *args: Any, **kw: Any) -> str | None:
-            text = args[1] if len(args) > 1 else kw.get("user", "")
-            idx = _index(text)
-            if idx in parked:
-                arrived[idx].set()
-                assert parked[idx].wait(timeout=WAIT_S), f"{idx} never released"
-            return super().complete(*args, **kw)
+        """Calls that answer to nobody — the stalled connection itself.
 
-    client = _Parked()
+        No deadline is honoured: the point of the test is that the stage walks
+        away from a call that is never going to come back, so a fake that
+        rescued itself at its own deadline would test the transport instead of
+        the stage. Per-paragraph events, so one release cannot free both.
+        """
 
-    def burn_the_budget_when_both_are_in_flight() -> None:
-        for ev in arrived.values():
-            assert ev.wait(timeout=WAIT_S), "the pool never filled both slots"
-        clock.advance(35.0)  # both calls now sit past the stage budget
+    client = _Parked(
+        hold=lambda text: parked[_index(text)].wait(timeout=WAIT_S),
+    )
+    # The stage is driven from a helper thread so this test can watch the two
+    # calls enter ``complete`` and park, and only then spend the budget — the
+    # situation the wait has to survive. Spending it first would have the gate
+    # refuse both calls outright and prove nothing about the wait.
+    returned = threading.Event()
+    out: list[dict[str, Any]] = []
 
-    watcher = threading.Thread(target=burn_the_budget_when_both_are_in_flight)
-    watcher.start()
-    # The stage gives up on the parked calls at the budget boundary and
-    # drains the pool in its ``finally``; releasing on a timer lets that drain
-    # finish without the test dictating the stage's own timing.
-    watchdog = threading.Timer(1.0, lambda: [ev.set() for ev in parked.values()])
-    watchdog.start()
-    try:
+    def caller() -> None:
         with caplog.at_level(logging.WARNING, logger="vemoizer.repair"):
-            out = repair_paragraphs(client, _paras(3), concurrency=2, budget=budget)
-        watcher.join(timeout=WAIT_S)
+            out.extend(
+                repair_paragraphs(client, _paras(3), concurrency=2, budget=budget)
+            )
+        returned.set()
+
+    thread = threading.Thread(target=caller, name="stalled-call-caller")
+    thread.start()
+    assert _wait_until(lambda: client.call_count >= 2), "the pool never filled"
+    clock.advance(35.0)  # both calls now sit past the stage budget
+
+    try:
+        # Bounded: if the stage blocked on either dead call this fails on the
+        # timeout instead of hanging the suite.
+        thread.join(timeout=WAIT_S)
+        assert returned.is_set(), "the stage blocked on a call the budget refused"
+        assert not thread.is_alive(), "the caller thread never finished"
     finally:
-        watchdog.cancel()
+        # Released only now: the stage had to come back on its own, and the
+        # drain behind it is what waits for these two to wind up.
         for ev in parked.values():
             ev.set()
+        thread.join(timeout=WAIT_S)
 
     # Returned rather than hung on the stalled call, with every paragraph
     # accounted for.
@@ -504,6 +778,51 @@ def test_budget_expiry_during_collection_does_not_wait_for_a_parked_call(
     stopped = [r for r in caplog.records if "repair stopped at" in r.getMessage()]
     assert len(stopped) == 1, [r.getMessage() for r in caplog.records]
     assert "lause" not in stopped[0].getMessage()
+
+
+@pytest.mark.parametrize(
+    ("total_s", "serial_calls"),
+    [(35.0, 3), (45.0, 4), (55.0, 5), (65.0, 6)],
+)
+def test_budget_gate_runs_before_every_submission(
+    total_s: float, serial_calls: int
+) -> None:
+    """The gate is consulted for each paragraph, so the cut point tracks the serial one.
+
+    Seven paragraphs burn 10 s each on a budget cut at successive call
+    boundaries, so the serial loop would make exactly ``serial_calls`` calls.
+    PM decision (b) bounds the concurrent stage to ``[serial, serial + N - 1]``
+    calls. The upper bound is the one that bites: an implementation that
+    consults ``exhausted()`` only once per window keeps releasing batches on a
+    budget that expired mid-window, and a stage that never consults it at all
+    burns all seven. The lower bound is what a gate placed *inside* the wait
+    breaks — that variant measures calls still queued behind two others, gives
+    up early, and ships paragraphs the budget had already paid for.
+
+    What is pinned exactly, alongside the count, is the cut point: a paragraph
+    is either called for and repaired, or never called for and shipped as
+    itself, and the two sets are contiguous by original index.
+    """
+    clock = _ConcurrencyFakeClock()
+    budget = StageBudget(total_s, clock=clock)
+    client = ThreadRecordingClient(clock=clock, burn_s=10.0)
+
+    out = repair_paragraphs(client, _paras(7), concurrency=3, budget=budget)
+
+    n = client.call_count
+    # PM decision (b)'s upper bound is the load-bearing one. The lower bound is
+    # the serial count, except that a pool can never make fewer calls than it
+    # has slots: the first window is filled before the budget is ever consulted
+    # a second time, so a budget that would cut the serial loop at two calls
+    # still lets three be in flight at N=3. Below that the stage is not
+    # violating the budget, it is refusing work it had already paid for.
+    lo, hi = min(serial_calls, 3), serial_calls + 2
+    assert lo <= n <= hi, (n, serial_calls, client.calls)
+    assert [p["text"] for p in out[:n]] == [f"lause {i}x" for i in range(n)], out
+    assert all(p["text"] == f"lause {i}" for i, p in enumerate(out) if i >= n), out
+    # Nothing ran past the budget: every call was handed a positive deadline
+    # read at its own submission.
+    assert all(d is not None and d >= 0.0 for _, d in client.calls), client.calls
 
 
 def test_deadline_s_is_the_remaining_budget_at_submit_time() -> None:
@@ -747,6 +1066,34 @@ def test_malformed_concurrency_makes_the_section_malformed(source: str) -> None:
     assert _section(f"repair_concurrency = {source}\n") is None
 
 
+@pytest.mark.parametrize("value", [2**63, -(2**63), 10**100])
+def test_huge_concurrency_is_malformed(value: int) -> None:
+    """A big integer is out of range, not a valid worker count.
+
+    The accepted set is the integers ``1..4``. An arbitrary-precision value
+    is still an ``int`` to Python, so the bound check has to carry it: an
+    implementation that compares against a narrower type, or that coerces
+    through something which overflows, would either accept it or raise. The
+    outcome is the same as any other malformed value — the section is
+    malformed on all three load paths, never a silently ignored key.
+    """
+    assert _section(f"repair_concurrency = {value}\n") is None
+
+
+def test_huge_concurrency_fails_loud_on_the_strict_paths(tmp_path: Path) -> None:
+    """Same outcome as a bad budget on the strict path: ``ConfigError``.
+
+    The fail-open loader yields ``None`` (covered above); the strict loader
+    raises. The message is the section-level one the budget keys produce — it
+    does not name the offending key, because a malformed value means
+    "malformed section" rather than "bad value", and a value that slips the
+    range check on one path and not the other is the bug this pins out.
+    """
+    path = _write_config(tmp_path, f"repair_concurrency = {2**64}\n")
+    with pytest.raises(ConfigError, match="malformed 'llm' section"):
+        _strict_load(path)
+
+
 def test_unknown_near_miss_key_is_rejected_by_name(tmp_path: Path) -> None:
     """Accepting the new key must not soften the unknown-key guard.
 
@@ -763,3 +1110,27 @@ def test_the_key_is_registered_not_merely_tolerated() -> None:
     """A known key reaches :class:`~vemoizer.llm_config.LLMConfig`; the
     near-miss above only proves an unknown one is refused."""
     assert "repair_concurrency" in _KNOWN_LLM_KEYS
+
+
+_SPEC_TABLE_HEADING = "| `llm.repair_budget_seconds` |"
+
+
+def test_every_known_llm_key_has_a_row_in_the_spec_table() -> None:
+    """Every ``[llm]`` key the parser accepts is documented in the one table.
+
+    ``docs/pipeline-spec.md`` is the canonical location for the ``[llm]``
+    keys and no other file restates them, so a key that gains a validator
+    without gaining a row is undocumented and invisible to the operator.
+    The assertion runs over the whole accepted-key set rather than naming
+    ``repair_concurrency``, so the next key added to the parser is held to
+    the same bar; it is what fails when the row is deleted or renamed.
+    """
+    spec = (
+        Path(__file__).resolve().parents[1] / "docs" / "pipeline-spec.md"
+    ).read_text(encoding="utf-8")
+    assert _SPEC_TABLE_HEADING in spec, "the [llm] key table moved"
+    missing = [
+        key for key in sorted(_KNOWN_LLM_KEYS) if f"| `llm.{key}` |" not in spec
+    ]
+    assert not missing, f"undocumented [llm] key(s) in docs/pipeline-spec.md: {missing}"
+    assert "| `llm.repair_concurrency` |" in spec

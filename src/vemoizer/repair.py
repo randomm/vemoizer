@@ -27,12 +27,11 @@ all stay on the caller's thread.
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from concurrent.futures import wait as futures_wait
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
+from . import repair_pool
 from .llm_budget import StageBudget
 from .llm_config import MAX_REPAIR_CONCURRENCY
 from .progress import PROGRESS_INTERVAL_S, format_duration
@@ -54,19 +53,6 @@ MIN_SIMILARITY = 0.5
 #: ceiling. A local single-slot server (Ollama, llama.cpp) serialises anyway,
 #: so more workers than this buy nothing but load on one endpoint.
 MAX_CONCURRENCY = MAX_REPAIR_CONCURRENCY
-
-#: How long a pool is given to drain after an interrupt before the wait
-#: itself is reported (issue #159). The join is not abandoned — the pool's
-#: own ``shutdown()`` still waits for the workers — this only says so in
-#: the log, because a worker parked in a hung socket read would otherwise
-#: be indistinguishable from a hung CLI.
-_POOL_DRAIN_WARN_S = 5.0
-
-#: Sentinel for "the budget expired while this call was in flight" — a
-#: distinct value from ``None``, which already means "no candidate". Typed
-#: as the ``Literal`` its name so :func:`_await` can promise one of three
-#: outcomes without a cast at the call site.
-_EXHAUSTED: Literal["_EXHAUSTED"] = "_EXHAUSTED"
 
 _REPAIR_SYSTEM_PROMPT = (
     "Tämä on puheentunnistuksen tuottamaa suomea, jossa on foneettisesti "
@@ -169,43 +155,41 @@ def repair_paragraphs(
     # so the pool exists only once a second call is actually worth having in
     # flight, and a serial run leaks no thread and pays no pool.
     inline = workers == 1
-    pool: ThreadPoolExecutor | None = None
     if not inline:
-        pool = ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="vemoizer-repair"
-        )
+        pool = repair_pool.open_pool(workers)
         logger.info("repair: %d paragraphs, concurrency %d", total, workers)
     pending = 0
+    #: Whether the budget refused the most recent submission attempt. Assigned
+    #: only by the two gates that consult it — the fill condition and the
+    #: refill after a settled result — and read only by the natural-end check,
+    #: which must tell "the paragraphs ran out" apart from "the budget refused
+    #: the rest". A single gate at the top of the fill loop is not enough:
+    #: after a result is collected the loop refills the slot it freed, and that
+    #: submission never passes through the fill condition again, so a batch
+    #: could be released on a budget that expired while the oldest call was
+    #: still in flight (issue #159, PM decision (b)).
+    gate_closed = False
     try:
         while pending < total or futures:
             while (
                 pending < total
                 and len(futures) < workers
-                and not (budget is not None and budget.exhausted())
+                and not (gate_closed := _gate_closed(budget))
             ):
-                para = paragraphs[pending]
-                original = str(para.get("text", "")).strip()
-                if not original:
-                    # Nothing to ask the model about: the original ships, and
-                    # consumes neither a worker slot nor a progress tick.
-                    repaired[pending] = dict(para)
-                elif inline:
-                    # The serial path (the default): the call happens here,
-                    # on the caller's thread — the loop this stage shipped
-                    # with, kept as the one-worker case of the same walk.
-                    repaired[pending] = _settle(
-                        para,
-                        _complete(client, system, original, budget),
-                        state,
-                        total=total,
-                        budget=budget,
-                        progress_cb=progress_cb,
-                    )
-                else:
-                    assert pool is not None  # set above whenever not inline
-                    futures[pending] = pool.submit(
-                        _complete, client, system, original, budget
-                    )
+                _submit_one(
+                    paragraphs[pending],
+                    pending=pending,
+                    client=client,
+                    system=system,
+                    repaired=repaired,
+                    futures=futures,
+                    pool=pool,
+                    inline=inline,
+                    state=state,
+                    total=total,
+                    budget=budget,
+                    progress_cb=progress_cb,
+                )
                 pending += 1
             # Collect in paragraph order: the oldest submission is the lowest
             # index, so the guard, the progress tick and the heartbeat all run
@@ -234,21 +218,26 @@ def repair_paragraphs(
                 # gate refusing the rest — only the second is a stop, and
                 # conflating them would log a spurious warning and discard
                 # good results every time a blank paragraph was the last
-                # thing skipped.
-                if pending < total:
+                # thing skipped. The gate has just been consulted for the
+                # paragraph at ``pending``, so the answer is fresh.
+                if pending < total and gate_closed:
                     stopped_at = pending
                 break
             # The oldest outstanding submission is the lowest index, and it
             # is still running: it is the next result the order demands, so
             # wait for it, or give up on it if the budget runs out first.
             idx = next(iter(futures))
-            candidate = _await(futures[idx], idx, total, budget)
-            if candidate is _EXHAUSTED:
+            candidate = repair_pool.await_candidate(
+                futures[idx],
+                exhausted=lambda: budget is not None and budget.exhausted(),
+                on_stalled=_warn_stalled(idx, total, budget),
+            )
+            if candidate is repair_pool.ABANDONED:
                 # The budget is spent and this call has not come back. Its
-                # result is not waited for and not trusted, and nothing after
-                # it is submitted: this index and everything past it ships as
-                # the original. Calls already queued behind it are cancelled
-                # by the drain and so never run at all.
+                # result is neither waited for nor trusted, and nothing past it
+                # is submitted: this index and everything after it ships as the
+                # original. Calls queued behind it are cancelled by the drain,
+                # so they never run at all.
                 stopped_at = idx
                 break
             future = futures.pop(idx)
@@ -260,9 +249,39 @@ def repair_paragraphs(
                 budget=budget,
                 progress_cb=progress_cb,
             )
+            # A slot just freed. The window is refilled here — one paragraph,
+            # behind the same gate the fill condition applies — and control
+            # then returns to that fill condition for any slot the settled
+            # batch left open. Refilling without re-consulting the gate is the
+            # bug this line exists to prevent: the budget can expire during
+            # the wait above, and a refill that skipped the gate would put a
+            # fresh call in flight after the stage had already been told to
+            # stop. The stop is recorded rather than broken out of, so calls
+            # already in flight still land (each carries its own ``deadline_s``
+            # and the per-read httpx timeout) while nothing new is started.
+            if pending < total:
+                gate_closed = _gate_closed(budget)
+                if gate_closed:
+                    stopped_at = pending
+                else:
+                    _submit_one(
+                        paragraphs[pending],
+                        pending=pending,
+                        client=client,
+                        system=system,
+                        repaired=repaired,
+                        futures=futures,
+                        pool=pool,
+                        inline=inline,
+                        state=state,
+                        total=total,
+                        budget=budget,
+                        progress_cb=progress_cb,
+                    )
+                    pending += 1
     finally:
         if pool is not None:
-            _drain(pool, futures)
+            repair_pool.drain(pool, futures)
     if stopped_at is not None:
         # Everything from the cut point on ships as the original (fail-open,
         # invariant #5) — including the call that was still in flight when
@@ -274,7 +293,7 @@ def repair_paragraphs(
         for offset, para in enumerate(paragraphs[stopped_at:]):
             repaired[stopped_at + offset] = dict(para)
         logger.warning(
-            "repair stopped at %d/%d paragraphs (wall-clock budget %ss); "
+            "repair stopped at %d/%d paragraphs (wall-clock budget %s); "
             "remaining paragraphs ship un-repaired",
             state.processed,
             total,
@@ -285,6 +304,82 @@ def repair_paragraphs(
     # Every slot is filled by now: by the gate, the collector, or the
     # backfill above. The narrowing is the assertion that none was missed.
     return [slot for slot in repaired if slot is not None]
+
+
+def _submit_one(
+    para: dict[str, Any],
+    *,
+    pending: int,
+    client: _Completer,
+    system: str,
+    repaired: list[dict[str, Any] | None],
+    futures: dict[int, Future],
+    pool: ThreadPoolExecutor | None,
+    inline: bool,
+    state: _RepairState,
+    total: int,
+    budget: StageBudget | None,
+    progress_cb: Callable[[int, int], None] | None,
+) -> None:
+    """Put exactly one paragraph on its way, writing its slot by index.
+
+    The single submission step, shared by the fill loop and the refill after
+    a settled result, so the two can never drift on what "submitted" means:
+    a blank paragraph ships as itself and consumes neither a worker slot nor a
+    progress tick; the serial path calls inline on the caller's thread; the
+    concurrent path hands the call to the pool and leaves the slot empty for
+    the collector to fill. Callers gate on the budget *before* calling this.
+    """
+    original = str(para.get("text", "")).strip()
+    if not original:
+        repaired[pending] = dict(para)
+    elif inline:
+        repaired[pending] = _settle(
+            para,
+            _complete(client, system, original, budget),
+            state,
+            total=total,
+            budget=budget,
+            progress_cb=progress_cb,
+        )
+    else:
+        assert pool is not None  # set by the caller whenever not inline
+        futures[pending] = pool.submit(_complete, client, system, original, budget)
+
+
+def _warn_stalled(
+    idx: int,
+    total: int,
+    budget: StageBudget | None,
+) -> Callable[[], None]:
+    """The one log line a call that will not come back should produce.
+
+    Built once per wait so the collector stays a single expression, and
+    count-and-elapsed only — never paragraph text (privacy contract).
+    """
+
+    def report() -> None:
+        logger.warning(
+            "repair: waiting on paragraph %d/%d (elapsed %s)",
+            idx + 1,
+            total,
+            format_duration(budget.elapsed()) if budget else "?",
+        )
+
+    return report
+
+
+def _gate_closed(budget: StageBudget | None) -> bool:
+    """Whether the stage budget refuses any new call.
+
+    One place for the gate the submission loop consults before *every*
+    paragraph it puts in flight (issue #159, PM decision (b)). A bare
+    ``budget.exhausted()`` inlined in the loop condition reads as a per-batch
+    check and is easy to drop when the loop is restructured; named, it is the
+    thing the tests can point at. A ``None``/non-positive budget is never
+    closed — that is the fail-open "no cap" case.
+    """
+    return budget is not None and budget.exhausted()
 
 
 class _RepairState:
@@ -316,6 +411,21 @@ def _complete(
     rather than raised: a worker that died on a bad response is the same
     fail-open case as a timeout, and it must not take the paragraph — or
     the run — down with it.
+
+    The deadline handed to the client is read here, at the moment the call
+    starts, which is when it is exact. What bounds the call once it is running
+    is ``deadline_s`` itself plus the per-read httpx timeout inside
+    :meth:`~vemoizer.llm.LLMClient.complete` — this stage deliberately does
+    *not* re-judge the budget when the answer comes back. A candidate that
+    lands is a candidate that finished inside its own deadline, and refusing
+    it here would disagree with the serial path, which has always settled
+    whatever ``complete`` returned.
+
+    An unexpected error is reported and returned as ``None`` rather than
+    raised: a worker that died on a bad response is the same fail-open case as
+    a timeout, and an exception escaping here would surface on the caller's
+    thread at ``future.result()`` and take the paragraph — or the run — down
+    with it.
     """
     try:
         return client.complete(
@@ -324,9 +434,9 @@ def _complete(
             deadline_s=budget.remaining() if budget is not None else None,
         )
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
-        # Deliberately on the worker thread: it is the thread that knows
-        # what failed, and the message is the exception's own text, never
-        # paragraph content (privacy contract).
+        # Deliberately on the worker thread: it is the thread that knows what
+        # failed, and the message is the exception's own text, never paragraph
+        # content (privacy contract).
         logger.warning("repair failed; keeping originals: %s", e)
         return None
 
@@ -377,54 +487,5 @@ def _settle(
     return out
 
 
-def _await(
-    future: Future,
-    idx: int,
-    total: int,
-    budget: StageBudget | None,
-) -> str | None | Literal["_EXHAUSTED"]:
-    """Wait for one in-flight call, giving up if the budget expires first.
-
-    Returns the candidate, or :data:`_EXHAUSTED` when the stage budget ran
-    out while the call was still running — the caller then ships that
-    paragraph and the tail as originals rather than waiting for a result
-    the budget has already said no to. The abandoned call is not cancelled:
-    it carries its own ``deadline_s`` and the per-read httpx timeout, so it
-    ends on its own and the pool drains behind us. Waits are bounded so a
-    wedged worker surfaces as a log line instead of a silent CLI freeze.
-    """
-    while not future.done():
-        if budget is not None and budget.exhausted():
-            return _EXHAUSTED
-        if not futures_wait([future], timeout=_POOL_DRAIN_WARN_S).done:
-            logger.warning(
-                "repair: waiting on paragraph %d/%d (elapsed %s)",
-                idx + 1,
-                total,
-                format_duration(budget.elapsed()) if budget else "?",
-            )
-    return future.result()
 
 
-def _drain(pool: ThreadPoolExecutor, futures: dict[int, Future]) -> None:
-    """Close the pool and say so if it took an unusually long time.
-
-    Every worker is joined before this returns (``shutdown(wait=True)`` —
-    the default). That is deliberate, not oversight: pool workers are
-    non-daemon and ``concurrent.futures`` registers an atexit hook that
-    joins them anyway, so abandoning them here would only move the same
-    wait to interpreter shutdown — behind the CLI's own exit, where Ctrl-C
-    no longer reaches it. A hung call cannot wait forever regardless: its
-    ``complete(deadline_s=...)`` and the per-read httpx timeout end it.
-    Cancelling the futures that never started keeps the wait to the calls
-    actually in flight.
-    """
-    for future in futures.values():
-        future.cancel()
-    started = time.monotonic()
-    pool.shutdown(wait=True, cancel_futures=True)
-    waited = time.monotonic() - started
-    if waited >= _POOL_DRAIN_WARN_S:
-        logger.warning(
-            "repair: waited %s for the worker pool to drain", format_duration(waited)
-        )
