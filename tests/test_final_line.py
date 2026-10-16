@@ -336,6 +336,49 @@ class TestFinalLineGatedOnSuccess:
         # But no "complete" line — one file failed.
         assert all("complete" not in e for e in echoes), echoes
 
+    def test_partial_pair_notifies_failure_with_reason(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Plain path, partial pair: the loop's own ``notify_write`` call is
+        the failure notification (issue #100 seam (b)), not just the exit
+        code.
+
+        ``test_notify_preset_cli`` pins the same contract through the CLI
+        poster; this pins it at the moved loop (issue #151) so deleting
+        either ``notify_write`` call in
+        :func:`vemoizer.preset_plain_loop.run_preset_plain_loop` fails here
+        rather than only in the CLI file. ``notify_write`` is patched on
+        ``vemoizer.notify`` because that is where the loop looks it up.
+        """
+        files = touch_files(["a.m4a"], tmp_path)
+        posted: list[tuple[int, int, str]] = []
+
+        def fake_write(result, stem, out_dir, *, date_str=None):
+            return ["2025-01-01 a.md"]  # partial pair: only the .md "wrote"
+
+        def fake_notify_write(label, written, expected, reason=""):
+            posted.append((written, expected, reason))
+
+        _plain_seams(monkeypatch)
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        tracker = begin_interrupt_tracking()
+        with (
+            mock.patch.object(batch_preset_module, "_write_preset_output", fake_write),
+            mock.patch.object(notify_module, "notify_write", fake_notify_write),
+        ):
+            code = batch_preset_module.run_preset(
+                list(files),
+                command="meeting",
+                config_path=None,
+                glossary_path=None,
+                quiet=True,
+                yes=True,
+                tracker=tracker,
+                display=None,
+            )
+        assert code == 1
+        assert posted == [(1, len(PRESET_FORMATS), "could not write output")], posted
+
     def test_success_full_pairs_prints_complete(
         self, tmp_path, monkeypatch, capsys
     ) -> None:
@@ -561,3 +604,158 @@ class TestRunWentFullOptionalExpectedPairs:
         # No 'complete' line: the partial pair failed the run through the
         # exit code the write seam set.
         assert all("complete" not in e for e in echoes), echoes
+
+
+# --- issue #151: the plain loop moved to vemoizer.preset_plain_loop ---------
+#
+# The move must not silently break a patch target: a patch that misses its
+# target turns a real failure into a green run. Each test below patches the
+# name on ``vemoizer.batch_preset`` (where the suite has always patched) and
+# asserts the fake was actually CALLED by the moved loop — not just that the
+# exit code happens to look right.
+
+
+def test_moved_plain_loop_uses_batch_preset_transcribe_seam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``batch_preset._transcribe_preset_file`` still reaches the moved loop.
+
+    The fake returns ``None`` (transcribe failed), which is the loop's exit-1
+    path, AND records its own call: a patch that missed the target would run
+    the real transcribe and never reach either assertion.
+    """
+    files = touch_files(["a.m4a"], tmp_path)
+    calls: list[str] = []
+
+    def fake_transcribe(file, options=None, glossary_path=None, **kwargs):
+        calls.append(Path(file).name)
+        return None
+
+    monkeypatch.setattr(batch_preset_module, "_transcribe_preset_file", fake_transcribe)
+    _plain_seams(monkeypatch)
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    code = batch_preset_module.run_preset(
+        list(files),
+        command="meeting",
+        config_path=None,
+        glossary_path=None,
+        quiet=True,
+        yes=True,
+        display=None,
+    )
+    assert code == 1
+    assert calls == ["a.m4a"], "the _transcribe_preset_file patch did not take effect"
+
+
+def test_moved_plain_loop_uses_batch_preset_write_seam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``batch_preset._write_preset_output`` still reaches the moved loop: the
+    fake's partial pair must drive exit 1 (a missed patch would write real
+    files and exit 0)."""
+    files = touch_files(["a.m4a"], tmp_path)
+    calls: list[str] = []
+
+    def fake_write(result, stem, out_dir, *, date_str=None):
+        calls.append(stem)
+        return ["2025-01-01 a.md"]  # partial pair: only the .md landed
+
+    monkeypatch.setattr(batch_preset_module, "_write_preset_output", fake_write)
+    _plain_seams(monkeypatch)
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    code = batch_preset_module.run_preset(
+        list(files),
+        command="memo",
+        config_path=None,
+        glossary_path=None,
+        quiet=True,
+        yes=True,
+        display=None,
+    )
+    assert code == 1
+    assert calls == ["a"], "the _write_preset_output patch did not take effect"
+
+
+def test_moved_plain_loop_uses_batch_preset_mtime_seam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``batch_preset._mtime_date_str`` still reaches the moved loop: the
+    fake's date must appear in the written basename."""
+    files = touch_files(["a.m4a"], tmp_path)
+    seen: list[str] = []
+
+    def fake_write(result, stem, out_dir, *, date_str=None):
+        seen.append(str(date_str))
+        return ["2019-02-03 a.md", "2019-02-03 a.json"]
+
+    monkeypatch.setattr(batch_preset_module, "_mtime_date_str", lambda p: "2019-02-03")
+    monkeypatch.setattr(batch_preset_module, "_write_preset_output", fake_write)
+    _plain_seams(monkeypatch)
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    code = batch_preset_module.run_preset(
+        list(files),
+        command="memo",
+        config_path=None,
+        glossary_path=None,
+        quiet=True,
+        yes=True,
+        display=None,
+    )
+    assert code == 0
+    assert seen == ["2019-02-03"], "the _mtime_date_str patch did not take effect"
+
+
+def test_moved_plain_loop_uses_batch_preset_file_log_seam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``batch_preset.file_log`` still wraps every per-file iteration of the
+    moved loop (issue #111 seam (b) survives the move)."""
+    from contextlib import nullcontext
+
+    files = touch_files(["a.m4a"], tmp_path)
+    stems: list[str] = []
+
+    def fake_file_log(stem):
+        stems.append(stem)
+        return nullcontext()
+
+    monkeypatch.setattr(batch_preset_module, "file_log", fake_file_log)
+    _plain_seams(monkeypatch)
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    code = batch_preset_module.run_preset(
+        list(files),
+        command="meeting",
+        config_path=None,
+        glossary_path=None,
+        quiet=True,
+        yes=True,
+        display=None,
+    )
+    assert code == 0
+    assert stems == ["a"], "the file_log patch did not take effect"
+
+
+def test_moved_plain_loop_propagates_glossary_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The loop must not swallow the temp-glossary ``OSError``: the handler
+    lives in ``run_preset``, so an ``OSError`` raised inside the moved loop
+    still produces the clean ``could not write glossary`` line and exit 1."""
+    touch_files(["a.m4a"], tmp_path)
+
+    def boom(lines):
+        raise OSError("disk full")
+
+    # The temp-glossary seam is reached only when the layered glossary
+    # produced terms (otherwise there is no temp file to write), so the
+    # home layer is given one term.
+    home = tmp_path / "home" / ".vemoizer"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "glossary.txt").write_text("miten\n", encoding="utf-8")
+
+    monkeypatch.setattr(batch_module, "_write_temp_glossary", boom)
+    _plain_seams(monkeypatch)
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    result = runner.invoke(app, ["meeting", "a.m4a"])
+    assert result.exit_code == 1
+    assert "could not write glossary" in result.stderr

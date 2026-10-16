@@ -25,6 +25,7 @@ matching assertion.
 from __future__ import annotations
 
 import io
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -33,7 +34,6 @@ import pytest
 from _cli_helpers import isolate_home, touch_files
 
 from vemoizer.batch_preset import run_preset
-from vemoizer.preset_final import run_went_full
 from vemoizer.progress import ProgressDisplay
 
 _EXPECTED_STAGES = ["decode", "diarize", "repair", "notes"]
@@ -70,6 +70,7 @@ def _echo_recorder(record: dict[str, Any]):
 
 def _final_line_recorder(record: dict[str, Any]):
     def fake_final_line(n_files: int, *, quiet: bool) -> None:
+        record["final_line_calls"] = record.get("final_line_calls", 0) + 1
         if quiet:
             return
         record.setdefault("echoes", []).append(f"✓ complete — wrote {n_files} file(s)")
@@ -79,6 +80,7 @@ def _final_line_recorder(record: dict[str, Any]):
 
 def _wrote_lines_recorder(record: dict[str, Any]):
     def fake_wrote_lines(written: list[str], quiet: bool) -> None:
+        record["wrote_lines_calls"] = record.get("wrote_lines_calls", 0) + 1
         if not quiet:
             for name in written:
                 record.setdefault("echoes", []).append(f"wrote {name}")
@@ -86,14 +88,35 @@ def _wrote_lines_recorder(record: dict[str, Any]):
     return fake_wrote_lines
 
 
-def _gate_recorder(record: dict[str, Any]):
+def _notify_recorder(record: dict[str, Any]):
+    """Record the per-file write notifications instead of swallowing them.
+
+    The loop reaches ``notify_write`` through ``vemoizer.notify``, so that is
+    where it is patched (issue #151 review — a name is patched where it is
+    looked up). Without a recorder here the whole ``notify_write`` call in the
+    moved loop could be deleted and this file would still pass.
+    """
+
+    def fake_notify_write(
+        label: Path | str, written: int, expected: int, reason: str = ""
+    ) -> None:
+        record.setdefault("notify_write", []).append(
+            {"written": written, "expected": expected, "reason": reason}
+        )
+
+    return fake_notify_write
+
+
+def _gate_recorder(
+    record: dict[str, Any], real_gate: Callable[..., bool]
+) -> Callable[..., bool]:
     def fake_gate(written: list[str], expected_pairs: int, exit_code: int) -> bool:
         record["gate"] = {
             "written": written,
             "expected_pairs": expected_pairs,
             "exit_code": exit_code,
         }
-        return run_went_full(written, expected_pairs, exit_code)
+        return real_gate(written, expected_pairs, exit_code)
 
     return fake_gate
 
@@ -113,6 +136,7 @@ def _run_meeting(
     import vemoizer.naming_hook as naming_hook_module
     import vemoizer.notify as notify_module
     import vemoizer.pipeline as pipeline_module
+    import vemoizer.preset_plain_loop as plain_loop_module
 
     def fake_transcribe(path, **kwargs):
         for name in _EXPECTED_STAGES:
@@ -134,16 +158,29 @@ def _run_meeting(
     with (
         mock.patch.object(pipeline_module, "transcribe_file", fake_transcribe),
         mock.patch.object(naming_hook_module, "_stdout_isatty", lambda: True),
-        mock.patch.object(notify_module, "notify_write", lambda *a, **kw: None),
+        mock.patch.object(notify_module, "notify_write", _notify_recorder(record)),
         mock.patch.object(notify_module, "notify_result", lambda *a, **kw: None),
         mock.patch.object(naming_hook_module.typer, "echo", _echo_recorder(record)),
         mock.patch("vemoizer.batch_preset.typer.echo", _echo_recorder(record)),
-        mock.patch(
-            "vemoizer.batch_preset.print_wrote_lines", _wrote_lines_recorder(record)
+        # All three are looked up in ``preset_plain_loop`` (the issue #151 move
+        # of the plain per-file loop), so they are patched THERE —
+        # ``batch_preset`` deliberately does not re-export them, and patching
+        # them there would leave the records empty while the real helpers ran.
+        # Each patch is proven live below: the gate record in (2b), the two
+        # recorder call counts in (2c). The echoed strings alone do not prove
+        # it — the real helpers reach ``typer.echo`` through ``preset_final``
+        # and the ``batch_preset.typer.echo`` spy records the identical text
+        # either way (issue #151 review).
+        mock.patch.object(
+            plain_loop_module, "print_wrote_lines", _wrote_lines_recorder(record)
         ),
-        mock.patch("vemoizer.batch_preset.run_went_full", _gate_recorder(record)),
-        mock.patch(
-            "vemoizer.batch_preset.print_final_line", _final_line_recorder(record)
+        mock.patch.object(
+            plain_loop_module,
+            "run_went_full",
+            _gate_recorder(record, plain_loop_module.run_went_full),
+        ),
+        mock.patch.object(
+            plain_loop_module, "print_final_line", _final_line_recorder(record)
         ),
     ):
         return run_preset(
@@ -197,7 +234,31 @@ def test_meeting_stage_markers_and_single_complete_line(
     # and position are what matter; no square brackets may leak.
     assert final_lines[0] == "\u2713 complete — wrote 2 file(s)"
     assert "[" not in final_lines[0]
+    # (2b) The gate spy actually fired: this is what makes the three
+    # ``preset_plain_loop`` patches above live rather than vacuous (issue #151
+    # review — a patch target where the name is NOT looked up leaves the record
+    # empty while the real helper runs). The plain loop gates the final line on
+    # ONE independent expected pair per file, so the recorder must have seen
+    # exactly the full pair, the file count, and a clean exit.
+    assert record.get("gate") == {
+        "written": [
+            name.removeprefix("wrote ") for name in echoes if name.startswith("wrote ")
+        ],
+        "expected_pairs": 1,
+        "exit_code": 0,
+    }, f"plain-loop gate patch never fired or saw wrong args: {record.get('gate')!r}"
     assert all(s.startswith("wrote ") for s in echoes[: wrote_idx + 1])
+    # (2c) The two sibling patches fired too — (2b) alone does not prove it,
+    # since the echoes they produce are also recorded by the ``typer.echo``
+    # spy when the real helpers run. These counters only move if the loop
+    # actually called the names patched in ``preset_plain_loop``.
+    assert record.get("wrote_lines_calls") == 1, "wrote-lines patch never fired"
+    assert record.get("final_line_calls") == 1, "final-line patch never fired"
+    # (2d) The notification the loop posts for a fully written pair: one
+    # success notify (full pair, no reason) for the one file.
+    assert record.get("notify_write") == [
+        {"written": 2, "expected": 2, "reason": ""}
+    ], f"plain-loop notify_write missing or wrong: {record.get('notify_write')!r}"
 
     # (3) Display closed before the wrote lines and before the prompt.
     # The prompt spy proves the close predates the last interactive output;
@@ -225,3 +286,8 @@ def test_meeting_quiet_prints_none_of_it(
     assert sum(s.count("complete") for s in record.get("echoes", [])) == 0
     assert record.get("echoes", []) == []
     assert tty_display.is_live is False
+    # --quiet silences the terminal, not the run: both helpers are still
+    # called (each suppresses its own output) and the notification still posts.
+    assert record.get("wrote_lines_calls") == 1
+    assert record.get("final_line_calls") == 1
+    assert record.get("notify_write") == [{"written": 2, "expected": 2, "reason": ""}]
