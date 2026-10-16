@@ -485,7 +485,3 @@ def _settle(
                 format_duration(now),
             )
     return out
-
-
-
-
