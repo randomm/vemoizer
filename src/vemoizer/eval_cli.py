@@ -247,7 +247,9 @@ def _exit_on_term(signum: int, frame: object) -> None:
     """Turn SIGTERM into a normal exit so the scratch dir's ``finally`` runs.
 
     A single signal only: the handler is still installed while the ``finally``
-    removes the dir, so a second SIGTERM raises ``SystemExit`` in there.
+    removes the dir, so a second SIGTERM raises ``SystemExit`` in there (a
+    second SIGINT arrives as ``KeyboardInterrupt`` — this command installs no
+    SIGINT handler).
     """
     raise SystemExit(128 + signum)
 
@@ -258,9 +260,15 @@ _Handler = Callable[[int, FrameType | None], object] | int
 def _emit_degrade(corpus: Path, names: list[str], profile: str) -> None:
     """Print the informational far-field table (issue #154).
 
-    Variants are written to a temp dir that is removed afterwards; nothing
-    is committed or written under the corpus. Audio decodes once at ingest
-    (the ingest contract); loudnorm is applied only in the loudnorm arm.
+    Variants are written to a ``0700`` temp dir that is removed on normal exit
+    and on a single SIGINT/SIGTERM, so nothing is committed or written under
+    the corpus. Cleanup is best-effort and never retried: a second signal that
+    lands inside the removal can leave a partial ``vemoizer-degrade-*`` tree
+    behind, which no later run recovers and which is safe to delete by hand: it
+    holds only derived copies of the committed corpus clips, never the only
+    copy of anything. Location: the temp directory ``$TMPDIR`` names, or the
+    system temp directory when it is unset or unusable. Audio decodes once at
+    ingest (the ingest contract); loudnorm is applied only in the loudnorm arm.
     Every failure exits 2 with a message, never a traceback: benchmark
     refusals (DegradeError), ingest/loudnorm failures, and I/O or decode
     errors while writing or reading the variants.
@@ -292,10 +300,15 @@ def _emit_degrade(corpus: Path, names: list[str], profile: str) -> None:
         # Restore only after the scratch dir is gone, so a single SIGTERM
         # arriving in between cannot leak it: the handler is still installed
         # during rmtree, so a second SIGTERM there raises SystemExit and a
-        # second SIGINT arrives as KeyboardInterrupt, either of which can leave
-        # a partial vemoizer-degrade-* tree (rmtree uses ignore_errors=True, so
-        # cleanup itself does not raise). signal.signal() returns None for a
-        # handler that was not installed from Python, and None is not a valid
+        # second SIGINT arrives as KeyboardInterrupt — either escapes this
+        # finally with the removal unfinished, which can leave a partial
+        # vemoizer-degrade-* tree (best-effort cleanup, never retried; the
+        # restore below still runs because it is its own finally). rmtree is
+        # called with ignore_errors=True (it swallows missing paths and
+        # permission errors), yet a failure can still propagate — the test
+        # test_handler_restored_even_if_temp_dir_removal_raises pins that the
+        # restore happens anyway. signal.signal() returns None for a handler
+        # that was not installed from Python, and None is not a valid
         # argument back.
         restore = previous if previous is not None else signal.SIG_DFL
         signal.signal(signal.SIGTERM, restore)

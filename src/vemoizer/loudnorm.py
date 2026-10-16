@@ -90,9 +90,10 @@ _MIN_TP = -100.0
 # overshoot, and that overshoot is a fraction of a dB (the real eval clip
 # measures +0.03 dBTP). +6 dBTP is about 2x full scale: a value above it means
 # a broken measurement, which is treated as no measurement. The cap does not
-# bound the gain. Measured with real ffmpeg 9.0.1, pass 2 ignores measured_TP
-# for gain in linear mode (PR #155 body), so this cap only rejects absurd
-# measurements. The mechanism behind the pass-2 gain was not isolated.
+# bound the gain: with real ffmpeg 9.0.1, pass 2 ignores measured_TP for gain
+# in linear mode (measured and recorded in the PR #155 body), so this cap only
+# rejects absurd measurements. The mechanism behind the pass-2 gain was not
+# isolated.
 _MAX_TP = 6.0
 _MIN_LRA = 0.0
 _MAX_LRA = 100.0
