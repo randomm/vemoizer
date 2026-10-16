@@ -332,3 +332,92 @@ def test_plain_loop_still_sets_the_per_file_batch_prefix(
     )
     assert [c[1] for c in calls] == [2, 2], calls
     assert [c[2] for c in calls] == ["a", "b"], calls
+
+
+def test_plain_loop_notes_written_files_on_the_interrupt_tracker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``note_written_files`` is live in the moved loop, once per written pair.
+
+    The loop tallies every output path it produced into the ``InterruptTracker``
+    so an interrupted run can report (and clean up) what it actually wrote.
+    Deleting that call kept the whole suite green: nothing else reads the
+    tally on the success path, so the interrupt report would silently claim an
+    empty written set while files sat on disk. The fake records its own
+    arguments, so a patch that missed the target fails on the empty record.
+
+    The call sits BEFORE the partial-pair check, so a partial pair is noted
+    too — that is the real behaviour and is pinned here rather than a nicer
+    intent: the tally records the paths the write seam returned, not only the
+    runs that fully succeeded.
+    """
+    from _cli_helpers import isolate_home, touch_files
+
+    import vemoizer.batch as batch_module
+    import vemoizer.notify as notify_module
+    import vemoizer.pipeline as pipeline_module
+    import vemoizer.preflight as preflight_module
+    import vemoizer.preset_interrupt as preset_interrupt_module
+    import vemoizer.preset_plain_loop as preset_plain_loop_module
+
+    recorded: list[tuple[object, list[str]]] = []
+
+    def fake_note(tracker, paths):
+        recorded.append((tracker, list(paths)))
+
+    files = touch_files(["a.m4a", "b.m4a"], tmp_path)
+    # The real tracker, so the call is asserted to carry THIS run's instance
+    # and not some stand-in.
+    tracker = preset_interrupt_module.InterruptTracker()
+    # Patched where the loop looks the name up. ``preset_plain_loop`` binds it
+    # with a module-level ``from vemoizer.preset_interrupt import``, so a patch
+    # on ``preset_interrupt`` binds too late to reach this loop — the
+    # ``setattr`` below is the only one that does, and it is what makes a
+    # deleted call visible instead of vacuously green.
+    monkeypatch.setattr(preset_plain_loop_module, "note_written_files", fake_note)
+    monkeypatch.setattr(preflight_module, "preflight_gate", lambda **kw: None)
+    monkeypatch.setattr(batch_module, "_resolve_llm_config", lambda p: None)
+    monkeypatch.setattr(notify_module, "notify_write", lambda *a, **kw: None)
+    monkeypatch.setattr(notify_module, "notify_result", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        pipeline_module,
+        "transcribe_file",
+        lambda path, **kw: {
+            "text": "moikka",
+            "segments": [],
+            "paragraphs": [{"text": "moikka", "start": 0.0, "end": 1.0}],
+        },
+    )
+    # First file writes the full pair, second file a partial pair.
+    pairs = [["a.md", "a.json"], ["b.md"]]
+    monkeypatch.setattr(
+        batch_preset_module,
+        "_write_preset_output",
+        lambda *a, **kw: pairs.pop(0),
+    )
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+
+    tracker = preset_interrupt_module.InterruptTracker()
+    code = batch_preset_module.run_preset(
+        list(files),
+        command="memo",
+        config_path=None,
+        glossary_path=None,
+        quiet=True,
+        yes=True,
+        display=None,
+        tracker=tracker,
+    )
+    assert code == 1, "a partial pair must fail the run"
+    assert recorded, (
+        "note_written_files was never reached: the interrupt tally of written "
+        "files would be empty while the pair sits on disk"
+    )
+    # Exactly one call per file whose write seam returned, with this run's
+    # tracker and that file's pair.
+    assert [t for t, _ in recorded] == [tracker, tracker], recorded
+    assert [p for _, p in recorded] == [["a.md", "a.json"], ["b.md"]], recorded
+    # The real helper is not run while the seam is faked, so the tracker's own
+    # tally stays at zero here — it is the fake that must see the pair, and
+    # test_preset_interrupt.py owns the tally arithmetic.
+    assert tracker.written_count == 0, tracker.written_count
