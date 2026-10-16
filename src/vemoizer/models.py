@@ -42,7 +42,6 @@ from .model_pull_report import STAGES as STAGES
 from .model_pull_report import _describe_hf_error as _describe_hf_error
 from .model_pull_report import expected_size_str as expected_size_str
 from .model_pull_report import format_pull_error as format_pull_error
-from .model_pull_report import format_size as format_size
 from .model_pull_report import render_pull_report as render_pull_report
 
 __all__ = [
@@ -61,7 +60,6 @@ __all__ = [
     "cache_dir",
     "cache_size",
     "cache_size_bytes",
-    "format_size",
     "format_pull_error",
     "render_pull_report",
 ]

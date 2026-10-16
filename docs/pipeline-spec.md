@@ -507,11 +507,9 @@ nothing clip-related is ever written to a persistent location, and no
 
 Expected sizes are the per-model constants in `_EXPECTED_SIZE_GIB` in
 `src/vemoizer/model_pull_report.py` — the `models pull` report module, moved
-out of `models.py` in issue #151 and re-exported from it (drift test
-`tests/test_cli_models.py::test_stage_and_size_maps_cover_registry`). Measured
-against the local HuggingFace cache and shown per-model in the `models pull`
-report. The five pipeline models total roughly 7.8 GiB on disk; loaded lazily
-and sequentially, all fit on a 16 GB Mac.
+out of `models.py` in issue #151 and re-exported from it — measured against
+the local HuggingFace cache. The five pipeline models total roughly 7.8 GiB
+on disk; loaded lazily and sequentially, all fit on a 16 GB Mac.
 
 The first five rows are the `MODELS` registry in `src/vemoizer/models.py`
 in pipeline order (parakeet, canary, whisper-finnish, whisper-turbo,
