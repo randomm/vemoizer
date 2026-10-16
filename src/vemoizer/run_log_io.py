@@ -58,9 +58,15 @@ def scrub_credentials(text: str, api_key: str | None = None) -> str:
     The single redaction implementation: :class:`RedactingFormatter` calls it
     for every log line, and the ``models pull`` error formatters call it for
     the library-owned text they echo to the operator's terminal (stdout, where
-    a log formatter never runs). The API key is passed in by the caller — the
-    run context owns ``llm_api_key_env`` — and ``None``/empty is never
-    redacted.
+    a log formatter never runs).
+
+    The API key is passed in by the caller — the run context owns
+    ``llm_api_key_env`` — and ``None``/empty is never substituted (an empty
+    value would otherwise insert ``<redacted>`` between every character).
+    **The >= 8-char floor on that key is the caller's rule, not this
+    function's**: :func:`vemoizer.run_log._api_key_value` applies it so a
+    trivially short env value cannot blank whole log lines. A new caller must
+    reproduce that floor rather than pass a raw env value here.
     """
     text = _HF_TOKEN_RE.sub("hf_<redacted>", text)
     text = _BEARER_RE.sub("Bearer <redacted>", text)

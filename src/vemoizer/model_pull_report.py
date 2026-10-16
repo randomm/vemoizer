@@ -16,6 +16,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+# Imported, never restated: the error formatters below echo
+# ``huggingface_hub`` exception text into the operator's ``models pull``
+# report, a trust boundary the run log does not cover — ``RedactingFormatter``
+# scrubs the *log file* only, never stdout. Sharing one implementation means
+# one shape cannot be redacted in one path and leak in the other (issue #151
+# review, SECURITY).
 from vemoizer.run_log_io import scrub_credentials
 
 if TYPE_CHECKING:
@@ -62,20 +68,6 @@ def expected_size_str(name: str) -> str:
     if gib < 0.1:  # the GiB form would show 0.1; MiB is more readable below this
         return f"~{int(gib * 1024)} MiB"
     return f"~{gib:.1f} GiB"
-
-
-def _scrub_credentials(text: str) -> str:
-    """Strip credential-shaped substrings out of library-owned exception text.
-
-    The two error formatters below echo ``huggingface_hub`` exception text
-    into the operator's ``models pull`` report. That text crosses a trust
-    boundary the run log does not: :class:`~vemoizer.run_log_io.
-    RedactingFormatter` scrubs the *log file* only, never stdout. The
-    redaction itself is the run log's own :func:`scrub_credentials`, imported
-    rather than restated so one shape cannot be redacted in one path and leak
-    in the other.
-    """
-    return scrub_credentials(text)
 
 
 def format_size(nbytes: int) -> str:
@@ -137,9 +129,10 @@ def _describe_hf_error(exc: Exception) -> str:
 
     The two branches that do echo library text (``RepositoryNotFoundError``,
     ``RevisionNotFoundError``) and the ``GatedRepoError`` branch of
-    :func:`format_pull_error` pass it through :func:`_scrub_credentials`
-    first — this report goes to the operator's terminal, where the run-log
-    ``RedactingFormatter`` does not apply.
+    :func:`format_pull_error` pass it through
+    :func:`~vemoizer.run_log_io.scrub_credentials` first — this report goes to
+    the operator's terminal, where the run-log ``RedactingFormatter`` does not
+    apply.
     """
     try:
         from huggingface_hub.errors import (
@@ -167,12 +160,12 @@ def _describe_hf_error(exc: Exception) -> str:
     if isinstance(exc, RepositoryNotFoundError):
         return (
             f"model repository not found on the hub: "
-            f"{_scrub_credentials(getattr(exc, 'message', str(exc)))}"
+            f"{scrub_credentials(getattr(exc, 'message', str(exc)))}"
         )
     if isinstance(exc, RevisionNotFoundError):
         return (
             f"pinned revision not found: "
-            f"{_scrub_credentials(getattr(exc, 'message', str(exc)))}"
+            f"{scrub_credentials(getattr(exc, 'message', str(exc)))}"
         )
     if isinstance(exc, (IncompleteSnapshotError, LocalEntryNotFoundError)):
         return (
@@ -181,7 +174,7 @@ def _describe_hf_error(exc: Exception) -> str:
         )
     if isinstance(exc, HfHubHTTPError):
         status = getattr(exc, "status_code", None)
-        detail = _scrub_credentials(getattr(exc, "message", str(exc)))
+        detail = scrub_credentials(getattr(exc, "message", str(exc)))
         return f"model download failed (HTTP {status}): {detail}".strip()
     return f"failed to download model: {type(exc).__name__}"
 
@@ -208,7 +201,7 @@ def format_pull_error(exc: Exception) -> str:
         )
     if isinstance(exc, GatedRepoError):
         return (
-            f"{_scrub_credentials(f'{exc}')} — accept the license at "
+            f"{scrub_credentials(f'{exc}')} — accept the license at "
             f"https://huggingface.co and provide an access token."
         )
     response = getattr(exc, "response", None)
