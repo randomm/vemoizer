@@ -111,13 +111,16 @@ def drain(pool: ThreadPoolExecutor, futures: dict[int, Future]) -> None:
     for future in futures.values():
         future.cancel()
     # ``cancel_futures=True`` is what stops the tasks the pool has queued but
-    # not started. It is not redundant with the loop above: when the stage
-    # returns early on the budget, the collector has already popped the
-    # futures it settled out of *futures*, and with ``wait=False`` nothing
-    # else would prevent the pool's own backlog from being handed to a worker.
-    # Cancelling only the tracked dict would let a whole window of paragraphs
-    # be called after the stage had already told the operator they shipped
-    # un-repaired.
+    # not started, and it is what the stage relies on to keep its promise: once
+    # the budget is gone no further paragraph is called for. It is not redundant
+    # with the loop above — the collector has already popped the futures it
+    # settled out of *futures*, and with ``wait=False`` nothing else would stop
+    # the pool's own backlog from being handed to a worker.
+    #
+    # One caveat the caller must not be allowed to forget: cancellation only
+    # reaches work that has not *started*. A task already dequeued is running,
+    # and no amount of cancelling turns it off — which is why the per-call
+    # ``deadline_s`` is load-bearing rather than belt-and-braces.
     pool.shutdown(wait=False, cancel_futures=True)
     stragglers = [
         t
