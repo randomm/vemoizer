@@ -32,6 +32,7 @@ from huggingface_hub.errors import (
 )
 from typer.testing import CliRunner
 
+from vemoizer import model_pull_report
 from vemoizer import models as models_mod
 from vemoizer.canary_transcriber import MODEL_ID as CANARY_MODEL_ID
 from vemoizer.canary_transcriber import MODEL_REVISION as CANARY_MODEL_REVISION
@@ -56,16 +57,29 @@ def _patch_download(*args, **kwargs):
     return patch.object(huggingface_hub, "snapshot_download", *args, **kwargs)
 
 
-def _make_http_error(status_code: int, message: str):
-    """Build a ``HfHubHTTPError`` subclass instance without a live response."""
+def _make_http_error(
+    status_code: int, message: str, *, cls: type[Exception] | None = None
+):
+    """Build a ``HfHubHTTPError`` subclass instance without a live response.
+
+    *cls* selects the exception class explicitly. Omitting it keeps the
+    long-standing resolution order (most-specific subclass first), which for
+    every status code the suite had used lands on ``GatedRepoError`` or
+    ``RepositoryNotFoundError`` — so a test that needs a *generic*
+    ``HfHubHTTPError`` or a ``RevisionNotFoundError`` has to name the class,
+    otherwise an earlier ``isinstance`` branch swallows it and the branch
+    under test never runs.
+    """
     from huggingface_hub.errors import HfHubHTTPError
 
-    def _make(cls, code, msg):
-        inst = cls.__new__(cls)
+    def _make(klass, code, msg):
+        inst = klass.__new__(klass)
         inst.message = msg
         inst.status_code = code
         return inst
 
+    if cls is not None:
+        return _make(cls, status_code, message)
     # Most-specific subclass first (GatedRepoError < RepositoryNotFoundError)
     if status_code == 401 and issubclass(GatedRepoError, HfHubHTTPError):
         return _make(GatedRepoError, status_code, message)
@@ -396,15 +410,38 @@ def test_cache_size_missing_dir_reports_zero(monkeypatch, tmp_path: Path) -> Non
 
 
 def test_format_size_units() -> None:
-    assert models_mod.format_size(0) == "0 B"
-    assert models_mod.format_size(100) == "100 B"
-    assert models_mod.format_size(1024) == "1.0 KiB"
-    assert models_mod.format_size(1024 * 1024) == "1.0 MiB"
-    assert models_mod.format_size(1024**3) == "1.0 GiB"
+    assert model_pull_report.format_size(0) == "0 B"
+    assert model_pull_report.format_size(100) == "100 B"
+    assert model_pull_report.format_size(1024) == "1.0 KiB"
+    assert model_pull_report.format_size(1024 * 1024) == "1.0 MiB"
+    assert model_pull_report.format_size(1024**3) == "1.0 GiB"
 
 
 def test_format_size_large_values() -> None:
-    assert models_mod.format_size(1024**3 * 5 + 1024**3 // 2) == "5.5 GiB"
+    assert model_pull_report.format_size(1024**3 * 5 + 1024**3 // 2) == "5.5 GiB"
+
+
+def test_report_helpers_reachable_from_the_registry_module() -> None:
+    """``cli.py`` imports the report helpers via :mod:`vemoizer.models`
+    (``from vemoizer.models import ... render_pull_report``), so those stay
+    re-exported. ``format_size`` is deliberately NOT one of them: nothing
+    outside this module's own report renders byte counts, so it lives only at
+    its definition (issue #151 lens, SIMPLICITY — no public surface for a
+    name no consumer looks up).
+    """
+    for name in (
+        "STAGES",
+        "_EXPECTED_SIZE_GIB",
+        "expected_size_str",
+        "render_pull_report",
+        "format_pull_error",
+        "_describe_hf_error",
+    ):
+        assert getattr(models_mod, name) is getattr(model_pull_report, name), name
+    assert not hasattr(models_mod, "format_size"), (
+        "format_size is not part of the registry's contract; it belongs to "
+        "vemoizer.model_pull_report, where its only caller lives"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -462,10 +499,18 @@ def test_diarization_constants_match_registry() -> None:
 
 
 def test_stage_and_size_maps_cover_registry() -> None:
-    """STAGES and _EXPECTED_SIZE_GIB stay in sync with the MODELS registry."""
+    """STAGES and _EXPECTED_SIZE_GIB stay in sync with the MODELS registry.
+
+    Pinned at the module that *defines* the constants, so a rename or a
+    deleted entry fails here rather than being hidden by the ``models.py``
+    re-export shim (issue #151 lens, ARCHITECTURE).
+    """
     names = {s.name for s in models_mod.MODELS}
-    assert set(models_mod.STAGES) == names
-    assert set(models_mod._EXPECTED_SIZE_GIB) == names
+    assert set(model_pull_report.STAGES) == names
+    assert set(model_pull_report._EXPECTED_SIZE_GIB) == names
+    # The re-export surface the CLI and the rest of the suite import from.
+    assert models_mod.STAGES is model_pull_report.STAGES
+    assert models_mod._EXPECTED_SIZE_GIB is model_pull_report._EXPECTED_SIZE_GIB
 
 
 def test_readme_does_not_restate_canonical_size_total() -> None:
@@ -517,6 +562,135 @@ def test_render_pull_report_failure_line() -> None:
     assert "some error" in report
     # Stage is present even on failure lines
     assert "[decode A]" in report
+
+
+# ---------------------------------------------------------------------------
+# Credential redaction on the stdout path (issue #151 review, SECURITY)
+#
+# ``models pull`` echoes library-owned exception text to the terminal. The
+# run log scrubs ``hf_…``/``Bearer …`` via ``run_log_io.RedactingFormatter``,
+# but that formatter only ever sees log records — stdout has no formatter, so
+# the formatters themselves must scrub. The shared helper is
+# :func:`vemoizer.run_log_io.scrub_credentials`, imported into
+# ``vemoizer.model_pull_report`` and called at the four sites that interpolate
+# library text into stdout: the ``RepositoryNotFoundError`` and
+# ``RevisionNotFoundError`` branches and the generic ``HfHubHTTPError`` branch
+# of ``_describe_hf_error``, and the ``GatedRepoError`` branch of
+# ``format_pull_error``. Each has its own case below, and deleting the
+# ``scrub_credentials(`` call at that site fails that case (the other branches
+# return fixed strings, so no scrub there is asserted — there is nothing to
+# leak).
+# ---------------------------------------------------------------------------
+
+_TOKEN = "hf_" + "T" * 34  # the HF token shape run_log_io matches
+
+
+def test_describe_hf_error_scrubs_token_from_hub_message() -> None:
+    """A token inside a hub-owned ``message`` never reaches the report.
+
+    ``_describe_hf_error`` interpolates ``getattr(exc, 'message', ...)`` for
+    ``RepositoryNotFoundError``.
+    """
+    exc = _make_http_error(404, f"Repository not found for token {_TOKEN}")
+    report = models_mod._describe_hf_error(exc)
+    assert _TOKEN not in report
+    assert "hf_<redacted>" in report
+
+
+def test_describe_hf_error_scrubs_token_from_revision_not_found() -> None:
+    """The ``RevisionNotFoundError`` branch scrubs too (issue #151 lens).
+
+    ``_make_http_error`` resolves 404 to ``RepositoryNotFoundError``, so this
+    branch was never reached: deleting its ``scrub_credentials(`` call kept
+    the whole suite green. The class is named explicitly to land on it.
+    Break-and-fail: in ``src/vemoizer/model_pull_report.py``, in
+    ``_describe_hf_error``, in the ``isinstance(exc, RevisionNotFoundError)``
+    branch, replace ``scrub_credentials(getattr(exc, 'message', str(exc)))``
+    with ``getattr(exc, 'message', str(exc))`` — this test fails.
+    """
+    exc = _make_http_error(404, f"Revision {_TOKEN} missing", cls=RevisionNotFoundError)
+    report = models_mod._describe_hf_error(exc)
+    assert "pinned revision not found" in report
+    assert _TOKEN not in report
+    assert "hf_<redacted>" in report
+
+
+def test_describe_hf_error_scrubs_token_from_generic_http_error() -> None:
+    """The generic ``HfHubHTTPError`` branch scrubs — the branch that most
+    needs it (issue #151 lens, SECURITY).
+
+    ``hf_raise_for_status`` builds ``message`` from ``response.text`` and
+    echoes ``response.url``, which under the query-param auth form carries
+    the token. Every existing case resolved to a more specific subclass, so
+    this ``isinstance`` arm ran with no test at all: mutating it back to the
+    unscrubbed ``getattr(exc, "message", str(exc))`` left the full suite
+    green (verified: 2273 passed). Build a real 429 through the constructor
+    so the branch is reached with a response attached, the shape the hub
+    actually raises.
+    """
+    import httpx
+    from huggingface_hub.errors import HfHubHTTPError
+
+    request = httpx.Request(
+        "GET", "https://huggingface.co/api/models/x?token=Bearer%20query-param-secret"
+    )
+    response = httpx.Response(429, request=request, text="rate limited")
+    exc = HfHubHTTPError(
+        f"429 Too Many Requests: token {_TOKEN} in the hub's own body text",
+        response=response,
+    )
+    # No ``status_code`` is assigned: the real constructor does not set one and
+    # production reads it with ``getattr(exc, "status_code", None)``, so this
+    # case pins the response-carrying shape that actually reaches the branch.
+    report = models_mod._describe_hf_error(exc)
+    assert "model download failed" in report, report
+    assert _TOKEN not in report
+    assert "hf_<redacted>" in report
+    # the constructor-built exception really does reach the generic arm: an
+    # earlier isinstance() would have returned one of the fixed strings
+    assert "failed to download model" not in report
+
+
+def test_format_pull_error_gated_scrubs_bearer_header() -> None:
+    """``GatedRepoError`` is interpolated bare (``f"{exc}"``) — the one branch
+    that echoes the whole exception, so it is the one that must scrub.
+
+    Built through the real constructor (``str(exc)`` is ``args[0]``, which the
+    no-response ``_make_http_error`` helper does not populate). The hub's own
+    gated failure text carries the request ``Authorization`` header.
+    """
+    import httpx
+
+    request = httpx.Request(
+        "GET",
+        "https://huggingface.co/api/models/x",
+        headers={"Authorization": "Bearer secret-token-value"},
+    )
+    response = httpx.Response(403, request=request)
+    exc = GatedRepoError(
+        "403 Forbidden for url: https://huggingface.co/api/models/x\n"
+        "Authorization: Bearer secret-token-value",
+        response=response,
+    )
+    message = models_mod.format_pull_error(exc)
+    assert "secret-token-value" not in message
+    assert "Bearer <redacted>" in message
+
+
+def test_pull_report_stdout_has_no_credential_shaped_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end on the CLI surface: a token in a hub failure does not reach
+    stdout, where no log formatter runs."""
+
+    def boom(repo_id, **kwargs):
+        raise _make_http_error(404, f"no access with {_TOKEN}")
+
+    monkeypatch.setenv("HF_HOME", str(Path("/nonexistent-vemoizer-cache")))
+    with _patch_download(side_effect=boom):
+        result = runner.invoke(app, ["models", "pull"])
+    assert _TOKEN not in result.stdout
+    assert "hf_<redacted>" in result.stdout
 
 
 # ---------------------------------------------------------------------------

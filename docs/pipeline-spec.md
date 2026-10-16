@@ -506,10 +506,10 @@ nothing clip-related is ever written to a persistent location, and no
 | VAD | silero-vad | bundled in `silero-vad==6.2.1` pip package | package version | bundled | ONNX mode, no separate download |
 
 Expected sizes are the per-model constants in `_EXPECTED_SIZE_GIB` in
-`src/vemoizer/models.py` (issue #67), measured against the local HuggingFace
-cache and shown per-model in the `models pull` report. The five pipeline
-models total roughly 7.8 GiB on disk; loaded lazily and sequentially, all
-fit on a 16 GB Mac.
+`src/vemoizer/model_pull_report.py` — the `models pull` report module, moved
+out of `models.py` in issue #151 and re-exported from it — measured against
+the local HuggingFace cache. The five pipeline models total roughly 7.8 GiB
+on disk; loaded lazily and sequentially, all fit on a 16 GB Mac.
 
 The first five rows are the `MODELS` registry in `src/vemoizer/models.py`
 in pipeline order (parakeet, canary, whisper-finnish, whisper-turbo,

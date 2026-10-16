@@ -142,3 +142,61 @@ class TestApiKeyGetter:
         # The traceback is present (redacted), proving exc_text was covered.
         assert "Traceback (most recent call last):" in out
         assert "<redacted>" in out
+
+
+def test_log_path_scrubs_through_the_shared_helper(monkeypatch, tmp_path) -> None:
+    """The log file must scrub via the SAME function the stdout path calls.
+
+    The whole point of extracting :func:`scrub_credentials` (issue #151) is
+    that one credential shape cannot be redacted in the log and leak on
+    stdout. The existing regex cases only prove ``RedactingFormatter`` scrubs
+    *something* — re-inlining the substitutions in ``format`` would keep them
+    green while quietly forking the two paths. Patching the shared function
+    and asserting the formatter reached it pins the delegation itself.
+
+    The stdout side is pinned separately, in
+    ``tests/test_cli_models.py::test_describe_hf_error_scrubs_token_from_*``
+    and ``test_format_pull_error_gated_scrubs_bearer_header``.
+    """
+    import vemoizer.run_log_io as run_log_io
+
+    calls: list[tuple[str, str | None]] = []
+    real = run_log_io.scrub_credentials
+
+    def spy(text: str, api_key: str | None = None) -> str:
+        calls.append((text, api_key))
+        return real(text, api_key)
+
+    monkeypatch.setattr(run_log_io, "scrub_credentials", spy)
+    out = _format(RedactingFormatter(lambda: "seckey12345"), "plain line")
+
+    assert len(calls) == 1, (
+        f"RedactingFormatter.format must delegate to scrub_credentials "
+        f"exactly once per record; got {calls!r} — the redaction has been "
+        "re-inlined and the log/stdout paths can now drift"
+    )
+    assert calls[0][1] == "seckey12345", "the per-record api_key must be forwarded"
+    assert out == "plain line"
+
+
+def test_shared_helper_api_key_floor_is_documented_not_silent() -> None:
+    """``scrub_credentials`` must not silently redact a short "key".
+
+    The >= 8-char floor that keeps a trivially short env value from blanking
+    whole log lines lives on the caller's getter (``run_log._api_key_value``),
+    not here. That is a deliberate split, so the contract has to be readable
+    from the function itself rather than only from a caller two modules away.
+    """
+    import inspect
+
+    from vemoizer.run_log_io import scrub_credentials
+
+    doc = inspect.getdoc(scrub_credentials) or ""
+    assert ">= 8" in doc or ">=8" in doc or "8" in doc, (
+        "scrub_credentials' docstring must state who owns the >= 8-char rule: "
+        "a caller that reads only this signature would apply the wrong policy"
+    )
+    # Behaviour contract: None and "" are never substituted (an empty value
+    # would otherwise insert <redacted> between every character).
+    assert scrub_credentials("nothing to hide", None) == "nothing to hide"
+    assert scrub_credentials("nothing to hide", "") == "nothing to hide"
