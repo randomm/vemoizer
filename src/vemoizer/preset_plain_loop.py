@@ -9,15 +9,12 @@ preset, for memo always, and for meeting with ``--no-group`` — one dated
 
 Pure move: every statement below is unchanged from ``run_preset`` (issue #87
 and the later issues named in the comments). Seam convention (same as
-:mod:`vemoizer.batch_plain`, which serves ``run_batch``): the four names the
-test suite patches — ``_transcribe_preset_file``, ``_write_preset_output``,
-``_mtime_date_str``, ``file_log`` — are imported from ``vemoizer.batch_preset``
-inside the function body, so ``monkeypatch.setattr(batch_preset, ...)`` and
-``mock.patch.object(batch_preset, ...)`` keep hitting what this loop actually
-calls, and those four (only) stay re-exported there. Every other helper the
-tests do not patch is imported at module level here; the two ``vemoizer.notify``
-posters stay deferred inside the function because the suite stubs them by
-name on ``vemoizer.notify`` (see the import site).
+:mod:`vemoizer.batch_plain`, which serves ``run_batch``): a name is imported
+where it is *looked up*, because that is where the test suite patches it — the
+four seam names are looked up on ``vemoizer.batch_preset`` inside the function
+body, and the ``vemoizer.notify`` posters on ``vemoizer.notify``, both deferred
+so a late patch still reaches this loop. Nothing is re-exported or deferred
+that no code looks up here.
 
 Nothing here wraps or swallows exceptions: the temp-glossary ``OSError`` /
 ``ValueError`` and a ``KeyboardInterrupt`` keep propagating to the handlers
@@ -68,8 +65,8 @@ def run_preset_plain_loop(
     yes: bool,
     input_fn: Callable[[str], str] | None,
     tty_isatty: Callable[[], bool] | None,
-    display: ProgressDisplay | None = None,
-    tracker: InterruptTracker | None = None,
+    display: ProgressDisplay | None,
+    tracker: InterruptTracker | None,
 ) -> int:
     """Run the plain per-file preset flow over *files*; return the exit code.
 
@@ -79,18 +76,13 @@ def run_preset_plain_loop(
     option-composition context. Returns 0 on success and 1 on any per-file
     failure (transcribe returned nothing, a failed check, or a partial pair).
     """
-    # Deferred (``batch_preset`` imports this module, so the direction stays
-    # one-way) AND authoritative: these FOUR (and only these) are the names the
-    # test suite patches on :mod:`vemoizer.batch_preset` —
-    # ``_mtime_date_str`` (test_meeting_grouping,
-    # test_meeting_write_failures), ``_write_preset_output`` (test_final_line,
-    # test_notify_preset_cli, test_meeting_write_failures),
-    # ``_transcribe_preset_file`` (test_final_line, test_preset_interrupt) and
-    # ``file_log`` (test_run_log_cli's ``_patch_file_log``). The loop looks them
-    # up THERE so those patches take effect; ``batch_preset`` is the patch-target
-    # module the suite has always used (issue #78 convention: patch where the
-    # name is looked up). Nothing else is looked up on ``batch_preset`` — the
-    # module re-exports exactly these four and no others.
+    # ``batch_preset`` imports this module, so the direction stays one-way —
+    # and these are the names the suite patches on
+    # :mod:`vemoizer.batch_preset`, so the loop must look them up THERE
+    # (issue #78: patch where the name is looked up) or the long-standing
+    # patches would silently miss and the tests would go green anyway.
+    # The same rule makes the two ``vemoizer.notify`` posters below
+    # function-local — see the import site for the per-module reason.
     from vemoizer.batch_preset import (
         _mtime_date_str,
         _transcribe_preset_file,
@@ -100,12 +92,12 @@ def run_preset_plain_loop(
     from vemoizer.caffeinate import caffeinate_context
     from vemoizer.ingest import pcm_duration_seconds
 
-    # Both notification seams are imported here (not at module level) for the
-    # same reason ``batch_plain`` defers its ``notify_result``: the suite
-    # stubs the poster by replacing the name on ``vemoizer.notify`` —
-    # ``mock.patch.object(notify_module, "notify_write", ...)`` — and a
-    # module-level ``from ... import`` binds the function object once at
-    # import time, so that patch would never reach this loop.
+    # Deferred for the same reason as the imports above — this time against
+    # ``vemoizer.notify``: the suite stubs these posters by replacing the name
+    # on that module, and a module-level ``from ... import`` binds the function
+    # object once at import time, so that patch would never reach this loop.
+    # The same function-local import is what ``batch_plain.py:101`` does for
+    # its own failure notification.
     from vemoizer.notify import notify_result, notify_write
     from vemoizer.progress_wiring import set_batch_prefix
 

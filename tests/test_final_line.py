@@ -615,6 +615,37 @@ class TestRunWentFullOptionalExpectedPairs:
 # exit code happens to look right.
 
 
+def _run_plain_with(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    files: tuple[str, ...] = ("a.m4a",),
+    command: str = "meeting",
+    fakes: dict[str, Callable[..., Any]],
+) -> int:
+    """Patch seam *fakes* on ``batch_preset``, run the plain path, return the exit code.
+
+    The shared choreography of the seam tests below: the only thing that
+    differs between them is which name is faked and what the fake records.
+    Each fake asserts its own call (``calls == [...]``) so a patch that missed
+    its target fails, rather than the run falling through to the real helper.
+    """
+    touched = touch_files(list(files), tmp_path)
+    for name, fake in fakes.items():
+        monkeypatch.setattr(batch_preset_module, name, fake)
+    _plain_seams(monkeypatch)
+    isolate_home(monkeypatch, tmp_path, tmp_path)
+    return batch_preset_module.run_preset(
+        list(touched),
+        command=command,
+        config_path=None,
+        glossary_path=None,
+        quiet=True,
+        yes=True,
+        display=None,
+    )
+
+
 def test_moved_plain_loop_uses_batch_preset_transcribe_seam(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -624,24 +655,14 @@ def test_moved_plain_loop_uses_batch_preset_transcribe_seam(
     path, AND records its own call: a patch that missed the target would run
     the real transcribe and never reach either assertion.
     """
-    files = touch_files(["a.m4a"], tmp_path)
     calls: list[str] = []
 
     def fake_transcribe(file, options=None, glossary_path=None, **kwargs):
         calls.append(Path(file).name)
         return None
 
-    monkeypatch.setattr(batch_preset_module, "_transcribe_preset_file", fake_transcribe)
-    _plain_seams(monkeypatch)
-    isolate_home(monkeypatch, tmp_path, tmp_path)
-    code = batch_preset_module.run_preset(
-        list(files),
-        command="meeting",
-        config_path=None,
-        glossary_path=None,
-        quiet=True,
-        yes=True,
-        display=None,
+    code = _run_plain_with(
+        monkeypatch, tmp_path, fakes={"_transcribe_preset_file": fake_transcribe}
     )
     assert code == 1
     assert calls == ["a.m4a"], "the _transcribe_preset_file patch did not take effect"
@@ -653,24 +674,17 @@ def test_moved_plain_loop_uses_batch_preset_write_seam(
     """``batch_preset._write_preset_output`` still reaches the moved loop: the
     fake's partial pair must drive exit 1 (a missed patch would write real
     files and exit 0)."""
-    files = touch_files(["a.m4a"], tmp_path)
     calls: list[str] = []
 
     def fake_write(result, stem, out_dir, *, date_str=None):
         calls.append(stem)
         return ["2025-01-01 a.md"]  # partial pair: only the .md landed
 
-    monkeypatch.setattr(batch_preset_module, "_write_preset_output", fake_write)
-    _plain_seams(monkeypatch)
-    isolate_home(monkeypatch, tmp_path, tmp_path)
-    code = batch_preset_module.run_preset(
-        list(files),
+    code = _run_plain_with(
+        monkeypatch,
+        tmp_path,
         command="memo",
-        config_path=None,
-        glossary_path=None,
-        quiet=True,
-        yes=True,
-        display=None,
+        fakes={"_write_preset_output": fake_write},
     )
     assert code == 1
     assert calls == ["a"], "the _write_preset_output patch did not take effect"
@@ -681,25 +695,20 @@ def test_moved_plain_loop_uses_batch_preset_mtime_seam(
 ) -> None:
     """``batch_preset._mtime_date_str`` still reaches the moved loop: the
     fake's date must appear in the written basename."""
-    files = touch_files(["a.m4a"], tmp_path)
     seen: list[str] = []
 
     def fake_write(result, stem, out_dir, *, date_str=None):
         seen.append(str(date_str))
         return ["2019-02-03 a.md", "2019-02-03 a.json"]
 
-    monkeypatch.setattr(batch_preset_module, "_mtime_date_str", lambda p: "2019-02-03")
-    monkeypatch.setattr(batch_preset_module, "_write_preset_output", fake_write)
-    _plain_seams(monkeypatch)
-    isolate_home(monkeypatch, tmp_path, tmp_path)
-    code = batch_preset_module.run_preset(
-        list(files),
+    code = _run_plain_with(
+        monkeypatch,
+        tmp_path,
         command="memo",
-        config_path=None,
-        glossary_path=None,
-        quiet=True,
-        yes=True,
-        display=None,
+        fakes={
+            "_mtime_date_str": lambda p: "2019-02-03",
+            "_write_preset_output": fake_write,
+        },
     )
     assert code == 0
     assert seen == ["2019-02-03"], "the _mtime_date_str patch did not take effect"
@@ -712,25 +721,13 @@ def test_moved_plain_loop_uses_batch_preset_file_log_seam(
     moved loop (issue #111 seam (b) survives the move)."""
     from contextlib import nullcontext
 
-    files = touch_files(["a.m4a"], tmp_path)
     stems: list[str] = []
 
     def fake_file_log(stem):
         stems.append(stem)
         return nullcontext()
 
-    monkeypatch.setattr(batch_preset_module, "file_log", fake_file_log)
-    _plain_seams(monkeypatch)
-    isolate_home(monkeypatch, tmp_path, tmp_path)
-    code = batch_preset_module.run_preset(
-        list(files),
-        command="meeting",
-        config_path=None,
-        glossary_path=None,
-        quiet=True,
-        yes=True,
-        display=None,
-    )
+    code = _run_plain_with(monkeypatch, tmp_path, fakes={"file_log": fake_file_log})
     assert code == 0
     assert stems == ["a"], "the file_log patch did not take effect"
 

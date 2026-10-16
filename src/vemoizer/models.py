@@ -33,27 +33,17 @@ from typing import Any
 # responsibility — pure presentation, no registry or download state. Imported
 # here (and listed in ``__all__``) so ``from vemoizer.models import ...`` keeps
 # working for the CLI and the test suite; ``_describe_hf_error`` is also called
-# directly by ``pull_models``. The report module keeps nothing at load time from
-# here (its one ``format_size`` use is a deferred import inside the function
-# body), so this direction introduces no import cycle.
-from .model_pull_report import (
-    _EXPECTED_SIZE_GIB as _EXPECTED_SIZE_GIB,
-)
-from .model_pull_report import (
-    STAGES as STAGES,
-)
-from .model_pull_report import (
-    _describe_hf_error as _describe_hf_error,
-)
-from .model_pull_report import (
-    expected_size_str as expected_size_str,
-)
-from .model_pull_report import (
-    format_pull_error as format_pull_error,
-)
-from .model_pull_report import (
-    render_pull_report as render_pull_report,
-)
+# directly by ``pull_models``. The report module imports nothing from here, so
+# this direction introduces no import cycle. One statement per name: ruff's
+# isort splits a parenthesised ``from`` import whose members are all ``X as X``
+# re-export bindings, so the multi-name block is not a lint-stable form.
+from .model_pull_report import _EXPECTED_SIZE_GIB as _EXPECTED_SIZE_GIB
+from .model_pull_report import STAGES as STAGES
+from .model_pull_report import _describe_hf_error as _describe_hf_error
+from .model_pull_report import expected_size_str as expected_size_str
+from .model_pull_report import format_pull_error as format_pull_error
+from .model_pull_report import format_size as format_size
+from .model_pull_report import render_pull_report as render_pull_report
 
 __all__ = [
     "ModelSpec",
@@ -234,18 +224,6 @@ def _dir_size(path: Path) -> int:
         if file.is_file():
             total += file.stat().st_size
     return total
-
-
-def format_size(nbytes: int) -> str:
-    """Human-readable byte count with one decimal (e.g. ``1.2 GiB``)."""
-    value = float(nbytes)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if value < 1024.0 or unit == "TiB":
-            if unit == "B":
-                return f"{int(value)} B"
-            return f"{value:.1f} {unit}"
-        value /= 1024.0
-    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def resolve_model_path(

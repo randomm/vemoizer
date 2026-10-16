@@ -520,6 +520,73 @@ def test_render_pull_report_failure_line() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Credential redaction on the stdout path (issue #151 review, SECURITY)
+#
+# ``models pull`` echoes library-owned exception text to the terminal. The
+# run log scrubs ``hf_…``/``Bearer …`` via ``run_log_io.RedactingFormatter``,
+# but that formatter only ever sees log records — stdout has no formatter, so
+# the formatters themselves must scrub. Break-and-fail: removing the
+# ``_scrub_credentials`` call in the relevant branch fails the matching case.
+# ---------------------------------------------------------------------------
+
+_TOKEN = "hf_" + "T" * 34  # the HF token shape run_log_io matches
+
+
+def test_describe_hf_error_scrubs_token_from_hub_message() -> None:
+    """A token inside a hub-owned ``message`` never reaches the report.
+
+    ``_describe_hf_error`` interpolates ``getattr(exc, 'message', ...)`` for
+    ``RepositoryNotFoundError`` / ``RevisionNotFoundError``.
+    """
+    exc = _make_http_error(404, f"Repository not found for token {_TOKEN}")
+    report = models_mod._describe_hf_error(exc)
+    assert _TOKEN not in report
+    assert "hf_<redacted>" in report
+
+
+def test_format_pull_error_gated_scrubs_bearer_header() -> None:
+    """``GatedRepoError`` is interpolated bare (``f"{exc}"``) — the one branch
+    that echoes the whole exception, so it is the one that must scrub.
+
+    Built through the real constructor (``str(exc)`` is ``args[0]``, which the
+    no-response ``_make_http_error`` helper does not populate). The hub's own
+    gated failure text carries the request ``Authorization`` header.
+    """
+    import httpx
+
+    request = httpx.Request(
+        "GET",
+        "https://huggingface.co/api/models/x",
+        headers={"Authorization": "Bearer secret-token-value"},
+    )
+    response = httpx.Response(403, request=request)
+    exc = GatedRepoError(
+        "403 Forbidden for url: https://huggingface.co/api/models/x\n"
+        "Authorization: Bearer secret-token-value",
+        response=response,
+    )
+    message = models_mod.format_pull_error(exc)
+    assert "secret-token-value" not in message
+    assert "Bearer <redacted>" in message
+
+
+def test_pull_report_stdout_has_no_credential_shaped_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end on the CLI surface: a token in a hub failure does not reach
+    stdout, where no log formatter runs."""
+
+    def boom(repo_id, **kwargs):
+        raise _make_http_error(404, f"no access with {_TOKEN}")
+
+    monkeypatch.setenv("HF_HOME", str(Path("/nonexistent-vemoizer-cache")))
+    with _patch_download(side_effect=boom):
+        result = runner.invoke(app, ["models", "pull"])
+    assert _TOKEN not in result.stdout
+    assert "hf_<redacted>" in result.stdout
+
+
+# ---------------------------------------------------------------------------
 # Existing transcribe tests stay green (smoke check)
 # ---------------------------------------------------------------------------
 

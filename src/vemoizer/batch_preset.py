@@ -32,28 +32,14 @@ from vemoizer.progress_wiring import _close_run_display
 from vemoizer.run_log import file_log as file_log
 from vemoizer.sidecar import resolve_run_glossary_files
 
-# The four names the moved plain loop (:mod:`vemoizer.preset_plain_loop`,
-# issue #151) looks up on THIS module are the only ones re-exported with
-# ``as``-binding (ruff F401): ``_transcribe_preset_file``,
-# ``_write_preset_output`` and ``file_log`` above, plus ``_mtime_date_str``
-# defined here — exactly what the long-standing test seams patch
-# (``vemoizer.batch_preset._write_preset_output``,
-# ``mock.patch.object(batch_preset_module, "file_log", ...)`` …). Nothing is
-# re-exported merely as a "patch target": a name no code looks up here is
-# never reached by a patch and only manufactures vacuously-green tests
-# (issue #151 review). The report/write helpers imported plainly below are
-# live for a different reason — the group path in :func:`_run_preset_groups`
-# calls them — and the plain loop patches those on
-# :mod:`vemoizer.preset_plain_loop` where it looks them up.
-# The ``preset_final`` trio (``print_wrote_lines``, ``run_went_full``,
-# ``print_final_line``) is imported inside :func:`_run_preset_groups`, the only
-# path that calls them: the plain loop has its own module-level imports of the
-# same three, so a re-export here would be a name nothing looks up — and a name
-# nothing looks up is never reached by a patch, it only manufactures
-# vacuously-green tests. Deferred rather than module-level for that reason.
-# ``typer`` is imported directly above — the tests' ``batch_preset.typer.echo``
-# seam lands on the one shared ``typer`` module object, whichever module
-# imports it.
+# ``as``-bindings mark the intentional re-exports (ruff F401): the names the
+# moved plain loop (:mod:`vemoizer.preset_plain_loop`, issue #151) looks up on
+# THIS module, which are exactly the long-standing test seams. Nothing is
+# re-exported merely as a "patch target" — a name no code looks up here is
+# never reached by a patch and only manufactures vacuously-green tests.
+# The ``preset_final`` trio is imported inside :func:`_run_preset_groups`, the
+# only path here that calls it; re-exporting it for the plain loop would be a
+# name nothing looks up here, for the same reason as above.
 from .preset_plain_loop import run_preset_plain_loop
 
 if TYPE_CHECKING:

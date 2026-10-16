@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from vemoizer.run_log_io import scrub_credentials
+
 if TYPE_CHECKING:
     from vemoizer.models import PulledModel
 
@@ -25,6 +27,7 @@ __all__ = [
     "_describe_hf_error",
     "expected_size_str",
     "format_pull_error",
+    "format_size",
     "render_pull_report",
 ]
 
@@ -61,6 +64,38 @@ def expected_size_str(name: str) -> str:
     return f"~{gib:.1f} GiB"
 
 
+def _scrub_credentials(text: str) -> str:
+    """Strip credential-shaped substrings out of library-owned exception text.
+
+    The two error formatters below echo ``huggingface_hub`` exception text
+    into the operator's ``models pull`` report. That text crosses a trust
+    boundary the run log does not: :class:`~vemoizer.run_log_io.
+    RedactingFormatter` scrubs the *log file* only, never stdout. The
+    redaction itself is the run log's own :func:`scrub_credentials`, imported
+    rather than restated so one shape cannot be redacted in one path and leak
+    in the other.
+    """
+    return scrub_credentials(text)
+
+
+def format_size(nbytes: int) -> str:
+    """Human-readable byte count with one decimal (e.g. ``1.2 GiB``).
+
+    Moved here from :mod:`vemoizer.models` with its only caller, the pull
+    report (issue #151): ``models.py`` imports this module, so keeping the
+    helper on the registry side would force a deferred import to avoid a
+    cycle. Re-exported from ``vemoizer.models`` for the CLI surface.
+    """
+    value = float(nbytes)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024.0 or unit == "TiB":
+            if unit == "B":
+                return f"{int(value)} B"
+            return f"{value:.1f} {unit}"
+        value /= 1024.0
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 def render_pull_report(results: list[PulledModel], sizes: dict[str, int] | None) -> str:
     """Render the ``models pull`` summary (stdout-safe, no color).
 
@@ -68,10 +103,6 @@ def render_pull_report(results: list[PulledModel], sizes: dict[str, int] | None)
     (issue #67) so users know what each download is for and what to expect
     before pulling the revision-pinned models.
     """
-    # Deferred so this module stays importable from ``vemoizer.models``
-    # (which re-exports these helpers) without an import cycle.
-    from vemoizer.models import format_size
-
     lines: list[str] = []
     for result in results:
         spec = result.spec
@@ -103,6 +134,12 @@ def _describe_hf_error(exc: Exception) -> str:
     explicitly (ported from kuiskaus's error-formatting tests); anything
     else gets a generic message that includes the type name but never the
     raw exception text.
+
+    The two branches that do echo library text (``RepositoryNotFoundError``,
+    ``RevisionNotFoundError``) and the ``GatedRepoError`` branch of
+    :func:`format_pull_error` pass it through :func:`_scrub_credentials`
+    first — this report goes to the operator's terminal, where the run-log
+    ``RedactingFormatter`` does not apply.
     """
     try:
         from huggingface_hub.errors import (
@@ -130,10 +167,13 @@ def _describe_hf_error(exc: Exception) -> str:
     if isinstance(exc, RepositoryNotFoundError):
         return (
             f"model repository not found on the hub: "
-            f"{getattr(exc, 'message', str(exc))}"
+            f"{_scrub_credentials(getattr(exc, 'message', str(exc)))}"
         )
     if isinstance(exc, RevisionNotFoundError):
-        return f"pinned revision not found: {getattr(exc, 'message', str(exc))}"
+        return (
+            f"pinned revision not found: "
+            f"{_scrub_credentials(getattr(exc, 'message', str(exc)))}"
+        )
     if isinstance(exc, (IncompleteSnapshotError, LocalEntryNotFoundError)):
         return (
             "cached snapshot is incomplete; delete the model's cache "
@@ -141,7 +181,7 @@ def _describe_hf_error(exc: Exception) -> str:
         )
     if isinstance(exc, HfHubHTTPError):
         status = getattr(exc, "status_code", None)
-        detail = getattr(exc, "message", str(exc))
+        detail = _scrub_credentials(getattr(exc, "message", str(exc)))
         return f"model download failed (HTTP {status}): {detail}".strip()
     return f"failed to download model: {type(exc).__name__}"
 
@@ -168,7 +208,7 @@ def format_pull_error(exc: Exception) -> str:
         )
     if isinstance(exc, GatedRepoError):
         return (
-            f"{exc} — accept the license at "
+            f"{_scrub_credentials(f'{exc}')} — accept the license at "
             f"https://huggingface.co and provide an access token."
         )
     response = getattr(exc, "response", None)

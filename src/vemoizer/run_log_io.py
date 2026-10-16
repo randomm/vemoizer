@@ -29,6 +29,12 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+__all__ = [
+    "QuietFileHandler",
+    "RedactingFormatter",
+    "scrub_credentials",
+]
+
 
 def _no_api_key() -> str | None:
     """Default API-key getter: no key is ever redacted."""
@@ -44,6 +50,23 @@ _HF_TOKEN_RE = re.compile(r"hf_[A-Za-z0-9]{8,}")
 _BEARER_RE = re.compile(r"Bearer\s+\S+", re.IGNORECASE)
 
 # --- redaction (design 4) -------------------------------------------------
+
+
+def scrub_credentials(text: str, api_key: str | None = None) -> str:
+    """Rewrite credential-shaped substrings in *text*.
+
+    The single redaction implementation: :class:`RedactingFormatter` calls it
+    for every log line, and the ``models pull`` error formatters call it for
+    the library-owned text they echo to the operator's terminal (stdout, where
+    a log formatter never runs). The API key is passed in by the caller — the
+    run context owns ``llm_api_key_env`` — and ``None``/empty is never
+    redacted.
+    """
+    text = _HF_TOKEN_RE.sub("hf_<redacted>", text)
+    text = _BEARER_RE.sub("Bearer <redacted>", text)
+    if api_key:
+        text = text.replace(api_key, "<redacted>")
+    return text
 
 
 class RedactingFormatter(logging.Formatter):
@@ -68,13 +91,7 @@ class RedactingFormatter(logging.Formatter):
         self._api_key_getter = api_key_getter
 
     def format(self, record: logging.LogRecord) -> str:
-        text = super().format(record)
-        text = _HF_TOKEN_RE.sub("hf_<redacted>", text)
-        text = _BEARER_RE.sub("Bearer <redacted>", text)
-        key = self._api_key_getter()
-        if key:
-            text = text.replace(key, "<redacted>")
-        return text
+        return scrub_credentials(super().format(record), self._api_key_getter())
 
 
 # --- fail-open file handler (design 7) ------------------------------------
