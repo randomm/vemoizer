@@ -72,13 +72,23 @@ def _run_repair(
         display.advance(repair_task, 1)
 
     try:
+        kwargs: dict[str, Any] = {
+            "budget": budget,
+            "progress_cb": _report if display is not None else None,
+        }
+        # Only say "concurrent" when the config actually asks for it. A
+        # default of 1 is the serial loop the stage has always run, and the
+        # seams that tests install for it (pipeline namespace stubs) know
+        # that call shape — adding the keyword unconditionally would make
+        # every one of them a call with an unexpected argument, and would
+        # claim a concurrency decision on runs that never made one.
+        if llm_config.repair_concurrency != 1:
+            kwargs["concurrency"] = llm_config.repair_concurrency
         result["paragraphs"] = fn(
             repair_client,
             result["paragraphs"],
             glossary=glossary or None,
-            budget=budget,
-            progress_cb=_report if display is not None else None,
-            concurrency=llm_config.repair_concurrency,
+            **kwargs,
         )
     finally:
         repair_client.close()

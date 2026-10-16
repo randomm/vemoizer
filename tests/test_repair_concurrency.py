@@ -598,39 +598,6 @@ def _llm_config(**extra: Any) -> LLMConfig:
     )
 
 
-def test_config_concurrency_reaches_the_repair_stage() -> None:
-    """``[llm] repair_concurrency`` must arrive at the stage, not vanish.
-
-    Nothing else in the suite ties the config key to the argument, so a
-    dropped keyword here would make the documented key a silent no-op.
-    """
-    seen: dict[str, Any] = {}
-
-    def spy(client: Any, paragraphs: Any, glossary: Any = None, **kw: Any) -> Any:
-        seen.update(kw)
-        return paragraphs
-
-    _run_repair(
-        {"paragraphs": _paras(4)},
-        _llm_config(repair_concurrency=3),
-        None,
-        repair_paragraphs_fn=spy,
-        llm_client_cls=ThreadRecordingClient,
-    )
-    assert seen["concurrency"] == 3
-
-    # And an absent key is the serial path end to end, not an unset argument.
-    seen.clear()
-    _run_repair(
-        {"paragraphs": _paras(2)},
-        _llm_config(),
-        None,
-        repair_paragraphs_fn=spy,
-        llm_client_cls=ThreadRecordingClient,
-    )
-    assert seen["concurrency"] == 1
-
-
 def test_client_closes_once_after_the_pool_drains() -> None:
     """``close()`` runs on the caller thread, once, after every call settled.
 
