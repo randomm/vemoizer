@@ -108,14 +108,33 @@ class FfmpegMicSource:
         argv = [
             "ffmpeg", "-hide_banner", "-nostdin", "-fflags", "nobuffer",
             "-flush_packets", "1", "-f", "avfoundation", "-i", f":{name}",
-            "-ac", "1", "-ar", "16000", "-f", "f32le", "pipe:1",
+            "-ac", "1", "-ar", "16000", "-af", "aresample=async=1",
+            "-f", "f32le", "pipe:1",
         ]  # fmt: skip
-        return self._popen(
+        # aresample=async=1 follows the device timestamps: avfoundation delivers
+        # ~89 % of nominal samples at 48 kHz, which otherwise drifts the stem (#199).
+        proc = self._popen(
             argv,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             start_new_session=True,
         )
+        threading.Thread(
+            target=self._drain_stderr,
+            args=(proc,),
+            name="ffmpeg-mic-stderr",
+            daemon=True,
+        ).start()
+        return proc
+
+    def _drain_stderr(self, proc: Any) -> None:
+        # Own thread: a chatty ffmpeg must never fill this pipe and stall stdout.
+        while data := proc.stderr.read(READ_BYTES):
+            for line in (
+                data.decode("utf-8", "replace").replace("\r", "\n").splitlines()
+            ):
+                if line.strip():
+                    log.debug("ffmpeg mic: %s", line.strip())
 
     def _pump(self) -> None:
         while True:

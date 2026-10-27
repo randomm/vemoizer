@@ -365,6 +365,7 @@ class FakeStdout:
 class FakeProc:
     def __init__(self, hang_once: bool = False) -> None:
         self.stdout = FakeStdout()
+        self.stderr = FakeStdout()
         self.pid = 4242
         self.returncode: int | None = None
         self.signals: list[int] = []
@@ -378,6 +379,7 @@ class FakeProc:
     def send_signal(self, sig: int) -> None:
         self.signals.append(sig)
         self.stdout.eof()  # a dying ffmpeg closes its pipe
+        self.stderr.eof()
 
     def wait(self, timeout: float | None = None) -> int:
         self.waits.append(timeout)
@@ -416,11 +418,53 @@ def test_ffmpeg_argv_is_pinned() -> None:
             "ffmpeg", "-hide_banner", "-nostdin", "-fflags", "nobuffer",
             "-flush_packets", "1", "-f", "avfoundation",
             "-i", ":Built-in Microphone", "-ac", "1", "-ar", "16000",
-            "-f", "f32le", "pipe:1",
+            "-af", "aresample=async=1", "-f", "f32le", "pipe:1",
         ]  # fmt: skip
         assert kw["start_new_session"] is True
     finally:
         drain_after_stop(src)
+
+
+def test_ffmpeg_argv_resamples_on_device_timestamps() -> None:
+    # Without aresample=async=1 avfoundation's short 48 kHz delivery (~89 %)
+    # is never corrected and the mic stem drifts (#199).
+    procs: list[tuple[list[str], dict]] = []
+
+    def popen(argv, **kw):
+        procs.append((argv, kw))
+        return FakeProc()
+
+    src = FfmpegMicSource("Mic", popen=popen, clock=Clock())
+    src.start()
+    try:
+        argv, _kw = procs[0]
+        assert "-af" in argv
+        assert argv[argv.index("-af") + 1] == "aresample=async=1"
+        assert argv[argv.index("-ar") + 1] == "16000"
+    finally:
+        drain_after_stop(src)
+
+
+def test_ffmpeg_stderr_is_piped_and_logged_at_debug(caplog) -> None:
+    procs: list[tuple[FakeProc, dict]] = []
+
+    def popen(_argv, **kw):
+        proc = FakeProc()
+        procs.append((proc, kw))
+        return proc
+
+    src = FfmpegMicSource("Mic", popen=popen, clock=Clock())
+    with caplog.at_level(logging.DEBUG, logger="vemoizer.capture_sources"):
+        src.start()
+        proc, kw = procs[0]
+        assert kw["stderr"] is subprocess.PIPE
+        proc.stderr.push(b"Input #0, avfoundation\n[mic] progress\r")
+        wait_until(lambda: any("progress" in r.getMessage() for r in caplog.records))
+        # stdout keeps flowing while stderr is still open (never blocks the pump).
+        proc.stdout.push(_noise_bytes(0.1))
+        drain_after_stop(src)
+    debug = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any("Input #0, avfoundation" in r.getMessage() for r in debug)
 
 
 def test_restart_re_resolves_default_input(monkeypatch) -> None:
@@ -572,6 +616,28 @@ def test_cli_help_does_not_import_catap() -> None:
         cwd=REPO,
     )
     assert result.stdout.strip() == "False"
+
+
+@pytest.mark.hardware
+def test_real_mic_delivers_16k_samples_per_second() -> None:
+    # Arrival times come from our clock, so the rate is measured in wall time
+    # (not from sample-count timestamps, which would hide the drift).
+    arrivals: list[float] = []
+
+    def clock() -> float:
+        arrivals.append(time.monotonic())
+        return arrivals[-1]
+
+    src = FfmpegMicSource(clock=clock)
+    src.start()
+    time.sleep(13.0)
+    chunks = drain_after_stop(src)
+    assert len(chunks) == len(arrivals)
+    start = arrivals[-1] - 10.0
+    first = next(i for i, t in enumerate(arrivals) if t >= start)
+    samples = sum(len(c.samples) for c in chunks[first + 1 :])
+    rate = samples / (arrivals[-1] - arrivals[first])
+    assert rate == pytest.approx(SR, rel=0.01)
 
 
 @pytest.mark.hardware
