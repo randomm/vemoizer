@@ -477,3 +477,26 @@ def test_load_model_handles_speech():
     tone = (np.sin(2 * math.pi * 440 * t) * 0.5).astype(np.float32)
     segs = vad_segments(tone, m)
     assert isinstance(segs, list)
+
+
+def test_speech_pad_longer_than_window_is_applied_in_full():
+    """Pad is clipped once at end of stream, not to the running total.
+
+    With a 200 ms pad (more than one 32 ms window) and a 2 s cap, segments
+    emitted mid-stream used to be clipped to the total seen so far, losing
+    up to 2688 samples of pad. The expected bounds are the reference
+    batch output on ``main`` for this input.
+    """
+    sr = 16000
+    audio = np.zeros(10 * sr, dtype=np.float32)
+    segs = vad_segments(
+        audio, ProbModel(_speech(400)), max_speech_s=2.0, speech_pad_ms=200
+    )
+    assert [(s.start, s.end) for s in segs] == [
+        (0, 28800),
+        (22912, 54912),
+        (49024, 81024),
+        (75136, 107136),
+        (101248, 133248),
+        (127360, 159360),
+    ]

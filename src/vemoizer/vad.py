@@ -2,10 +2,10 @@
 
 silero-vad in ONNX mode (``onnxruntime`` only, no torch) samples 16 kHz
 audio in 512-sample (32 ms) windows and emits per-window speech
-probabilities. The state machine below (``_state_machine``) turns that
-probability stream into speech segments using silero's reference
-algorithm. Long memos are fed in ``MAX_VAD_CHUNK_S``-second slices so
-memory stays bounded.
+probabilities. The state machine below (``SpeechStateMachine``, batch form
+``speech_state_machine``) turns that probability stream into speech segments
+using silero's reference algorithm. Long memos are fed in
+``MAX_VAD_CHUNK_S``-second slices so memory stays bounded.
 
 The 16 kHz mono float32 audio contract (AGENTS.md invariant #6) is
 enforced here: silero-vad natively supports 8/16 kHz, and vemoizer's
@@ -243,7 +243,7 @@ def vad_segments(
     while base < len(audio):
         chunk = audio[base : base + chunk_samples]
         probs = _scan_chunk(chunk, model, sample_rate=sample_rate, window=window)
-        found = _state_machine(
+        found = speech_state_machine(
             probs,
             window=window,
             sample_rate=sample_rate,
@@ -295,7 +295,134 @@ def _scan_chunk(
     return probs
 
 
-def _state_machine(
+class SpeechStateMachine:
+    """silero-vad 6.2.1 reference state machine, fed one window at a time.
+
+    Mirrors ``silero_vad.utils_vad.get_speech_timestamps``: trigger at
+    ``prob >= threshold``, exit at ``prob < neg_threshold`` held for
+    ``min_silence_ms``, split segments longer than ``max_speech_s`` at the
+    longest qualifying internal silence (else just before the cap), drop
+    segments shorter than ``min_speech_ms``, and pad both ends by
+    ``speech_pad_ms``. Every piece of look-back state lives on the instance,
+    so a stream consumed window by window yields exactly the segments of one
+    batch call over the same probabilities.
+    """
+
+    def __init__(
+        self,
+        *,
+        window: int,
+        sample_rate: int,
+        threshold: float,
+        min_speech_ms: int,
+        max_speech_s: float,
+        min_silence_ms: int,
+        speech_pad_ms: int,
+    ) -> None:
+        self._window = window
+        self._threshold = threshold
+        self._neg_threshold = max(threshold - 0.15, 0.01)
+        self._min_speech = int(sample_rate * min_speech_ms / 1000)
+        self._min_silence = int(sample_rate * min_silence_ms / 1000)
+        self._speech_pad = int(sample_rate * speech_pad_ms / 1000)
+        self._max_speech = (
+            window * 10**9
+            if max_speech_s == float("inf")
+            else int(sample_rate * max_speech_s) - window - 2 * self._speech_pad
+        )
+        self._min_silence_at_max = int(sample_rate * 98 / 1000)
+        self._count = 0
+        self._triggered = False
+        self._current_start = 0
+        self._temp_end = 0
+        self._prev_end = 0
+        self._next_start = 0
+        self._possible_ends: list[tuple[int, int]] = []
+
+    def push(self, prob: float) -> list[tuple[int, int]]:
+        """Consume the next window's probability; return the segments it closed."""
+        cur = self._window * self._count
+        self._count += 1
+        out: list[tuple[int, int]] = []
+        self._step(prob, cur, out)
+        return self._keep(out)
+
+    def finish(self) -> list[tuple[int, int]]:
+        """End of stream: close a segment still running at the last window."""
+        out: list[tuple[int, int]] = []
+        if self._triggered:
+            out.append((self._current_start, self._count * self._window))
+        total = self._count * self._window
+        return [(s, min(total, e)) for s, e in self._keep(out)]
+
+    def _step(self, p: float, cur: int, out: list[tuple[int, int]]) -> None:
+        if p >= self._threshold and self._temp_end:
+            sil = cur - self._temp_end
+            if sil > self._min_silence_at_max:
+                self._possible_ends.append((self._temp_end, sil))
+            self._temp_end = 0
+            if self._next_start < self._prev_end:
+                self._next_start = cur
+
+        if p >= self._threshold and not self._triggered:
+            self._triggered = True
+            self._current_start = cur
+            return
+
+        if self._triggered and cur - self._current_start > self._max_speech:
+            self._split(cur, out)
+            if not self._triggered:
+                return
+
+        if p < self._neg_threshold and self._triggered:
+            if not self._temp_end:
+                self._temp_end = cur
+            if cur - self._temp_end >= self._min_silence:
+                out.append((self._current_start, self._temp_end))
+                self._triggered = False
+                self._temp_end = 0
+                self._possible_ends = []
+
+    def _split(self, cur: int, out: list[tuple[int, int]]) -> None:
+        if self._possible_ends:
+            self._prev_end, dur = max(self._possible_ends, key=lambda t: t[1])
+            out.append((self._current_start, self._prev_end))
+            self._next_start = self._prev_end + dur
+            if self._next_start < self._prev_end + cur:
+                self._current_start = self._next_start
+            else:
+                self._triggered = False
+        elif self._prev_end:
+            out.append((self._current_start, self._prev_end))
+            if self._next_start < self._prev_end:
+                self._current_start = self._next_start
+            else:
+                self._triggered = False
+        else:
+            out.append((self._current_start, cur))
+            self._triggered = False
+        # The reference drops every pause recorded for this segment here; a
+        # resumed run must do the same, or it re-records them and splits later.
+        self._prev_end = self._next_start = self._temp_end = 0
+        self._possible_ends = []
+
+    def _keep(self, segments: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        """Drop too-short segments; pad the rest.
+
+        Ends are not clipped here: the stream may still grow, so the final
+        length is only known to the caller (``speech_state_machine`` and
+        ``finish`` clip against it). Clipping at emission time would cut
+        pad short whenever ``speech_pad_ms`` exceeds one window.
+        """
+        kept: list[tuple[int, int]] = []
+        for start, end in segments:
+            if end - start < self._min_speech:
+                continue
+            kept.append((max(0, start - self._speech_pad), end + self._speech_pad))
+        return kept
+
+
+def speech_state_machine(
     probs: list[float],
     *,
     window: int,
@@ -306,95 +433,19 @@ def _state_machine(
     min_silence_ms: int,
     speech_pad_ms: int,
 ) -> list[tuple[int, int]]:
-    """silero-vad 6.2.1 reference state machine, numpy-only.
-
-    Mirrors ``silero_vad.utils_vad.get_speech_timestamps``: trigger at
-    ``prob >= threshold``, exit at ``prob < neg_threshold`` held for
-    ``min_silence_ms``, split segments longer than ``max_speech_s`` at the
-    longest qualifying internal silence (else just before the cap), drop
-    segments shorter than ``min_speech_ms``, and pad both ends by
-    ``speech_pad_ms``.
-    """
-    min_speech = int(sample_rate * min_speech_ms / 1000)
-    min_silence = int(sample_rate * min_silence_ms / 1000)
-    speech_pad = int(sample_rate * speech_pad_ms / 1000)
-    max_speech = (
-        window * 10**9
-        if max_speech_s == float("inf")
-        else int(sample_rate * max_speech_s) - window - 2 * speech_pad
+    """Batch form of :class:`SpeechStateMachine` over a whole probability list."""
+    machine = SpeechStateMachine(
+        window=window,
+        sample_rate=sample_rate,
+        threshold=threshold,
+        min_speech_ms=min_speech_ms,
+        max_speech_s=max_speech_s,
+        min_silence_ms=min_silence_ms,
+        speech_pad_ms=speech_pad_ms,
     )
-    neg_threshold = max(threshold - 0.15, 0.01)
-    min_silence_at_max = int(sample_rate * 98 / 1000)
-
-    triggered = False
-    temp_end = 0
-    prev_end = 0
-    next_start = 0
-    possible_ends: list[tuple[int, int]] = []
-    current_start = 0
     out: list[tuple[int, int]] = []
-
-    def _clear_split_state() -> None:
-        nonlocal prev_end, next_start, temp_end, possible_ends
-        prev_end = next_start = temp_end = 0
-        possible_ends = []
-
-    for i, p in enumerate(probs):
-        cur = window * i
-
-        if p >= threshold and temp_end:
-            sil = cur - temp_end
-            if sil > min_silence_at_max:
-                possible_ends.append((temp_end, sil))
-            temp_end = 0
-            if next_start < prev_end:
-                next_start = cur
-
-        if p >= threshold and not triggered:
-            triggered = True
-            current_start = cur
-            continue
-
-        if triggered and (cur - current_start > max_speech):
-            if possible_ends:
-                prev_end, dur = max(possible_ends, key=lambda t: t[1])
-                out.append((current_start, prev_end))
-                next_start = prev_end + dur
-                if next_start < prev_end + cur:
-                    current_start = next_start
-                else:
-                    triggered = False
-            elif prev_end:
-                out.append((current_start, prev_end))
-                if next_start < prev_end:
-                    current_start = next_start
-                else:
-                    triggered = False
-            else:
-                out.append((current_start, cur))
-                triggered = False
-            _clear_split_state()
-            if not triggered:
-                continue
-
-        if p < neg_threshold and triggered:
-            if not temp_end:
-                temp_end = cur
-            if cur - temp_end >= min_silence:
-                out.append((current_start, temp_end))
-                triggered = False
-                temp_end = 0
-                possible_ends = []
-
-    if triggered:
-        out.append((current_start, len(probs) * window))
-
+    for p in probs:
+        out.extend(machine.push(p))
+    out.extend(machine.finish())
     total = len(probs) * window
-    kept: list[tuple[int, int]] = []
-    for start, end in out:
-        if end - start < min_speech:
-            continue
-        start = max(0, start - speech_pad)
-        end = min(total, end + speech_pad)
-        kept.append((start, end))
-    return kept
+    return [(s, min(total, e)) for s, e in out]
