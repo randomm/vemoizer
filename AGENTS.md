@@ -53,6 +53,12 @@ This repo's real external surface:
 - `huggingface_hub` — `snapshot_download`, revision pinning, offline mode
 - `httpx` — request/timeout/error semantics for the LLM client
 - `pytest`, `ruff` — invocation flags and config keys
+- `catap` — system-audio tap (`record_system_audio`, `stream_formats`,
+  `watch_default_output_device`). Context7 has no catap docs: the pinned
+  installed 0.6.0 (py.typed) is the authority, so check that first
+- `soxr` — `ResampleStream` streaming resample (`last=True` flush)
+- `soundfile` — incremental FLAC `write` / `flush` / `close` (`format=` keyword)
+- `ffmpeg` avfoundation — `-f avfoundation -i :<device>` mic capture
 
 Skip Context7 for pure-stdlib changes (alignment math, span bookkeeping,
 output formatting).
@@ -107,7 +113,7 @@ client") rather than a mechanical line-count chop.
 ```bash
 uv run pytest tests/
 uv run ruff check src/ tests/
-uv run ty check src/ tests/
+uv run ty check src/ tests/ scripts/
 uv run ruff format --check src/ tests/
 ```
 
@@ -245,7 +251,7 @@ Before creating documentation, ask: "Will this be true in 200 PRs?"
 | Model-backed tests (opt-in) | `uv run pytest -m models` |
 | Lint | `uv run ruff check src/ tests/` |
 | Lint + autofix | `uv run ruff check --fix src/ tests/` |
-| Type check | `uv run ty check src/ tests/` |
+| Type check | `uv run ty check src/ tests/ scripts/` |
 | Format | `uv run ruff format src/ tests/` |
 | Format check | `uv run ruff format --check src/ tests/` |
 | Regenerate lockfile | `uv lock` |
@@ -288,9 +294,11 @@ promise that it exists yet. The canonical flag spec is
    call **fails open**: on timeout, error, or missing config, return the
    un-adjudicated transcript rather than failing the run.
 
-6. **Audio contract: 16 kHz mono float32.** Decoding happens once, at ingest,
-   via ffmpeg. Every internal boundary past that point speaks this format.
-   No stage re-reads the source file.
+6. **Audio contract: 16 kHz mono float32.** File sources are decoded once, at
+   ingest, via ffmpeg; live capture sources are converted once, at capture, to
+   the same format. Every internal boundary past that point speaks this format.
+   No stage re-reads the source file; the post-call pass ingests the tracks
+   vemoizer itself wrote.
 
 7. **No model becomes a default without a WER run on our own corpus.**
    Published WERs come from model cards using different text-normalization
@@ -311,6 +319,8 @@ promise that it exists yet. The canonical flag spec is
   compatibility code; fail fast with a clear message instead.
 - Python >= 3.11 (authoritative source: `requires-python` in `pyproject.toml`).
 - `ffmpeg` on PATH — the only non-Python system dependency.
+- Live capture (`listen`) uses the `listen` extra (`catap`, `soxr`); the dev
+  group installs it. Hardware tests are opt-in: `uv run pytest -m hardware`.
 - Models live in the HuggingFace cache (`~/.cache/huggingface/hub`). Budget
   roughly 5-6 GB for the three-model consensus set.
 - LLM configuration lives in a user config file and selects any

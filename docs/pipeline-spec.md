@@ -44,6 +44,13 @@ may be skipped by flag for speed; none may be deleted.
 via ffmpeg. Every internal boundary past that point speaks this format; no
 stage re-reads the source file.
 
+Live capture (`listen`, issue #172) converts once, at capture: the system tap
+(catap, mono) is resampled with soxr and the microphone comes from ffmpeg
+avfoundation already at 16 kHz mono f32le. Each track is written as a 16 kHz
+mono FLAC stem (PCM_24). Both stems share session index 0; the stems are the
+input to the post-call pass, which ingests them and never re-reads the live
+source. Head placement, gaps and skew rules: `src/vemoizer/capture.py`.
+
 Ingest argv (see `src/vemoizer/ingest.py`):
 
 ```
@@ -1099,5 +1106,5 @@ The four seams (`with file_log(stem)` per output):
 3. Never force a single language on a memo — language is a span property.
 4. Model weights are revision-pinned via `snapshot_download`.
 5. The LLM is optional, configured, OpenAI-compatible, and fails open.
-6. Audio contract: 16 kHz mono float32, decoded once at ingest.
+6. Audio contract: 16 kHz mono float32, decoded once at ingest (files) or converted once at capture (live).
 7. No model becomes a default without a WER run on our own corpus.

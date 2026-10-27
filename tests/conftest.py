@@ -83,7 +83,7 @@ os.environ["TERM"] = "dumb"
 os.environ["COLUMNS"] = "120"
 
 # Extensions the test suite can write as transcript outputs.
-_OUTPUT_EXTS = {".txt", ".json", ".srt", ".vtt", ".md"}
+_OUTPUT_EXTS = {".txt", ".json", ".srt", ".vtt", ".md", ".flac", ".wav", ".m4a"}
 
 
 def _repo_root() -> Path:
@@ -95,8 +95,9 @@ def _repo_root() -> Path:
 def _no_real_system_effects(
     monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> Iterator[dict[str, list[list[str]]] | None]:
-    """Stub the three real-system-call seams so the suite never posts a
-    macOS notification, spawns ``caffeinate``, or plays audio.
+    """Stub the four real-system-call seams so the suite never posts a
+    macOS notification, spawns ``caffeinate``, plays audio, or opens a
+    live capture device (``capture_sources._open_real_sources``).
 
     The production code keeps NO test awareness (no PYTEST_CURRENT_TEST
     checks); each side-effect module exposes one tiny private seam that
@@ -117,7 +118,7 @@ def _no_real_system_effects(
         yield None
         return
 
-    from vemoizer import caffeinate, notify, speaker_clips
+    from vemoizer import caffeinate, capture_sources, notify, speaker_clips
 
     # The per-test recorder, published to dependents (the ``system_effects``
     # fixture) through the fixture's own yielded value — no closure
@@ -126,6 +127,7 @@ def _no_real_system_effects(
         "notify": [],
         "caffeinate": [],
         "afplay": [],
+        "capture": [],
     }
 
     def _post(argv: list[str]) -> None:
@@ -158,9 +160,18 @@ def _no_real_system_effects(
         recorded["afplay"].append(argv)
         return 0
 
+    def _open_capture(mic_name: str | None) -> None:
+        recorded["capture"].append([str(mic_name)])
+        raise RuntimeError(
+            "real capture is stubbed in unit tests (conftest); mark the test "
+            "`hardware` to reach Core Audio"
+        )
+
     monkeypatch.setattr(notify, "_post", _post)
     monkeypatch.setattr(caffeinate, "_spawn", _spawn)
     monkeypatch.setattr(speaker_clips, "_run_player", _run_player)
+    if request.node.get_closest_marker("hardware") is None:
+        monkeypatch.setattr(capture_sources, "_open_real_sources", _open_capture)
     yield recorded
 
 
