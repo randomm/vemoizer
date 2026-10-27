@@ -22,15 +22,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from rich.progress import TaskID
 
 from .assembly import Candidate, _adjudicate, _b_text_in_span, _find_spans
 from .audio_contract import SAMPLE_RATE
 from .canary_transcriber import CanaryTranscriber
 from .confidence import flag_suspect_segments
 from .decode_stage import decode_all
-from .diarization import ATTRIBUTION as DIARIZATION_ATTRIBUTION
-from .diarization import SpeakerCount, run_diarization_stage, speaker_for_span
+from .diarization import SpeakerCount, speaker_for_span
 from .glossary import (
     apply_corrections,
     glossary_prompt,
@@ -54,6 +52,7 @@ from .redecode import WhisperReDecodeTranscriber
 from .repair import repair_paragraphs  # noqa: F401
 from .spans import Span, span_context, words_in_span
 from .speaker_align import assign_word_speakers, split_segments_at_speaker_changes
+from .speaker_stage import run_speaker_stage
 from .vad import SpeechSegment, vad_segments
 from .vad import load_model as load_vad_model
 from .whisper_transcriber import decode_meeting
@@ -417,25 +416,9 @@ def transcribe_file(
     if spans:
         redecoded = _redecode_spans(audio, spans)
 
-    speaker_segments: list[tuple[float, float, str]] | None = None
-    diarization_ran = False
-    if diarize:
-        logger.info("diarization: starting")
-        diarize_start = time.monotonic()
-        if tracker is not None:
-            tracker.set_stage("diarize")
-        diarize_task: TaskID | None = (
-            display.add_stage("diarize") if display is not None else None
-        )
-        speaker_segments = run_diarization_stage(audio, speakers)
-        diarization_ran = speaker_segments is not None
-        if diarize_task is not None and display is not None:
-            display.finish(diarize_task)
-        logger.info(
-            "diarization: %s speaker segments in %s",
-            len(speaker_segments) if speaker_segments is not None else "no",
-            format_duration(time.monotonic() - diarize_start),
-        )
+    speaker = run_speaker_stage(
+        audio, diarize=diarize, speakers=speakers, display=display, tracker=tracker
+    )
 
     # Fail loud (issue #73/#78): decode A's total failure (None) must not
     # look like a successful empty transcript — an "error" key is the only
@@ -453,23 +436,15 @@ def transcribe_file(
         return result
     logger.info("assemble: adjudicating spans")
     assembled = _assemble(
-        result_a, result_b, redecoded, llm_config, speaker_segments, spans=spans
+        result_a, result_b, redecoded, llm_config, speaker.turns, spans=spans
     )
     result.update(assembled)
     if corrections and result.get("paragraphs"):
         # Deterministic known-garble replacement: "Blacksit" -> "Flagship"
         # must never depend on a model's judgment.
         result["paragraphs"] = apply_corrections(result["paragraphs"], corrections)
-    if diarization_ran:
-        # CC-BY-4.0: the gated pyannote weights require attribution whenever
-        # they actually ran; the CLI prints the warnings channel.
-        result.setdefault("warnings", []).append(DIARIZATION_ATTRIBUTION)
-    if diarize and not diarization_ran:
-        # Fail-open: the transcript still ships, but the user must be
-        # told the labels are missing (issue #78).
-        result.setdefault("warnings", []).append(
-            "diarization failed; continuing without speaker labels"
-        )
+    for warning in speaker.warnings:
+        result.setdefault("warnings", []).append(warning)
     if meeting_fallback:
         # The dictation decode above succeeded (a total failure already
         # returned an error), so tell the user they got the fallback

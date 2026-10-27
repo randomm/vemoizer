@@ -7,7 +7,7 @@ file stem for multi-file runs, and the strip helper only removes the
 ``[i/N] ... ·`` prefix).
 
 These tests drive the REAL seams (patching the names the code actually
-looks up: ``vemoizer.pipeline.run_diarization_stage``,
+looks up: ``vemoizer.speaker_stage.run_diarization_stage``,
 ``vemoizer.llm_tail.repair_paragraphs`` / ``generate_notes``, and the
 pipeline's decode path) and prove the patch took effect (the fake was
 called). Each case:
@@ -105,7 +105,9 @@ def _setup_decode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         diarization_module, "run_diarization_stage", lambda *a, **kw: None
     )
-    monkeypatch.setattr(pipeline_module, "run_diarization_stage", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "vemoizer.speaker_stage.run_diarization_stage", lambda *a, **kw: None
+    )
 
 
 def _live_display(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
@@ -213,7 +215,9 @@ class TestInterruptStageNaming:
             calls.append(audio)
             raise KeyboardInterrupt()
 
-        monkeypatch.setattr(pipeline_module, "run_diarization_stage", fake_diarize)
+        monkeypatch.setattr(
+            "vemoizer.speaker_stage.run_diarization_stage", fake_diarize
+        )
         import vemoizer.diarization as diarization_module
 
         monkeypatch.setattr(diarization_module, "run_diarization_stage", fake_diarize)
@@ -236,7 +240,9 @@ class TestInterruptStageNaming:
             calls.append(audio)
             raise KeyboardInterrupt()
 
-        monkeypatch.setattr(pipeline_module, "run_diarization_stage", fake_diarize)
+        monkeypatch.setattr(
+            "vemoizer.speaker_stage.run_diarization_stage", fake_diarize
+        )
         isolate_home(monkeypatch, tmp_path, tmp_path)
         result = runner.invoke(app, ["meeting", files[0].name])
         assert calls, "the run_diarization_stage seam was never reached"

@@ -584,7 +584,6 @@ def _run_real_meeting_pipeline(
     optional callable applied AFTER the default VAD patch so it wins.
     Returns the spy's recorded kwargs.
     """
-    import vemoizer.pipeline as pipeline_module
 
     _patch_preflight_pass(monkeypatch)
     _patch_ingest(monkeypatch)
@@ -609,7 +608,7 @@ def _run_real_meeting_pipeline(
     def fake_diarize(audio, speakers=None):
         return [(0.0, 2.0, "SPEAKER_00")]
 
-    monkeypatch.setattr(pipeline_module, "run_diarization_stage", fake_diarize)
+    monkeypatch.setattr("vemoizer.speaker_stage.run_diarization_stage", fake_diarize)
     _config_no_llm(tmp_path)
     isolate_home(monkeypatch, tmp_path, tmp_path)
     args = ["meeting", "a.m4a"] + (extra_args or [])
