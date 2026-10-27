@@ -27,7 +27,7 @@ from test_pipeline import (
     _patch_vad,
 )
 
-import vemoizer.eval_cli as eval_cli
+import vemoizer.eval_backends as eval_backends
 import vemoizer.llm_tail as llm_tail
 import vemoizer.pipeline as pipeline
 from vemoizer.decode_stage import decode_all
@@ -109,13 +109,15 @@ def test_decode_all_empty_input_keeps_four_key_contract() -> None:
 
 
 def test_eval_decode_only_still_green_on_total_failure(monkeypatch) -> None:
-    """``eval_cli.transcribe_decode_only`` already tolerates the ``None``
+    """``eval_backends.transcribe_decode_only`` already tolerates the ``None``
     contract from #73 and must stay green when decode_all starts returning
     it (no eval change, no eval error key)."""
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     _patch_decoders(monkeypatch, None, None, latched_a=True)
-    result = eval_cli.transcribe_decode_only("/nonexistent.m4a", backend="parakeet")
+    result = eval_backends.transcribe_decode_only(
+        "/nonexistent.m4a", backend="parakeet"
+    )
     assert result["text"] == ""
     assert "error" not in result
 

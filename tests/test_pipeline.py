@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 
 import vemoizer.diarization as diarization_mod
-import vemoizer.eval_cli as eval_cli
+import vemoizer.eval_backends as eval_backends
 import vemoizer.pipeline as pipeline
 import vemoizer.preflight as preflight
 import vemoizer.progress as progress
@@ -609,7 +609,9 @@ def test_decode_only_parakeet_returns_single_decode(tmp_path, monkeypatch) -> No
         {"text": "vain parakeet", "words": []},
         {"text": "vain canary", "words": []},
     )
-    result = eval_cli.transcribe_decode_only("/nonexistent.m4a", backend="parakeet")
+    result = eval_backends.transcribe_decode_only(
+        "/nonexistent.m4a", backend="parakeet"
+    )
     assert result["text"] == "vain parakeet"
 
 
@@ -621,13 +623,13 @@ def test_decode_only_canary_returns_single_decode(tmp_path, monkeypatch) -> None
         {"text": "vain parakeet", "words": []},
         {"text": "vain canary", "words": []},
     )
-    result = eval_cli.transcribe_decode_only("/nonexistent.m4a", backend="canary")
+    result = eval_backends.transcribe_decode_only("/nonexistent.m4a", backend="canary")
     assert result["text"] == "vain canary"
 
 
 def test_decode_only_unknown_backend_raises() -> None:
     with pytest.raises(ValueError, match="unknown backend"):
-        eval_cli.transcribe_decode_only("/nonexistent.m4a", backend="whisperx")
+        eval_backends.transcribe_decode_only("/nonexistent.m4a", backend="whisperx")
 
 
 def test_decode_only_ingest_error_fails_open(monkeypatch) -> None:
@@ -637,7 +639,9 @@ def test_decode_only_ingest_error_fails_open(monkeypatch) -> None:
         raise IngestError("corrupt")
 
     monkeypatch.setattr(pipeline, "ingest_audio", _boom)
-    result = eval_cli.transcribe_decode_only("/nonexistent.m4a", backend="parakeet")
+    result = eval_backends.transcribe_decode_only(
+        "/nonexistent.m4a", backend="parakeet"
+    )
     assert result["text"] == ""
     assert "error" in result
 
@@ -646,7 +650,9 @@ def test_decode_only_backend_failure_fails_open(monkeypatch) -> None:
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     _patch_decoders(monkeypatch, None, None)  # constructors raise
-    result = eval_cli.transcribe_decode_only("/nonexistent.m4a", backend="parakeet")
+    result = eval_backends.transcribe_decode_only(
+        "/nonexistent.m4a", backend="parakeet"
+    )
     assert result["text"] == ""
 
 
