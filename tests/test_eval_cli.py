@@ -8,6 +8,7 @@ itself is pinned by ``tests/test_eval_harness.py``.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -58,6 +59,22 @@ def test_eval_scores_one_backend(tmp_path, monkeypatch) -> None:
     assert "aggregate\t0.5000" in result.stdout
 
 
+def test_eval_runs_each_decode_on_a_large_stack_worker(tmp_path, monkeypatch) -> None:
+    corpus = _corpus(tmp_path)
+    threads: list[str] = []
+
+    def _transcribe(wav: Path) -> str:
+        threads.append(threading.current_thread().name)
+        return ""
+
+    monkeypatch.setattr(eval_backends, "BACKENDS", {"parakeet": _transcribe})
+    result = runner.invoke(
+        app, ["eval", "--corpus", str(corpus), "--backend", "parakeet"]
+    )
+    assert result.exit_code == 0
+    assert threads and all(t != threading.main_thread().name for t in threads)
+
+
 def test_eval_backend_all_runs_every_backend(tmp_path, monkeypatch) -> None:
     corpus = _corpus(tmp_path)
     _patch_backends(monkeypatch, {"one": "moro maailma", "two": "toinen testi"})
@@ -74,6 +91,15 @@ def test_eval_unknown_backend_rejected(tmp_path, monkeypatch) -> None:
     )
     assert result.exit_code == 2
     assert "whisperx" in result.stderr
+
+
+def test_eval_unknown_backend_error_lists_whisper_turbo(tmp_path) -> None:
+    corpus = _corpus(tmp_path)
+    result = runner.invoke(
+        app, ["eval", "--corpus", str(corpus), "--backend", "whisperx"]
+    )
+    assert result.exit_code == 2
+    assert "whisper-turbo" in result.stderr
 
 
 def test_eval_update_baseline_writes_fingerprinted_file(tmp_path, monkeypatch) -> None:
