@@ -67,6 +67,8 @@ def _transcribe_preset_file(
             language=None if options.language == "auto" else options.language,
             preprocess=options.preprocess,
             tracker=tracker,
+            tracks=options.tracks,
+            owner=options.owner,
         )
     except (KeyboardInterrupt, SystemExit):
         raise

@@ -32,6 +32,7 @@ from vemoizer.preset_interrupt import (
     handle_interrupt,
 )
 from vemoizer.progress import ProgressDisplay
+from vemoizer.tracks import TrackPaths
 
 
 def _preset_interrupt_handler(
@@ -42,6 +43,22 @@ def _preset_interrupt_handler(
     convention), no traceback."""
     typer.echo(handle_interrupt(tracker, display), err=True)
     raise typer.Exit(code=130) from None
+
+
+def _track_paths(mic: Path | None, system: Path | None) -> TrackPaths | None:
+    """Both two-track stems or neither; a missing stem is exit 2, before decode."""
+    if mic is None and system is None:
+        return None
+    if mic is None or system is None:
+        typer.echo(
+            "error: --mic-track and --system-track must be given together", err=True
+        )
+        raise typer.Exit(code=2)
+    for stem in (mic, system):
+        if not stem.is_file():
+            typer.echo(f"error: track file not found: {stem}", err=True)
+            raise typer.Exit(code=2)
+    return TrackPaths(me=mic, them=system)
 
 
 def register_presets(app: typer.Typer) -> None:
@@ -130,6 +147,27 @@ def register_presets(app: typer.Typer) -> None:
                 "measurement pass (about a minute per hour of audio)."
             ),
         ),
+        mic_track: Path | None = typer.Option(  # noqa: B008
+            None,
+            "--mic-track",
+            help=(
+                "Two-track call: the owner's microphone stem (give with "
+                "--system-track; labels the owner's speech)."
+            ),
+        ),
+        system_track: Path | None = typer.Option(  # noqa: B008
+            None,
+            "--system-track",
+            help=(
+                "Two-track call: the system-audio stem of the remote side "
+                "(give with --mic-track)."
+            ),
+        ),
+        me: str | None = typer.Option(  # noqa: B008
+            None,
+            "--me",
+            help="Your name for the two-track transcript (default: asked once).",
+        ),
     ) -> None:
         """Transcribe a meeting: whisper decode, diarization, repair, .md+.json."""
         _warn_on_battery()
@@ -159,6 +197,7 @@ def register_presets(app: typer.Typer) -> None:
                 err=True,
             )
             raise typer.Exit(code=2)
+        tracks = _track_paths(mic_track, system_track)
         tracker = begin_interrupt_tracking()
         try:
             exit_code = run_preset(
@@ -176,6 +215,8 @@ def register_presets(app: typer.Typer) -> None:
                 display=display,
                 preprocess=lowered_preprocess,
                 tracker=tracker,
+                tracks=tracks,
+                me=me,
             )
         except KeyboardInterrupt:
             _preset_interrupt_handler(tracker, display)

@@ -9,6 +9,7 @@ first file's ``st_mtime`` (fallback: today).
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import date, datetime
@@ -22,6 +23,7 @@ from vemoizer.diarization import SpeakerCount
 from vemoizer.ingest import IngestError
 from vemoizer.naming_hook import ask_naming_hook
 from vemoizer.output.naming import nfc_stem_and_suffix
+from vemoizer.owner_config import resolve_run_owner
 from vemoizer.preset_file_transcribe import (
     _transcribe_preset_file as _transcribe_preset_file,
 )
@@ -31,6 +33,7 @@ from vemoizer.progress import ProgressDisplay
 from vemoizer.progress_wiring import _close_run_display
 from vemoizer.run_log import file_log as file_log
 from vemoizer.sidecar import resolve_run_glossary_files
+from vemoizer.tracks import TrackPaths, tracks_error
 
 # The seam invariant this module keeps for the moved plain loop
 # (:mod:`vemoizer.preset_plain_loop`, issue #151): a name is re-exported here,
@@ -224,12 +227,19 @@ def run_preset(
     tty_isatty: Callable[[], bool] | None = None,
     display: ProgressDisplay | None = None,
     tracker: InterruptTracker | None = None,
+    tracks: TrackPaths | None = None,
+    me: str | None = None,
 ) -> int:
     """Run the *meeting* or *memo* preset over *files*.
 
     ``preprocess`` (issue #135): ``"loudnorm"`` threads the two-pass
     loudnorm normalization through the option (the CLI validates the
     value; ``None`` keeps the plain decode).
+
+    ``tracks`` / ``me`` (issue #171): the two-track call's stems and the
+    ``--me`` owner name. A tracks request that is not one meeting recording
+    exits 2 before any decode; the owner name is resolved (and, on the first
+    interactive run, asked for and saved) before the glossary is composed.
 
     Composes the layered glossary, resolves the preset options, then runs
     the plain per-file loop or, for meeting with 2+ files, the M3
@@ -247,6 +257,19 @@ def run_preset(
     if command not in ("meeting", "memo"):
         typer.echo(f"error: unknown preset {command!r}", err=True)
         return 2
+    owner: str | None = None
+    if tracks is not None:
+        error = tracks_error(command, files, speakers)
+        if error is not None:
+            typer.echo(f"error: {error}", err=True)
+            return 2
+        interactive = not yes and (tty_isatty or sys.stdin.isatty)()
+        owner = resolve_run_owner(
+            me,
+            prompt=interactive,
+            input_fn=input_fn or input,
+            echo=lambda line: typer.echo(line, err=True),
+        )
 
     # Layered glossary: load_layers (I/O) → merge (pure) — skipped when
     # --glossary explicitly replaces both layers entirely (no merging).
@@ -280,6 +303,8 @@ def run_preset(
             "speakers": speakers,
             "language": language,
             "preprocess": preprocess,
+            "tracks": tracks,
+            "owner": owner,
         },
     )
 

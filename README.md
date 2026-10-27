@@ -114,6 +114,10 @@ To name speakers after a run: `vemoizer names <x.json>` (interactive) or
 `vemoizer render --name LABEL=NAME <x.json>`; put default names in the
 `people = [ ... ]` list of the config file.
 
+Two-track call (mic and system audio recorded separately):
+`vemoizer meeting call.m4a --mic-track call-me.wav --system-track call-them.wav --speakers 4`.
+vemoizer asks your name once, for the transcript (`--me NAME` sets it directly).
+
 ## Accuracy is measured, not asserted
 
 `vemoizer eval` scores each decode backend and the consensus over a
