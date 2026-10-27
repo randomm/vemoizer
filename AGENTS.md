@@ -122,8 +122,8 @@ uv run vemoizer eval --backend all --check
 The gate scores parakeet / canary / consensus over the committed Piper
 speech corpus and compares against `tests/fixtures/wer_baseline.json`
 (exit 2 on regression or corpus drift). Improvements are recorded with
-`--update-baseline` in a dedicated commit, never mixed into a feature
-commit.
+`--update-baseline` in a separate PR, never mixed into a feature PR, since a
+feature PR squashes to a single commit.
 
 Do NOT:
 - ❌ Use `--no-verify` to skip hooks
@@ -182,12 +182,30 @@ Do NOT:
   `refactor:`, `perf:`.
 - **PR body must contain `Fixes #N`** (or `Closes #N`) to auto-close the
   linked issue. A `(#N)` in a commit scope is NOT a close keyword.
-- Squash-merge by default. **Never commit to `main` directly.** No force-push
-  to `main`.
+- **Squash on the branch, merge with a merge commit.** Before merging, squash
+  the PR's commits into one conventional commit on the PR branch, then merge
+  the PR with a merge commit (`gh pr merge --merge`), so `main` keeps the PR
+  boundary. Each PR contributes exactly one commit to the history, and the
+  merge commit marks the PR boundary. The squash has a precondition: the
+  branch must already contain `origin/main`, or the squashed commit silently
+  reverts whatever landed on `main` since the branch point. Run:
+  ```bash
+  git fetch origin
+  git rebase origin/main                                  # first, if behind
+  git merge-base --is-ancestor origin/main HEAD           # must succeed
+  git reset --soft origin/main && git commit              # one conventional commit
+  git diff --stat origin/main                             # only this PR's files
+  git push --force-with-lease                             # PR branch only
+  ```
+  Stop and fix the branch if the `git diff --stat` output lists files this PR
+  does not touch, or deletes lines that landed on `main`.
+- **Never commit to `main` directly.** No force-push to `main`, and
+  `--force-with-lease` is only for your own PR branch.
 
-**Agent merge policy:** Agents may squash-merge a PR once (a) CI is green on
-all jobs, (b) all four quality gates passed locally, and (c) the PR has one
-approving review. Pre-existing failures are not grounds for an exemption.
+**Agent merge policy:** Agents may squash the PR branch and merge it with a
+merge commit once (a) CI is green on all jobs, (b) all four quality gates
+passed locally, and (c) the PR has one approving review. Pre-existing failures
+are not grounds for an exemption.
 When any condition is unmet, stop at PR creation, apply the
 `needs-human-attention` label, and notify the operator. **When in doubt, do
 not merge.**
