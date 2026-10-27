@@ -202,3 +202,72 @@ def test_single_word_answer_after_question_survives_smoothing() -> None:
     turns = [(0.0, 1.6, "S1"), (1.65, 2.2, "S2"), (2.3, 4.0, "S1")]
     labels = assign_word_speakers(words, turns)
     assert labels == ["S1", "S2", "S1"]
+
+
+def test_trusted_owner_word_between_remote_runs_is_not_smoothed() -> None:
+    """Trusted (owner) and untrusted (remote) labels never flip across a boundary."""
+    words = [
+        _w("kerron", 0.0, 0.5),
+        _w("tässä", 0.6, 1.0),
+        _w("Selvä.", 1.1, 1.5),
+        _w("nyt", 1.6, 2.0),
+        _w("eteenpäin", 2.1, 2.5),
+    ]
+    turns = [(0.0, 1.05, "R"), (1.05, 1.55, "O"), (1.55, 3.0, "R")]
+    assert assign_word_speakers(words, turns, trusted=frozenset({"O"})) == [
+        "R",
+        "R",
+        "O",
+        "R",
+        "R",
+    ]
+    assert assign_word_speakers(words, turns) == ["R"] * 5
+
+
+def test_two_word_owner_run_on_short_turn_is_not_merged_into_remote() -> None:
+    words = [
+        _w("kerron", 0.0, 1.0),
+        _w("tuo", 1.1, 1.4),
+        _w("on", 1.5, 1.8),
+        _w("asia", 2.0, 3.0),
+    ]
+    turns = [(0.0, 1.05, "R"), (1.05, 1.85, "O"), (1.85, 4.0, "R")]
+    assert assign_word_speakers(words, turns, trusted=frozenset({"O"})) == [
+        "R",
+        "O",
+        "O",
+        "R",
+    ]
+    assert assign_word_speakers(words, turns) == ["R"] * 4
+
+
+def test_remote_island_between_owner_runs_is_not_flipped() -> None:
+    words = [
+        _w("puhun", 0.0, 0.5),
+        _w("tässä", 0.6, 1.0),
+        _w("eli", 1.3, 1.6),
+        _w("koko", 1.8, 2.2),
+        _w("ajan", 2.3, 2.7),
+    ]
+    turns = [(0.0, 1.2, "O"), (1.2, 1.7, "R"), (1.7, 3.0, "O")]
+    assert assign_word_speakers(words, turns, trusted=frozenset({"O"})) == [
+        "O",
+        "O",
+        "R",
+        "O",
+        "O",
+    ]
+    assert assign_word_speakers(words, turns) == ["O"] * 5
+
+
+def test_empty_trusted_set_keeps_untrusted_smoothing() -> None:
+    """Regression pin: no trusted labels means the pre-#170 behaviour."""
+    words = [
+        _w("puhun", 0.0, 0.5),
+        _w("tässä", 0.6, 1.0),
+        _w("eli", 1.3, 1.6),
+        _w("koko", 1.8, 2.2),
+        _w("ajan", 2.3, 2.7),
+    ]
+    turns = [(0.0, 1.2, "O"), (1.2, 1.7, "R"), (1.7, 3.0, "O")]
+    assert assign_word_speakers(words, turns, trusted=frozenset()) == ["O"] * 5

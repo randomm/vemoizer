@@ -65,12 +65,22 @@ def _norm(word: str) -> str:
     return "".join(ch for ch in word.casefold() if ch.isalpha())
 
 
+def _same_side(a: str | None, b: str | None, trusted: frozenset[str]) -> bool:
+    """Smoothing never flips or merges across the trusted/untrusted line."""
+    return (a in trusted) == (b in trusted)
+
+
 def assign_word_speakers(
     words: list[dict[str, Any]],
     turns: list[Turn],
     tolerance: float = BOUNDARY_TOLERANCE_S,
+    trusted: frozenset[str] = frozenset(),
 ) -> list[str | None]:
-    """Per-word speaker labels by max turn overlap, smoothed."""
+    """Per-word speaker labels by max turn overlap, smoothed.
+
+    ``trusted`` labels (the owner's own track in a two-track call) are
+    never flipped or merged into an untrusted label, nor the reverse.
+    """
     if not words or not turns:
         return [None] * len(words)
     labels: list[str | None] = []
@@ -94,8 +104,8 @@ def assign_word_speakers(
                 best = labels[-1]
         labels.append(best)
     labels = _requestion(words, labels, turns)
-    labels = _smooth(words, labels, turns)
-    return _merge_short_runs(words, labels, turns)
+    labels = _smooth(words, labels, turns, trusted)
+    return _merge_short_runs(words, labels, turns, trusted)
 
 
 def _ends_question(word: dict[str, Any]) -> bool:
@@ -136,6 +146,7 @@ def _smooth(
     words: list[dict[str, Any]],
     labels: list[str | None],
     turns: list[Turn],
+    trusted: frozenset[str] = frozenset(),
 ) -> list[str | None]:
     """Flip single-word A-B-A islands unless they are real backchannels
     or answers right after a question (the ``?`` is a hard boundary)."""
@@ -143,6 +154,8 @@ def _smooth(
     for i in range(1, len(out) - 1):
         if out[i - 1] != out[i + 1] or out[i] == out[i - 1] or out[i] is None:
             continue
+        if not _same_side(out[i], out[i - 1], trusted):
+            continue  # an owner word inside remote speech is not flicker
         if _ends_question(words[i - 1]):
             continue  # a one-word answer to a question is a real turn
         word = words[i]
@@ -209,6 +222,7 @@ def _merge_short_runs(
     words: list[dict[str, Any]],
     labels: list[str | None],
     turns: list[Turn],
+    trusted: frozenset[str] = frozenset(),
 ) -> list[str | None]:
     """Merge flicker label runs into a neighbour ("turn shrapnel").
 
@@ -219,6 +233,7 @@ def _merge_short_runs(
     backchannel, and it does not directly follow or contain a question
     mark (answers are real turns). The target is the neighbour whose
     speaker's turns overlap the run's words most; previous wins ties.
+    Neighbours on the other side of the ``trusted`` line are never targets.
     """
     if not words:
         return labels
@@ -265,7 +280,11 @@ def _merge_short_runs(
         if backing is not None and (backing[1] - backing[0]) >= MIN_RUN_SECONDS:
             continue  # a real turn backs this run; not flicker
         prev_label, next_label = runs[r - 1][2], runs[r + 1][2]
-        candidates = [c for c in (prev_label, next_label) if c is not None]
+        candidates = [
+            c
+            for c in (prev_label, next_label)
+            if c is not None and _same_side(c, label, trusted)
+        ]
         if not candidates:
             continue
         target = max(candidates, key=lambda c: _words_turn_overlap(start, end, c))
