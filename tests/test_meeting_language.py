@@ -206,11 +206,11 @@ def _run_real_pipeline(monkeypatch, tmp_path: Path, extra_args: list[str] | None
         return [(0.0, 2.0, "SPEAKER_00")]
 
     # The meeting preset diarizes by default. Patch the stage seam in the
-    # pipeline module's namespace (where the transcribe_file body calls
+    # speaker_stage namespace (where run_speaker_stage calls
     # run_diarization_stage) — not diarization.diarize, which the real
     # stage resolves in its own module. The fake avoids the real pyannote
     # load and returns one segment so the fail-loud no-labels check passes.
-    monkeypatch.setattr(pipeline_module, "run_diarization_stage", fake_diarize)
+    monkeypatch.setattr("vemoizer.speaker_stage.run_diarization_stage", fake_diarize)
 
     # The LLM config points at an unroutable host, but keep the tail
     # (repair/notes) off the wire entirely: the stage seams resolve in
