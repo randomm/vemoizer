@@ -22,3 +22,10 @@ tmp/
 # Local agent state
 .claude/
 .pi/
+
+# Live call capture output (issue #172): recordings live under calls/ and
+# are never committed. Root-anchored so tests/fixtures/*.wav stay tracked.
+/*.flac
+/*.wav
+/*.m4a
+/calls/

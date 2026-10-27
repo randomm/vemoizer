@@ -18,11 +18,20 @@ dependencies = [
     "safetensors",
 ]
 
+[project.optional-dependencies]
+# Live call capture (issue #172). Exact pins: catap is a beta API; soxr is
+# already transitive in uv.lock. Hardware code is confined to capture_sources.py.
+listen = [
+    "catap==0.6.0; sys_platform == 'darwin'",
+    "soxr==1.1.0",
+]
+
 [project.scripts]
 vemoizer = "vemoizer.cli:app"
 
 [dependency-groups]
 dev = [
+    "vemoizer[listen]",
     "pyarrow>=25.0.1",
     "pytest>=8.0",
     "pytest-cov>=5.0",
@@ -41,8 +50,9 @@ packages = ["src/vemoizer"]
 testpaths = ["tests"]
 # The models marker is documented as opt-in; this makes that true. A plain
 # `pytest` run must never load or download model weights (AGENTS.md).
-addopts = "-m 'not models'"
+addopts = "-m 'not models and not hardware'"
 markers = [
+    "hardware: opt-in tests that drive real Core Audio / ffmpeg capture (never CI); run with `uv run pytest -m hardware`",
     "models: model-backed tests that download real weights; opt-in via `uv run pytest -m models` (AGENTS.md: unit tests must not touch the network)",
     "real_system_calls: unit tests that exercise the real subprocess seam (notify/caffeinate/speaker_clips); they patch subprocess themselves and opt out of the autouse system-effects stub",
 ]

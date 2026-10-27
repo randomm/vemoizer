@@ -1,7 +1,8 @@
 """The 16 kHz mono float32 internal audio contract (AGENTS.md invariant #6).
 
-Single home for the contract constants so every stage (ingest, VAD, decode,
-alignment, diarization) reads the same tokens. Do not restate these
+File sources are decoded once at ingest; live capture sources are converted
+once at capture (capture_sources.py). Either way every stage downstream reads
+the same tokens. Single home for the contract constants: do not restate these
 constants in other modules — import from here.
 """
 
