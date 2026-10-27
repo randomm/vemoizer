@@ -20,7 +20,6 @@ output (AGENTS.md invariant #7).
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import signal
 import tempfile
@@ -30,6 +29,7 @@ from types import FrameType
 
 import typer
 
+from vemoizer import eval_backends
 from vemoizer.eval_harness import (
     AGGREGATE_KEY,
     agreement_on_wrong,
@@ -45,88 +45,6 @@ from vemoizer.eval_harness import (
 DEFAULT_TOLERANCE = 0.02
 
 DEFAULT_BASELINE = Path("tests/fixtures/wer_baseline.json")
-
-
-def transcribe_decode_only(path: Path | str, *, backend: str) -> dict:
-    """Run ingest -> VAD -> one single decode; no consensus, no LLM.
-
-    Lives here because eval is its only caller: the harness scores each
-    decode backend on its own so the consensus gain is a measured number
-    (invariant #7). The stage chain mirrors ``transcribe_file``'s decode
-    stage exactly — same VAD slicing, same merge.
-    """
-    from contextlib import suppress
-    from pathlib import Path as _Path
-    from typing import Any
-
-    import vemoizer.pipeline as pipeline_module
-    from vemoizer.decode_stage import decode_all
-    from vemoizer.ingest import IngestError
-
-    logger = pipeline_module.logger
-    # Resolved through the pipeline module so the same seams (and test
-    # monkeypatching) govern eval decodes and pipeline decodes alike.
-    backends = {
-        "parakeet": pipeline_module.ParakeetTranscriber,
-        "canary": pipeline_module.CanaryTranscriber,
-    }
-    if backend not in backends:
-        known = ", ".join(sorted(backends))
-        raise ValueError(f"unknown backend {backend!r} (known: {known})")
-    try:
-        audio = pipeline_module.ingest_audio(_Path(path))
-    except IngestError as e:
-        logger.error("ingest failed for %s: %s", path, e)
-        return {"text": "", "segments": [], "error": str(e)}
-    if len(audio) == 0:
-        return {"text": "", "segments": []}
-    slices, _vad_found_speech = pipeline_module._speech_slices(audio)
-    transcriber: Any = None
-    result: dict[str, Any] | None = None
-    try:
-        transcriber = backends[backend]()
-        result = decode_all(transcriber, slices, f"decode ({backend})")
-    except Exception as e:  # noqa: BLE001 - fail-open stage boundary
-        logger.warning("decode (%s) failed: %s", backend, e)
-    finally:
-        if transcriber is not None:
-            with suppress(Exception):  # cleanup is best-effort (fail-open)
-                transcriber.cleanup()
-    if result is None:
-        return {"text": "", "segments": []}
-    return {
-        "text": str(result.get("text", "")).strip(),
-        "segments": list(result.get("segments") or []),
-    }
-
-
-def _decode_only(backend: str) -> Callable[[Path], str]:
-    def _transcribe(wav: Path) -> str:
-        return transcribe_decode_only(wav, backend=backend)["text"]
-
-    return _transcribe
-
-
-def _consensus(wav: Path) -> str:
-    from vemoizer.pipeline import transcribe_file
-
-    # os.devnull parses as empty TOML -> no [llm] -> adjudication skipped:
-    # the eval number reflects the local consensus, not a network endpoint.
-    return transcribe_file(wav, config_path=os.devnull)["text"]
-
-
-def _consensus_llm(wav: Path) -> str:
-    from vemoizer.pipeline import transcribe_file
-
-    return transcribe_file(wav)["text"]
-
-
-#: name -> (wav path -> hypothesis). Tests monkeypatch this registry.
-BACKENDS: dict[str, Callable[[Path], str]] = {
-    "parakeet": _decode_only("parakeet"),
-    "canary": _decode_only("canary"),
-    "consensus": _consensus,
-}
 
 
 def register_eval(app) -> None:
@@ -184,10 +102,10 @@ def register_eval(app) -> None:
             typer.echo(f"error: corpus directory not found: {corpus}", err=True)
             raise typer.Exit(code=1)
 
-        names = list(BACKENDS) if backend == "all" else [backend]
-        unknown = [n for n in names if n not in BACKENDS]
+        names = list(eval_backends.BACKENDS) if backend == "all" else [backend]
+        unknown = [n for n in names if n not in eval_backends.BACKENDS]
         if unknown:
-            known = ", ".join([*BACKENDS, "all"])
+            known = ", ".join([*eval_backends.BACKENDS, "all"])
             typer.echo(
                 f"error: unknown backend(s): {', '.join(unknown)} (known: {known})",
                 err=True,
@@ -216,9 +134,9 @@ def register_eval(app) -> None:
             references = {}
             per_backend_hyps = {}
         for name in names:
-            transcribe = BACKENDS[name]
+            transcribe = eval_backends.BACKENDS[name]
             if name == "consensus" and llm:
-                transcribe = _consensus_llm
+                transcribe = eval_backends.consensus_llm
             hyps: dict[str, str] = {}
             results = run_eval(corpus, transcribe, hyps)
             measured[name] = results
@@ -276,7 +194,11 @@ def _emit_degrade(corpus: Path, names: list[str], profile: str) -> None:
             # Inside the try: an OSError creating the scratch dir is exit 2 too.
             work = Path(tempfile.mkdtemp(prefix="vemoizer-degrade-"))
             rows = run_degrade_eval(
-                corpus, profile, {n: BACKENDS[n] for n in names}, work, ingest_audio
+                corpus,
+                profile,
+                {n: eval_backends.BACKENDS[n] for n in names},
+                work,
+                ingest_audio,
             )
         except (DegradeError, IngestError, OSError) as exc:
             typer.echo(f"error: {exc}", err=True)
@@ -355,7 +277,7 @@ def _emit_agreement_on_wrong(
 
     The pair is pinned by name — ``parakeet`` and ``canary`` — rather than
     "the first two independent backends in dict order", so a future
-    re-ordering of :data:`BACKENDS` or the addition of a new independent
+    re-ordering of :data:`eval_backends.BACKENDS` or the addition of a new independent
     backend cannot silently change which pair is scored. If either
     ``parakeet`` or ``canary`` is missing from *per_backend_hyps* the
     metric is skipped with a clear note.

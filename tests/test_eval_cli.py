@@ -12,7 +12,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-import vemoizer.eval_cli as eval_cli
+import vemoizer.eval_backends as eval_backends
 import vemoizer.pipeline
 from vemoizer.cli import app
 
@@ -39,7 +39,9 @@ def _patch_backends(monkeypatch, hypotheses: dict[str, str]) -> None:
         return _transcribe
 
     monkeypatch.setattr(
-        eval_cli, "BACKENDS", {name: _make(name) for name in eval_cli.BACKENDS}
+        eval_backends,
+        "BACKENDS",
+        {name: _make(name) for name in eval_backends.BACKENDS},
     )
 
 
@@ -207,7 +209,7 @@ def test_eval_agreement_emits_metric_when_two_backends_scored(
         return _transcribe
 
     monkeypatch.setattr(
-        eval_cli,
+        eval_backends,
         "BACKENDS",
         {
             "parakeet": _make("parakeet", parakeet_hyps),
@@ -255,7 +257,7 @@ def test_eval_agreement_pin_by_name_uses_parakeet_canary(tmp_path, monkeypatch) 
         return _transcribe
 
     monkeypatch.setattr(
-        eval_cli,
+        eval_backends,
         "BACKENDS",
         {
             "parakeet": _make("parakeet", parakeet_hyps),
@@ -319,7 +321,7 @@ def test_eval_agreement_emitted_when_both_backends_present(
         return _transcribe
 
     monkeypatch.setattr(
-        eval_cli,
+        eval_backends,
         "BACKENDS",
         {
             "parakeet": _make("parakeet", parakeet_hyps),

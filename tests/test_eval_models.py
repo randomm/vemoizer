@@ -42,7 +42,7 @@ def test_corpus_matches_the_committed_baseline_fingerprint(baseline: dict) -> No
 
 @pytest.mark.parametrize("backend", ["parakeet", "canary", "consensus"])
 def test_backend_wer_does_not_regress(backend: str, baseline: dict) -> None:
-    from vemoizer.eval_cli import BACKENDS
+    from vemoizer.eval_backends import BACKENDS
 
     results = run_eval(CORPUS, BACKENDS[backend])
     regressions = compare_to_baseline(

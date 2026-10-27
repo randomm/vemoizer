@@ -17,7 +17,7 @@ from _degrade_helpers import make_corpus, read_wav_float, rms
 from typer.testing import CliRunner, Result
 
 import vemoizer.degrade as degrade
-import vemoizer.eval_cli as eval_cli
+import vemoizer.eval_backends as eval_backends
 import vemoizer.ingest as ingest
 import vemoizer.loudnorm as loudnorm
 from vemoizer.audio_contract import write_wav
@@ -86,7 +86,7 @@ def test_cli_prints_reproducibility_header_and_gain_column(
 ) -> None:
     corpus = make_corpus(tmp_path)
     monkeypatch.setattr(ingest, "ingest_audio", read_wav_float)
-    monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
+    monkeypatch.setattr(eval_backends, "BACKENDS", {"fake": lambda wav: "hello"})
     result = _cli(corpus)
     assert result.exit_code == 0
     assert "base_seed=154" in result.output
@@ -165,7 +165,7 @@ def test_cli_exits_2_when_loudnorm_pass2_fails(
 
     corpus = make_corpus(tmp_path)
     monkeypatch.setattr(ingest, "ingest_audio", read_wav_float)
-    monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
+    monkeypatch.setattr(eval_backends, "BACKENDS", {"fake": lambda wav: "hello"})
     monkeypatch.setattr(loudnorm, "_decode_pass2", _pass2_fails)
     result = CliRunner().invoke(
         app,
@@ -180,7 +180,7 @@ def test_cli_rejects_empty_degrade_profile(
     from vemoizer.cli import app
 
     corpus = make_corpus(tmp_path)
-    monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
+    monkeypatch.setattr(eval_backends, "BACKENDS", {"fake": lambda wav: "hello"})
     result = CliRunner().invoke(
         app, ["eval", "--corpus", str(corpus), "--backend", "fake", "--degrade", ""]
     )
@@ -193,7 +193,7 @@ def test_cli_rejects_llm_with_degrade(
     from vemoizer.cli import app
 
     corpus = make_corpus(tmp_path)
-    monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
+    monkeypatch.setattr(eval_backends, "BACKENDS", {"fake": lambda wav: "hello"})
     result = CliRunner().invoke(
         app,
         [
@@ -304,7 +304,7 @@ def test_cli_lets_programming_errors_raise(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     corpus = make_corpus(tmp_path)
-    monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
+    monkeypatch.setattr(eval_backends, "BACKENDS", {"fake": lambda wav: "hello"})
 
     def bug(*args: object, **kwargs: object) -> list[object]:
         raise ValueError("programming bug")
@@ -321,7 +321,7 @@ def test_cli_refuses_gate_flags_with_degrade(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str
 ) -> None:
     corpus = make_corpus(tmp_path)
-    monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
+    monkeypatch.setattr(eval_backends, "BACKENDS", {"fake": lambda wav: "hello"})
     assert _cli(corpus, flag).exit_code == 2
 
 
@@ -329,7 +329,7 @@ def test_cli_exits_2_without_traceback_when_ffmpeg_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     corpus = make_corpus(tmp_path)
-    monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
+    monkeypatch.setattr(eval_backends, "BACKENDS", {"fake": lambda wav: "hello"})
 
     def no_ffmpeg(path: Path) -> np.ndarray:
         raise IngestError("ffmpeg not found on PATH")
@@ -344,7 +344,7 @@ def test_cli_exits_2_without_traceback_when_variant_write_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     corpus = make_corpus(tmp_path)
-    monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
+    monkeypatch.setattr(eval_backends, "BACKENDS", {"fake": lambda wav: "hello"})
     monkeypatch.setattr(ingest, "ingest_audio", read_wav_float)
 
     def disk_full(path: Path, x: np.ndarray) -> Path:
@@ -365,7 +365,7 @@ def test_cli_exits_2_without_traceback_when_backend_crashes(
     def model_missing(wav: Path) -> str:
         raise RuntimeError("model not cached")
 
-    monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": model_missing})
+    monkeypatch.setattr(eval_backends, "BACKENDS", {"fake": model_missing})
     result = _cli(corpus)
     assert result.exit_code == 2
     assert isinstance(result.exception, SystemExit)

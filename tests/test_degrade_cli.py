@@ -20,6 +20,7 @@ from _degrade_helpers import make_corpus, read_wav_float
 from typer.testing import CliRunner, Result
 
 import vemoizer.degrade as degrade
+import vemoizer.eval_backends as eval_backends
 import vemoizer.eval_cli as eval_cli
 import vemoizer.ingest as ingest
 from vemoizer.cli import app
@@ -43,7 +44,7 @@ def _invoke(corpus: Path, profile: str = "far") -> Result:
 @pytest.fixture(autouse=True)
 def _hermetic(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(ingest, "ingest_audio", read_wav_float)
-    monkeypatch.setattr(eval_cli, "BACKENDS", {"fake": lambda wav: "hello"})
+    monkeypatch.setattr(eval_backends, "BACKENDS", {"fake": lambda wav: "hello"})
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))
