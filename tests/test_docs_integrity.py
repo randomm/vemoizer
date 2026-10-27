@@ -32,7 +32,7 @@ from pathlib import Path
 import typer
 from typer.models import CommandInfo
 
-from vemoizer.cli import transcribe
+from vemoizer.cli import app, transcribe
 
 SPEC_PATH = Path(__file__).resolve().parents[1] / "docs" / "pipeline-spec.md"
 
@@ -57,9 +57,28 @@ def _transcribe_flag_options() -> set[str]:
     return opts
 
 
-def _transcribe_table_flags(spec_text: str) -> set[str]:
-    """Flag option strings (``--flag``) named in the transcribe flag table."""
-    start = spec_text.index("### `vemoizer transcribe")
+def _listen_flag_options() -> set[str]:
+    """Option strings of the real ``listen`` command, looked up by name."""
+    # Typer leaves CommandInfo.name unset for decorator-named commands.
+    command_info = next(
+        c
+        for c in app.registered_commands
+        if (c.name or getattr(c.callback, "__name__", None)) == "listen"
+    )
+    typer_command = typer.main.get_command_from_info(
+        command_info, pretty_exceptions_short=False, rich_markup_mode=None
+    )
+    return {
+        opt
+        for param in typer_command.params
+        for opt in getattr(param, "opts", ())
+        if opt.startswith("--")
+    }
+
+
+def _table_flags(spec_text: str, heading: str) -> set[str]:
+    """Flag option strings (``--flag``) named in the flag table under *heading*."""
+    start = spec_text.index(heading)
     section = spec_text[start:]
     next_heading = re.search(r"^### ", section[1:], re.MULTILINE)
     section = section[: 1 + next_heading.start()] if next_heading else section
@@ -86,7 +105,15 @@ def test_spec_has_no_planned_subcommands_section() -> None:
 def test_spec_transcribe_flags_exist_on_real_command() -> None:
     # One-way by design (see module docstring): spec table ⊆ real command.
     opts = _transcribe_flag_options()
-    missing = sorted(_transcribe_table_flags(_spec_text()) - opts)
+    missing = sorted(_table_flags(_spec_text(), "### `vemoizer transcribe") - opts)
     assert not missing, (
         f"spec transcribe table lists flags not on the command: {missing}"
     )
+
+
+def test_spec_listen_flags_exist_on_real_command() -> None:
+    opts = _listen_flag_options()
+    spec_flags = _table_flags(_spec_text(), "### `vemoizer listen")
+    assert spec_flags, "spec has no listen flag table"
+    missing = sorted(spec_flags - opts)
+    assert not missing, f"spec listen table lists flags not on the command: {missing}"

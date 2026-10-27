@@ -10,6 +10,7 @@ the Popen mock's lifecycle (start, terminate, wait).
 
 from __future__ import annotations
 
+import os
 import subprocess
 from unittest.mock import MagicMock, patch
 
@@ -114,3 +115,27 @@ class TestNonDarwin:
         with caffeinate_context():
             executed.append("work")
         assert executed == ["work"]
+
+
+class TestListenWakeAssertion:
+    """Issue #173 (F19): the wake assertion survives Ctrl-C and dies with vemoizer."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_platform(self):
+        with patch("vemoizer.caffeinate.sys.platform", "darwin"):
+            yield
+
+    def test_argv_binds_assertion_to_vemoizer_pid(self):
+        with patch("subprocess.Popen") as mock_popen:
+            mock_popen.return_value = MagicMock()
+            with caffeinate_context():
+                pass
+        argv = mock_popen.call_args[0][0]
+        assert argv == ["caffeinate", "-ims", "-w", str(os.getpid())]
+
+    def test_spawned_in_its_own_session_so_terminal_ctrl_c_spares_it(self):
+        with patch("subprocess.Popen") as mock_popen:
+            mock_popen.return_value = MagicMock()
+            with caffeinate_context():
+                pass
+        assert mock_popen.call_args.kwargs["start_new_session"] is True

@@ -208,6 +208,13 @@ class FfmpegMicSource:
             return True
 
 
+def current_output_name() -> str:
+    """Name of the Mac's current playback device, for the silence warning (#173)."""
+    import catap
+
+    return _default_output_name(catap)
+
+
 def _default_output(catap: Any) -> Any:
     # Playback device, not is_default_system_output (the alert/sound-effects device).
     return next((d for d in catap.list_audio_devices() if d.is_default_output), None)

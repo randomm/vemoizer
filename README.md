@@ -118,6 +118,14 @@ Two-track call (mic and system audio recorded separately):
 `vemoizer meeting call.m4a --mic-track call-me.wav --system-track call-them.wav --speakers 4`.
 vemoizer asks your name once, for the transcript (`--me NAME` sets it directly).
 
+Record a call straight from the Mac (Teams, Meet): `vemoizer listen --me NAME`
+records the system audio and your microphone, then transcribes the call as a
+meeting. Stop with Ctrl-C; recordings stay in `calls/<timestamp>/`. Needs the
+`listen` extra (`uv sync --extra listen`, or `pip install 'vemoizer[listen]'`)
+and two macOS grants for the terminal that runs vemoizer: Privacy & Security >
+Microphone, and Screen & System Audio Recording > System Audio Recording Only.
+Restart the terminal after granting, and use headphones.
+
 ## Accuracy is measured, not asserted
 
 `vemoizer eval` scores each decode backend and the consensus over a

@@ -35,13 +35,19 @@ from vemoizer.progress import ProgressDisplay
 from vemoizer.tracks import TrackPaths
 
 
-def _preset_interrupt_handler(
-    tracker: InterruptTracker, display: ProgressDisplay | None
+def preset_interrupt_exit(
+    tracker: InterruptTracker,
+    display: ProgressDisplay | None,
+    *,
+    kept: Path | None = None,
 ) -> NoReturn:
-    """The Ctrl-C contract shared by both preset commands (issue #148):
+    """The Ctrl-C contract shared by the preset commands (issue #148):
     one line naming the stage the run was in, exit 130 (the SIGINT
-    convention), no traceback."""
+    convention), no traceback. ``listen`` passes *kept* (its call folder)
+    so the line also says where the recorded audio is (issue #173)."""
     typer.echo(handle_interrupt(tracker, display), err=True)
+    if kept is not None:
+        typer.echo(f"audio kept: {kept.as_posix()}/", err=True)
     raise typer.Exit(code=130) from None
 
 
@@ -219,7 +225,7 @@ def register_presets(app: typer.Typer) -> None:
                 me=me,
             )
         except KeyboardInterrupt:
-            _preset_interrupt_handler(tracker, display)
+            preset_interrupt_exit(tracker, display)
         except ValueError as e:
             # Unknown --language value (resolve_options validates against
             # LANGUAGE_VALUES, issue #108): clean exit 2, never a traceback.
@@ -317,7 +323,7 @@ def register_presets(app: typer.Typer) -> None:
                 tracker=tracker,
             )
         except KeyboardInterrupt:
-            _preset_interrupt_handler(tracker, display)
+            preset_interrupt_exit(tracker, display)
         except ValueError as e:
             # Unknown [meeting] language value (resolve_options validates
             # against LANGUAGE_VALUES, issue #108): clean exit 2, never a

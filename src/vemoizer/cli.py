@@ -40,6 +40,7 @@ from vemoizer.cli_support import (
 )
 from vemoizer.eval_cli import register_eval
 from vemoizer.glossary_check import register_glossary
+from vemoizer.listen_cli import register_listen
 from vemoizer.names_cli import register_names
 from vemoizer.output.formatters import OUTPUT_FORMATS
 from vemoizer.preset_cli import register_presets
@@ -315,6 +316,7 @@ def transcribe(
 
 
 register_presets(app)
+register_listen(app)
 
 
 def main() -> None:
