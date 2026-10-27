@@ -758,7 +758,8 @@ the committed WER baseline (`tests/fixtures/wer_baseline.json`).
 **WER gate.** The WER aggregate (macro average over samples) is the only
 regression gate. `--check` exits 2 on any regression beyond tolerance
 (0.02, overridable in the baseline file) or on a corpus fingerprint mismatch.
-The gate is per-backend: `--backend all` runs parakeet, canary, and consensus
+The gate is per-backend: `--backend all` runs parakeet, canary, consensus, and
+whisper-turbo (the `--profile meeting` decode A alone, `language=None`)
 independently, and the baseline file carries one number set per backend.
 
 **Informational `agreement_on_wrong` metric (issue #62).** The WER aggregate

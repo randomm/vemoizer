@@ -6,7 +6,8 @@ gates against a committed WER baseline:
     vemoizer eval --backend all --check
 
 Backends: ``parakeet`` and ``canary`` are single decodes through
-:func:`vemoizer.pipeline.transcribe_decode_only`; ``consensus`` is the full
+:func:`vemoizer.eval_backends.transcribe_decode_only`; ``whisper-turbo`` is
+the meeting profile's decode A alone; ``consensus`` is the full
 pipeline with the LLM forced off (``config_path=os.devnull``) so eval runs
 are deterministic and local — pass ``--llm`` to adjudicate with the user's
 configured endpoint instead.
@@ -60,7 +61,8 @@ def register_eval(app) -> None:
         backend: str = typer.Option(
             "all",
             "--backend",
-            help="Backend to score: parakeet, canary, consensus, or all.",
+            help="Backend to score: parakeet, canary, consensus, whisper-turbo, "
+            "or all.",
         ),
         baseline: Path = typer.Option(  # noqa: B008
             DEFAULT_BASELINE,
@@ -137,6 +139,7 @@ def register_eval(app) -> None:
             transcribe = eval_backends.BACKENDS[name]
             if name == "consensus" and llm:
                 transcribe = eval_backends.consensus_llm
+            transcribe = eval_backends.on_large_stack(transcribe)
             hyps: dict[str, str] = {}
             results = run_eval(corpus, transcribe, hyps)
             measured[name] = results

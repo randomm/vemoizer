@@ -125,7 +125,7 @@ paste its output into the PR body:
 uv run vemoizer eval --backend all --check
 ```
 
-The gate scores parakeet / canary / consensus over the committed Piper
+The gate scores parakeet / canary / consensus / whisper-turbo over the committed Piper
 speech corpus and compares against `tests/fixtures/wer_baseline.json`
 (exit 2 on regression or corpus drift). Improvements are recorded with
 `--update-baseline` in a separate PR, never mixed into a feature PR, since a
