@@ -84,4 +84,6 @@ def _transcribe_one(
         display=display,
         language=None if options.language == "auto" else options.language,
         preprocess=options.preprocess,
+        tracks=options.tracks,
+        owner=options.owner,
     )

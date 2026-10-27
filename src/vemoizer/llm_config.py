@@ -95,9 +95,9 @@ _KNOWN_LLM_KEYS: frozenset[str] = frozenset(
         "notes_budget_seconds",
     }
 )
-#: Known ``[meeting]`` keys for strict validation (issue #108): the single
-#: ``language`` override — a typo (e.g. ``langugae``) is warned, not fatal.
-_KNOWN_MEETING_KEYS: frozenset[str] = frozenset({"language"})
+#: Known ``[meeting]`` keys for strict validation (issue #108): the ``language``
+#: override and the two-track owner name (issue #171) — a typo is warned, not fatal.
+_KNOWN_MEETING_KEYS: frozenset[str] = frozenset({"language", "owner"})
 DEVNULL_SENTINEL: str = "os.devnull"
 
 
@@ -105,17 +105,44 @@ class ConfigError(Exception):
     """Invalid config file; message names the offending key."""
 
 
-def _find_nearest_vemoizer_config(start: Path) -> Path | None:
-    """Nearest ``./.vemoizer/config.toml`` walking up from *start* to root."""
+def _layer_raw(path: Path) -> tuple[bool, dict[str, Any] | None]:
+    """``(is_layer, raw)`` for *path*, reading it at most once.
+
+    A missing file is not a layer. Only the home file may be preferences-only
+    (see :func:`_preferences_only`) and then it is skipped, so it cannot shadow
+    a project, home or legacy layer (PR #193 review). Project files always count.
+    """
+    if not path.is_file():
+        return False, None
+    raw = _read_toml(path)
+    home_config = Path.home() / ".vemoizer" / "config.toml"
+    is_home = os.path.realpath(path) == os.path.realpath(home_config)
+    return not (is_home and _preferences_only(raw)), raw
+
+
+def _is_layer_file(path: Path) -> bool:
+    """Whether *path* takes part in the layered lookups (see :func:`_layer_raw`)."""
+    return _layer_raw(path)[0]
+
+
+def _find_nearest_layer(start: Path) -> tuple[Path, dict[str, Any] | None] | None:
+    """Nearest layer ``./.vemoizer/config.toml`` up from *start*, plus its raw dict."""
     current = Path(os.path.realpath(start))
     while True:
         candidate = current / ".vemoizer" / "config.toml"
-        if candidate.is_file():
-            return candidate
+        is_layer, raw = _layer_raw(candidate)
+        if is_layer:
+            return candidate, raw
         parent = current.parent
         if parent == current:
             return None
         current = parent
+
+
+def _find_nearest_vemoizer_config(start: Path) -> Path | None:
+    """Nearest layer ``./.vemoizer/config.toml`` walking up from *start* to root."""
+    found = _find_nearest_layer(start)
+    return found[0] if found is not None else None
 
 
 def _read_toml(path: Path) -> dict[str, Any] | None:
@@ -186,15 +213,19 @@ def _parse_llm_section(section: dict[str, Any]) -> LLMConfig | None:
     )
 
 
-def _strict_load_raw(path: Path) -> tuple[LLMConfig, dict[str, Any]]:
+def _strict_load_raw(
+    path: Path, raw: dict[str, Any] | None = None
+) -> tuple[LLMConfig, dict[str, Any]]:
     """Strict load that returns ``(config, raw)`` from a single read.
 
     Raises :class:`ConfigError` on any violation, exactly as
     :func:`_strict_load` does — the only difference is that the already
     parsed raw dict rides along, so the caller never re-reads the file
-    (issue #108 review).
+    (issue #108 review). A caller that has already parsed *path* passes
+    *raw* in, so the file is still read once.
     """
-    raw = _read_toml(path)
+    if raw is None:
+        raw = _read_toml(path)
     if raw is None:
         raise ConfigError(f"config file not found or unreadable: {path}")
 
@@ -351,7 +382,7 @@ def _resolve_config_path(path: str | None) -> Path | None:
     candidate = _find_nearest_vemoizer_config(Path.cwd())
     if candidate is None:
         home_candidate = Path.home() / ".vemoizer" / "config.toml"
-        if home_candidate.is_file():
+        if _is_layer_file(home_candidate):
             return home_candidate
         candidate = next((p for p in _LEGACY_CONFIG_PATHS if p.is_file()), None)
     return candidate
@@ -380,15 +411,32 @@ def _default_search(
 
     # Project layer first: the nearest ./.vemoizer/config.toml walking
     # up from CWD wins over the home layer (issue #82 precedence).
-    project_config = _find_nearest_vemoizer_config(cwd())
-    if project_config is not None:
-        return _strict_load_raw(project_config)
+    project = _find_nearest_layer(cwd())
+    if project is not None:
+        return _strict_load_raw(project[0], project[1])
 
     home_config = home() / ".vemoizer" / "config.toml"
-    if home_config.is_file():
-        return _strict_load_raw(home_config)
+    is_layer, home_raw = _layer_raw(home_config)
+    if is_layer:
+        return _strict_load_raw(home_config, home_raw)
 
     return _legacy_search_with_raw(legacy_paths)
+
+
+def _preferences_only(raw: dict[str, Any] | None) -> bool:
+    """A home file that holds ``[meeting]`` preferences and no ``[llm]`` table.
+
+    The first-run owner prompt (issue #171) saves ``[meeting] owner`` into
+    the home config; such a file is not an LLM config, so the layered search
+    skips it instead of failing on the missing ``[llm]`` section.
+    """
+    return (
+        raw is not None
+        and LLM_CONFIG_SECTION not in raw
+        and "meeting" in raw
+        and "people" not in raw
+        and "language" not in raw
+    )
 
 
 def load_language(path: str | None = None) -> str:

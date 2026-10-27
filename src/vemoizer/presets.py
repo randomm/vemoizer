@@ -35,6 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from vemoizer.diarization import SpeakerCount
+from vemoizer.tracks import TrackPaths
 
 #: Preset names ``resolve_options`` understands; the CLI's ``meeting`` /
 #: ``memo`` commands each pass their own name.
@@ -92,6 +93,10 @@ class RunOptions:
     # argv literally unchanged. Validated at the CLI (unknown values
     # exit 2, case-insensitive — same contract as ``--language``).
     preprocess: str | None
+    # Two-track meeting (issue #171): the mic and system-audio stems, and the
+    # owner's label for the mic track. ``None`` keeps the single-mix path.
+    tracks: TrackPaths | None = None
+    owner: str | None = None
 
     @classmethod
     def expert_transcribe(
@@ -278,6 +283,8 @@ def resolve_options(
         value = overrides.get(key)
         return value if value is not None else default
 
+    tracks = overrides.get("tracks")
+    owner = overrides.get("owner")
     language_raw = _opt("language", base.language)
     language = str(language_raw).strip().lower()
     if language not in LANGUAGE_VALUES:
@@ -299,6 +306,8 @@ def resolve_options(
 
     return replace(
         base,
+        tracks=tracks if isinstance(tracks, TrackPaths) else None,
+        owner=owner if isinstance(owner, str) else None,
         profile=str(_opt("profile", base.profile)),
         diarize=bool(_opt("diarize", base.diarize)),
         repair=bool(_opt("repair", base.repair)),

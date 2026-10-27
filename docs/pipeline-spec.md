@@ -51,6 +51,11 @@ mono FLAC stem (PCM_24). Both stems share session index 0; the stems are the
 input to the post-call pass, which ingests them and never re-reads the live
 source. Head placement, gaps and skew rules: `src/vemoizer/capture.py`.
 
+A two-track meeting (issue #171, `--mic-track` / `--system-track`) decodes
+only the mix. Each stem is ingested once more, without preprocessing, for
+speaker labels alone. Stems share sample index 0 with the mix and are
+zero-padded to the longest stem; a length mismatch above 2 s is refused.
+
 Ingest argv (see `src/vemoizer/ingest.py`):
 
 ```
@@ -226,6 +231,17 @@ the final text.
   is lazily imported, the loader sets `PYANNOTE_METRICS_ENABLED=false` and
   `OTEL_SDK_DISABLED=true` (both via `setdefault`, as belt-and-braces), so
   a user can opt in by exporting `PYANNOTE_METRICS_ENABLED=true`.
+- **Two-track meetings (issue #171).** With `--mic-track` and `--system-track`
+  the owner's turns come from silero VAD on the mic stem (gaps under 0.5 s
+  merged), kept only in 100 ms frames where the mic is above -40 dBFS and no
+  more than 12 dB under the system stem over the same frame: headphone leakage
+  of the remote side otherwise wins overlapping turns, and a leakage stretch
+  splits the VAD segment rather than dragging the owner over a remote reply.
+  The remote turns come from pyannote on the system stem, with the remote
+  count (`--speakers` total minus the owner). A 1:1 call skips
+  pyannote and labels the remote side `Others`. The owner's label is never
+  smoothed into or out of a remote label. An unreadable stem or a length
+  mismatch above 2 s warns and labels the mix as usual.
 
 ### 10. Assembly
 
@@ -607,6 +623,8 @@ changes the run's exit code, and a per-sidecar naming failure only warns
 | `--no-group` | off | skip split-recording grouping entirely — each file is transcribed standalone (no boundary decode, no concat, no part markers); mutually exclusive with `--yes` |
 | `--language` | `auto` | recognition language for the whisper decode: `auto` (detect per window), `fi`, or `en` (case-insensitive); a `[meeting] language` key in the config file pins the same choice for meeting (and memo) runs (issue #108) |
 | `--preprocess` | off | audio level normalisation: `loudnorm` (two-pass, I=-16 LUFS, TP=-1.5, LRA=11) before decode; opt-in for far-field meeting recordings (issue #135) |
+| `--mic-track` / `--system-track` | off | two-track call: the owner's mic stem and the system-audio stem; give both or neither, with one mixed recording as the positional file; `--speakers 1` exits 2 (issue #171) |
+| `--me NAME` | config, else asked once | the owner's name for a two-track transcript; see Configuration (issue #171) |
 
 ### `vemoizer memo FILES... [options]` (issue #82)
 
@@ -994,6 +1012,15 @@ level — there is no per-key merging):
 Strict validation applies only to layers 2 and 3 (the new `.vemoizer`
 files). Legacy layers keep the old fail-open contract so existing users
 are not broken.
+
+**Exception: `[meeting] owner` (issue #171).** The owner's name for
+two-track transcripts resolves as `--me`, then the project `[meeting]
+owner`, then the home one. This key falls through past a project config
+that omits it, so it is the one key not governed by nearest-wins. The first
+interactive two-track run asks once and saves to the home config. A
+non-interactive run uses "Minä" (fi) or "Me" (en) and prints a hint. A
+home file holding only `[meeting]` is preferences, not an LLM config, so
+the search skips it instead of failing on the missing `[llm]` table.
 
 ### Glossary layers (issue #82)
 

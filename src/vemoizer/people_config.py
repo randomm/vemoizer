@@ -40,7 +40,11 @@ def find_people_config_path(
     ``~/.vemoizer`` → legacy. ``None`` when nothing exists. ``legacy_paths``
     is injectable so tests can isolate from a real dev-machine legacy config.
     """
-    from vemoizer.llm_config import _LEGACY_CONFIG_PATHS, _find_nearest_vemoizer_config
+    from vemoizer.llm_config import (
+        _LEGACY_CONFIG_PATHS,
+        _find_nearest_vemoizer_config,
+        _is_layer_file,
+    )
 
     if cwd is None:
         cwd = Path.cwd()
@@ -53,7 +57,7 @@ def find_people_config_path(
     if nearest is not None:
         return nearest
     home_config = home / ".vemoizer" / "config.toml"
-    if home_config.is_file():
+    if _is_layer_file(home_config):
         return home_config
     for candidate in legacy_paths:
         if candidate.is_file():

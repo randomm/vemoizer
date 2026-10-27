@@ -53,6 +53,7 @@ from .repair import repair_paragraphs  # noqa: F401
 from .spans import Span, span_context, words_in_span
 from .speaker_align import assign_word_speakers, split_segments_at_speaker_changes
 from .speaker_stage import run_speaker_stage
+from .tracks import TrackPaths
 from .vad import SpeechSegment, vad_segments
 from .vad import load_model as load_vad_model
 from .whisper_transcriber import decode_meeting
@@ -127,6 +128,7 @@ def _assemble(
     llm_config: LLMConfig | None,
     speaker_segments: list[tuple[float, float, str]] | None = None,
     spans: list[Span] | None = None,
+    trusted_labels: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Combine the stage outputs into the final ``{"text", "segments"}``.
 
@@ -198,7 +200,7 @@ def _assemble(
         # Word-level attribution: split whisper segments at true speaker
         # boundaries so a Q&A exchange inside one segment cannot fuse
         # under a single label (issue #71 round 2).
-        labels = assign_word_speakers(words, speaker_segments)
+        labels = assign_word_speakers(words, speaker_segments, trusted=trusted_labels)
         sentences = split_segments_at_speaker_changes(sentences, words, labels)
     if verdicts and not sentences:
         # A backend without sentence segments cannot be spliced; keep the
@@ -259,6 +261,8 @@ def transcribe_file(
     language: str | None = None,
     preprocess: str | None = None,
     tracker: InterruptTracker | None = None,
+    tracks: TrackPaths | None = None,
+    owner: str | None = None,
 ) -> dict:
     """Run the full consensus pipeline over one audio file.
 
@@ -417,7 +421,13 @@ def transcribe_file(
         redecoded = _redecode_spans(audio, spans)
 
     speaker = run_speaker_stage(
-        audio, diarize=diarize, speakers=speakers, display=display, tracker=tracker
+        audio,
+        diarize=diarize,
+        speakers=speakers,
+        display=display,
+        tracker=tracker,
+        tracks=tracks,
+        owner=owner,
     )
 
     # Fail loud (issue #73/#78): decode A's total failure (None) must not
@@ -436,7 +446,7 @@ def transcribe_file(
         return result
     logger.info("assemble: adjudicating spans")
     assembled = _assemble(
-        result_a, result_b, redecoded, llm_config, speaker.turns, spans=spans
+        result_a, result_b, redecoded, llm_config, speaker.turns, spans, speaker.trusted
     )
     result.update(assembled)
     if corrections and result.get("paragraphs"):
