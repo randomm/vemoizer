@@ -37,8 +37,8 @@ verification, not discovery. The exact commands live in the "Pre-Push
 Quality Gates" section of `AGENTS.md` — run those, not a local copy. If
 your change touches an ASR backend, the audio contract, alignment,
 spans, re-decode, or the LLM stage, the WER regression gate's output goes
-in the PR body, and baseline updates land in a dedicated commit, never
-mixed into a feature commit.
+in the PR body, and baseline refreshes (`--update-baseline`) go in a
+separate PR, never mixed into a feature PR.
 
 ## Testing
 
@@ -53,6 +53,13 @@ The branch naming, conventional commit, and merge rules live in the
 "Git Workflow" section of `AGENTS.md` — follow it there, including the
 `Fixes #N` / `Closes #N` PR-body requirement and the no-direct-commits
 to `main` rule.
+
+Merging is two steps: squash the PR branch to one conventional commit, then
+merge with a merge commit (`gh pr merge --merge`). Squash only after the
+branch contains `origin/main` (rebase first), and check `git diff --stat
+origin/main` before force-pushing, or the squashed commit reverts whatever
+landed on `main` since the branch point. The commands live in the "Git
+Workflow" section of `AGENTS.md`. Never force-push `main`.
 
 ## Documentation
 
