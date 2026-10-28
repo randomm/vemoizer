@@ -14,17 +14,22 @@ import typer
 from vemoizer.doctor import run_doctor
 
 
-def run_doctor_command(preprocess: str | None) -> None:
+def run_doctor_command(preprocess: str | None, listen: bool = False) -> None:
     """Validate *preprocess* and run the doctor checks.
 
     ``None`` (no flag): no loudnorm check. A non-empty value must
     lowercase to ``"loudnorm"``; anything else is a clean exit 2 (one
-    line, no traceback) — the same contract as ``--language``.
+    line, no traceback) — the same contract as ``--language``. ``listen``
+    adds the live-capture probe (issue #174).
     """
     lowered = preprocess.strip().lower() if preprocess is not None else None
     if lowered is not None and lowered != "loudnorm":
         typer.echo(f"error: unknown preprocess {lowered!r} (known: loudnorm)", err=True)
         raise typer.Exit(code=2)
-    report = run_doctor(echo=lambda line: typer.echo(line), preprocess=lowered or None)
+    report = run_doctor(
+        echo=lambda line: typer.echo(line),
+        preprocess=lowered or None,
+        listen=listen,
+    )
     if not report.ok:
         raise typer.Exit(code=1)

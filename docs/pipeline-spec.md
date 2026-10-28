@@ -705,6 +705,17 @@ the install command.
 | `--quiet` / `-q` | off | suppress the summary lines and the live progress line |
 | `--verbose` / `-v` | off | per-stage progress logging to stderr |
 
+### `vemoizer doctor [--listen]` (issue #174)
+
+`doctor --listen` adds live-capture probe lines to the usual checks:
+catap importable; a 2 s microphone check (exact zeros are red, with a
+Microphone hint); and a system-audio check that plays
+`/System/Library/Sounds/Tink.aiff` through the speaker-clip player while the
+tap listens (exact zeros are red, with the Screen & System Audio Recording
+hint and the output-device hint). Nothing is recorded or kept. The flag is
+opt-in because the probe can trigger macOS permission prompts; without it,
+doctor never touches capture hardware.
+
 ### `vemoizer render X.json [options]` (issue #89, M5a)
 
 Re-apply the CURRENT glossary correction pairs and any `--name` values

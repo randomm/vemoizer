@@ -10,9 +10,13 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+from _listen_helpers import FakeClock, fake_hardware, tone, zeros
 from typer.testing import CliRunner
 
+from vemoizer import capture_sources, listen
 from vemoizer import doctor as doctor_mod
+from vemoizer.capture import Chunk
 from vemoizer.cli import app
 from vemoizer.llm import LLMConfig
 
@@ -232,3 +236,157 @@ def test_cli_doctor_green_exits_zero(monkeypatch) -> None:
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     assert "[ ok ]" in result.output
+
+
+# ---------------------------------------------------------------------------
+# doctor --listen (issue #174): the capture probe
+# ---------------------------------------------------------------------------
+
+TINK = "/System/Library/Sounds/Tink.aiff"
+
+
+def _chunk(samples) -> Chunk:
+    return Chunk(samples, 0.0)
+
+
+@pytest.fixture
+def capture_hw(monkeypatch):
+    """Fake the catap install check and the two started sources (no hardware)."""
+    monkeypatch.setattr(listen, "catap_installed", lambda: True)
+
+    def install(mic_chunks, tap_chunks) -> None:
+        monkeypatch.setattr(
+            capture_sources,
+            "_open_real_sources",
+            fake_hardware(mic_chunks, tap_chunks),
+        )
+
+    return install
+
+
+def _run_listen(monkeypatch) -> doctor_mod.DoctorReport:
+    _mock_env(monkeypatch)
+    monkeypatch.setattr(doctor_mod, "_config_load", lambda: (None, None))
+    return doctor_mod.run_doctor(ping=True, listen=True)
+
+
+def _check(report: doctor_mod.DoctorReport, prefix: str) -> doctor_mod.DoctorCheck:
+    return next(c for c in report.checks if c.name.startswith(prefix))
+
+
+def test_doctor_without_listen_flag_never_probes_capture(
+    monkeypatch, capture_hw
+) -> None:
+    def must_not_run(**_kw):
+        raise AssertionError("the capture probe must not run without --listen")
+
+    monkeypatch.setattr(listen, "probe_capture", must_not_run)
+    report = _run(monkeypatch, ping=True)
+    assert report.ok is True
+    assert not any(c.name.startswith("microphone") for c in report.checks)
+
+
+def test_doctor_listen_probe_ok(monkeypatch, capture_hw, system_effects) -> None:
+    capture_hw([_chunk(tone(2.5))], [_chunk(tone(2.5))])
+    report = _run_listen(monkeypatch)
+    assert report.ok is True
+    for prefix in ("catap importable", "microphone", "system audio"):
+        assert _check(report, prefix).status == doctor_mod.GREEN
+
+
+def test_doctor_listen_silent_system_fails_with_permission_hint(
+    monkeypatch, capture_hw, system_effects
+) -> None:
+    capture_hw([_chunk(tone(2.5))], [_chunk(zeros(2.5))])
+    report = _run_listen(monkeypatch)
+    check = _check(report, "system audio")
+    assert report.ok is False
+    assert check.status == doctor_mod.RED
+    assert "System Audio Recording Only" in check.hint
+    assert "restart Ghostty" in check.hint
+    assert "output device" in check.hint
+
+
+def test_doctor_listen_silent_mic_fails_with_mic_hint(
+    monkeypatch, capture_hw, system_effects
+) -> None:
+    capture_hw([_chunk(zeros(2.5))], [_chunk(tone(2.5))])
+    report = _run_listen(monkeypatch)
+    check = _check(report, "microphone")
+    assert report.ok is False
+    assert check.status == doctor_mod.RED
+    assert "Privacy & Security > Microphone" in check.hint
+
+
+def test_doctor_listen_missing_catap_fails_with_install_hint(
+    monkeypatch, system_effects
+) -> None:
+    monkeypatch.setattr(listen, "catap_installed", lambda: False)
+    report = _run_listen(monkeypatch)
+    check = _check(report, "catap importable")
+    assert report.ok is False
+    assert check.status == doctor_mod.RED
+    assert "uv sync --extra listen" in check.hint
+
+
+def test_doctor_listen_plays_tone_through_stubbed_player(
+    monkeypatch, capture_hw, system_effects
+) -> None:
+    capture_hw([_chunk(tone(2.5))], [_chunk(tone(2.5))])
+    _run_listen(monkeypatch)
+    assert system_effects["afplay"] == [["afplay", TINK]]
+
+
+def test_probe_mic_that_never_starts_is_reported_not_as_permission() -> None:
+    clock = FakeClock()
+    hardware = fake_hardware([], [_chunk(tone(2.5))])
+    results = listen.probe_capture(hardware=hardware, clock=clock, sleep=clock.sleep)
+    mic = next(r for r in results if r.name.startswith("microphone"))
+    assert mic.ok is False
+    assert "did not start" in mic.hint
+    assert "Privacy" not in mic.hint
+
+
+def test_cli_doctor_listen_flag_runs_the_probe(monkeypatch, capture_hw) -> None:
+    capture_hw([_chunk(tone(2.5))], [_chunk(tone(2.5))])
+    _mock_env(monkeypatch)
+    monkeypatch.setattr(doctor_mod, "_config_load", lambda: (None, None))
+    real = doctor_mod.run_doctor
+
+    def _ping_doctor(**kw):
+        kw["ping"] = True
+        return real(**kw)
+
+    monkeypatch.setattr(doctor_mod, "run_doctor", _ping_doctor)
+    result = runner.invoke(app, ["doctor", "--listen"])
+    assert result.exit_code == 0
+    assert "system audio" in result.output
+
+
+def test_probe_devices_that_cannot_open_is_a_red_line() -> None:
+    def broken(_mic_name):
+        raise RuntimeError("no default input device")
+
+    results = listen.probe_capture(hardware=broken)
+    devices = next(r for r in results if r.name == "capture devices")
+    assert devices.ok is False
+    assert "no default input device" in devices.hint
+
+
+# ---------------------------------------------------------------------------
+# --preprocess loudnorm (issue #135): informational, never fails the report
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("has_filter", [True, False])
+def test_doctor_loudnorm_line_is_informational(monkeypatch, has_filter) -> None:
+    from vemoizer import preflight
+
+    monkeypatch.setattr(preflight, "loudnorm_filter_ok", lambda: has_filter)
+    monkeypatch.setenv("DOCTOR_TEST_KEY", "k")
+    _mock_env(monkeypatch)
+    lines: list[str] = []
+    report = doctor_mod.run_doctor(echo=lines.append, ping=True, preprocess="loudnorm")
+    assert report.ok is True
+    (line,) = [ln for ln in lines if "loudnorm" in ln]
+    assert ("brew upgrade ffmpeg" in line) is not has_filter

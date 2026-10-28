@@ -16,6 +16,9 @@ Checks (all local except the 1-token LLM ping, which is warning-only):
 - LLM config parse (absent = no LLM = green; malformed = red)
 - LLM key env var set (only when a config is present)
 - LLM 1-token ping (warning only — the sole non-fatal check)
+- ``--listen`` only (issue #174): catap importable, a 2 s mic zero check,
+  and a system-audio tap check that plays a tone; opt-in because it can
+  trigger macOS permission prompts
 """
 
 from __future__ import annotations
@@ -114,6 +117,7 @@ def run_doctor(
     echo: Callable[[str], None] = print,
     ping: object | None = "auto",
     preprocess: str | None = None,
+    listen: bool = False,
 ) -> DoctorReport:
     """Run every doctor check, printing a status line per check.
 
@@ -127,6 +131,9 @@ def run_doctor(
     (informational only — doctor never exits non-zero for it; the
     preflight gate is the enforcement point). The no-flag path does not
     print the line.
+
+    ``listen`` (issue #174) adds the live-capture probe lines; without it the
+    probe never touches capture hardware.
     """
     report = DoctorReport()
 
@@ -210,5 +217,11 @@ def run_doctor(
         if not ping_ok:
             line += "  — LLM ping failed or returned None"
         echo(line)
+
+    if listen:
+        from .listen import probe_capture
+
+        for result in probe_capture():
+            add(result.name, result.ok, hint=result.hint)
 
     return report
