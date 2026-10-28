@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from . import track_decode
 from .assembly import Candidate, _adjudicate, _b_text_in_span, _find_spans
 from .audio_contract import SAMPLE_RATE
 from .canary_transcriber import CanaryTranscriber
@@ -51,7 +52,11 @@ from .readability import paragraphs, splice_verdicts, tidy_paragraphs
 from .redecode import WhisperReDecodeTranscriber
 from .repair import repair_paragraphs  # noqa: F401
 from .spans import Span, span_context, words_in_span
-from .speaker_align import assign_word_speakers, split_segments_at_speaker_changes
+from .speaker_align import (
+    assign_track_labels,
+    label_segments_by_track,
+    split_segments_at_speaker_changes,
+)
 from .speaker_stage import run_speaker_stage
 from .tracks import TrackPaths
 from .vad import SpeechSegment, vad_segments
@@ -200,7 +205,7 @@ def _assemble(
         # Word-level attribution: split whisper segments at true speaker
         # boundaries so a Q&A exchange inside one segment cannot fuse
         # under a single label (issue #71 round 2).
-        labels = assign_word_speakers(words, speaker_segments, trusted=trusted_labels)
+        labels = assign_track_labels(words, speaker_segments, trusted=trusted_labels)
         sentences = split_segments_at_speaker_changes(sentences, words, labels)
     if verdicts and not sentences:
         # A backend without sentence segments cannot be spliced; keep the
@@ -211,12 +216,7 @@ def _assemble(
         # Speakers attach to EVERY segment, not only the adjudicated ones:
         # the whisper-only meeting path has zero verdicts, and diarization
         # that ran must never be thrown away (issue #71 QA regression).
-        for segment in segments:
-            speaker = speaker_for_span(
-                float(segment["start"]), float(segment["end"]), speaker_segments
-            )
-            if speaker is not None:
-                segment["speaker"] = speaker
+        label_segments_by_track(segments, speaker_segments, trusted_labels)
     result: dict[str, Any] = {"text": text, "segments": segments}
     # Per-window language distribution (issue #147, display only): decode A's
     # whisper windows report a ``language_summary`` (e.g. "fi 29/30, en
@@ -386,7 +386,20 @@ def transcribe_file(
         }
         if display is not None:
             kwargs["display"] = display
-        result_a = decode_meeting(audio, slices, **kwargs)
+        # Two-track call: each stem holds one speaker, so decoding them
+        # separately keeps each side's language; the mix decode is the fallback.
+        if tracks is not None:
+            result_a = track_decode.decode_tracks(
+                tracks,
+                len(audio),
+                initial_prompt=kwargs["initial_prompt"],
+                language=meeting_language,
+                display=display,
+            )
+            if result_a is None:
+                logger.warning("per-track meeting decode failed; decoding the mix")
+        if result_a is None:
+            result_a = decode_meeting(audio, slices, **kwargs)
         if result_a is not None:
             # Meeting profile skips decode B / re-decode / adjudication
             # entirely (invariant #2 allows skip-by-flag; see issue #71).

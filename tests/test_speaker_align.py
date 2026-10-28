@@ -12,13 +12,20 @@ the research recipe: timestamp jitter (tolerance), zero-overlap words
 from __future__ import annotations
 
 from vemoizer.speaker_align import (
+    assign_track_labels,
     assign_word_speakers,
+    label_segments_by_track,
     split_segments_at_speaker_changes,
+    turns_for_track,
 )
 
 
 def _w(word, start, end):
     return {"word": word, "start": start, "end": end}
+
+
+def _tw(word, start, end, track):
+    return {"word": word, "start": start, "end": end, "track": track}
 
 
 TURNS = [(0.0, 5.0, "S1"), (5.0, 8.0, "S2"), (8.0, 12.0, "S1")]
@@ -258,6 +265,70 @@ def test_remote_island_between_owner_runs_is_not_flipped() -> None:
         "O",
     ]
     assert assign_word_speakers(words, turns) == ["O"] * 5
+
+
+# -- per-track attribution (issue #207) ------------------------------------
+#
+# A two-track call merges the mic ("me") and system ("them") decodes onto
+# one timeline; the segments then OVERLAP in time. Membership and labelling
+# must respect the track, or remote words get pulled into the owner's
+# sentence and the owner's segment can take the remote speaker.
+
+
+def test_overlapping_track_segments_keep_their_own_track_words() -> None:
+    """Time-only membership interleaved and duplicated both segments."""
+    me_seg = {"start": 0.0, "end": 1.4, "text": "tämä on suomeksi", "track": "me"}
+    them_seg = {"start": 0.3, "end": 1.4, "text": "if you're happy", "track": "them"}
+    words = [
+        _tw("tämä", 0.0, 0.4, "me"),
+        _tw("if", 0.3, 0.5, "them"),
+        _tw("on", 0.5, 0.7, "me"),
+        _tw("you're", 0.6, 0.9, "them"),
+        _tw("suomeksi", 0.8, 1.3, "me"),
+        _tw("happy", 1.0, 1.4, "them"),
+    ]
+    labels: list[str | None] = ["A", "B", "A", "B", "A", "B"]
+    out = split_segments_at_speaker_changes([me_seg, them_seg], words, labels)
+    assert len(out) == 2, "no interleaved pieces, no duplication"
+    assert [(s["text"], s["speaker"]) for s in out] == [
+        ("tämä on suomeksi", "A"),
+        ("if you're happy", "B"),
+    ]
+
+
+def test_turns_for_track_filters_by_the_trusted_line() -> None:
+    turns = [(0.0, 1.0, "O"), (2.0, 3.0, "R"), (4.0, 5.0, "O")]
+    trusted = frozenset({"O"})
+    assert turns_for_track("me", turns, trusted) == [turns[0], turns[2]]
+    assert turns_for_track("them", turns, trusted) == [turns[1]]
+    assert turns_for_track(None, turns, trusted) == turns
+    assert turns_for_track("me", turns, frozenset()) == turns  # fail-open
+
+
+def test_me_word_takes_the_owner_label_despite_a_bigger_remote_turn() -> None:
+    """An owner word must not be stolen by a longer-overlapping remote turn."""
+    turns = [(0.1, 0.7, "O"), (0.0, 4.0, "R")]  # R overlaps the word more
+    words = [_tw("tämä", 0.2, 0.6, "me"), _tw("hello", 0.2, 0.6, "them")]
+    labels = assign_track_labels(words, turns, trusted=frozenset({"O"}))
+    assert labels == ["O", "R"]
+
+
+def test_assign_track_labels_without_track_keys_matches_plain_attribution() -> None:
+    """Single-file runs (no track keys) are byte-identical to before."""
+    words = [_w("kysymys", 4.0, 4.8), _w("vastaus", 5.2, 6.0)]
+    assert assign_track_labels(words, TURNS) == assign_word_speakers(words, TURNS)
+
+
+def test_label_segments_by_track_uses_the_segment_own_turns() -> None:
+    segments = [
+        {"start": 0.0, "end": 0.8, "text": "moi", "track": "me"},
+        {"start": 0.0, "end": 0.8, "text": "hi", "track": "them"},
+        {"start": 0.0, "end": 0.8, "text": "plain"},
+    ]
+    turns = [(0.0, 0.4, "O"), (0.0, 4.0, "R")]
+    label_segments_by_track(segments, turns, trusted=frozenset({"O"}))
+    # The untracked segment keeps the all-turns pick (R overlaps more).
+    assert [s["speaker"] for s in segments] == ["O", "R", "R"]
 
 
 def test_empty_trusted_set_keeps_untrusted_smoothing() -> None:
