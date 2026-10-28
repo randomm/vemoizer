@@ -105,9 +105,14 @@ class SkewLogger:
     def final(self, me_t: float, them_t: float) -> float:
         """Log the skew now (used at stop)."""
         skew = them_t - me_t
-        direction = "ahead of" if skew >= 0 else "behind"
-        log.info("track skew: them %s me by %.0f ms", direction, abs(skew) * 1000)
+        log.info(skew_message(skew))
         return skew
+
+
+def skew_message(skew: float) -> str:
+    """The one-line wording for a measured skew (``them`` minus ``me``, seconds)."""
+    direction = "ahead of" if skew >= 0 else "behind"
+    return f"track skew: them {direction} me by {abs(skew) * 1000:.0f} ms"
 
 
 #: What soundfile 0.14 raises on a failed write or close: OSError from the OS,

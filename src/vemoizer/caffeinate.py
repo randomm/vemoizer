@@ -14,6 +14,7 @@ caffeinate must never block a transcription.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from collections.abc import Generator
@@ -26,12 +27,16 @@ _active: bool = False
 
 
 def _spawn(argv: list[str]) -> subprocess.Popen[bytes] | None:
-    """Spawn *argv* (``caffeinate -ims``) with its fail-open handling.
+    """Spawn *argv* (``caffeinate -ims -w <pid>``) with its fail-open handling.
 
     The single seam that performs the real system call; it returns the
     spawned process, or ``None`` when spawn fails (fail-open). Tests stub
     it via the ``system_effects`` autouse fixture without globally patching
     ``subprocess`` or ``sys``.
+
+    ``start_new_session`` keeps the process out of the terminal's foreground
+    group, so a Ctrl-C that stops a ``listen`` recording does not drop the
+    wake assertion; ``-w`` makes caffeinate exit when vemoizer dies (#173).
     """
     try:
         return subprocess.Popen(
@@ -39,6 +44,7 @@ def _spawn(argv: list[str]) -> subprocess.Popen[bytes] | None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
+            start_new_session=True,
         )
     except (FileNotFoundError, OSError, subprocess.SubprocessError):
         # Fail-open: no assertion held, but the work still runs.
@@ -71,7 +77,7 @@ def caffeinate_context() -> Generator[None, None, None]:
     _active = True
 
     try:
-        proc = _spawn(["caffeinate", "-ims"])
+        proc = _spawn(["caffeinate", "-ims", "-w", str(os.getpid())])
 
         try:
             yield

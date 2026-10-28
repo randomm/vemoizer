@@ -572,7 +572,8 @@ filter, and self-heal.
 `transcribe` (expert), `meeting`, `memo` (preset commands added in issue
 #82), `render` (M5a, issue #89 — model-free re-render of a stored sidecar),
 `names` (speaker naming), `glossary` (glossary inspection), `models`
-(model management), and `doctor` (environment diagnostics). `eval` is
+(model management), `doctor` (environment diagnostics), and `listen`
+(record a call, then the `meeting` preset; issue #173). `eval` is
 registered with `hidden=True` and does not appear in the main `--help`.
 
 ### `vemoizer meeting FILES... [options]` (issue #82)
@@ -654,6 +655,45 @@ the same empty-prompt invariant (prompt terms ignored).
 | `--glossary` | layered merge | explicit glossary file (correction pairs only for memo) |
 | `--repair` / `--no-repair` | on | LLM repair pass over the final paragraphs |
 | `--preprocess` | off | audio level normalisation: `loudnorm` (two-pass, I=-16 LUFS, TP=-1.5, LRA=11) before decode; opt-in for far-field meeting recordings (issue #135) |
+
+### `vemoizer listen [options]` (issue #173)
+
+Record a call from the Mac's system audio (the global output mix, catap
+`record_system_audio`) and microphone, then run the `meeting` preset on the
+mix with the two-track labels (issue #171). No file argument. Recordings are
+kept under `calls/<YYYY-MM-DD_HH-MM-SS>/` in the CWD: `me.flac` (mic),
+`them.flac` (system audio), `call.flac` (16 kHz mono mix). Outputs are the
+dated `.md` + `.json` pair, same as `meeting`; the recorded audio is never
+listed as a written file.
+
+Start-up is a preflight: each source must deliver audio within 4 s, and two
+seconds of exact zeros on the mic is a hard failure (exit 1, a Microphone
+permission hint), while exact zeros on the system side only warn. A
+consent reminder prints before any source starts; the owner name is asked
+(or fallen back to, non-interactively) before recording starts. The first
+Ctrl-C stops the recording and finishes the call; a second Ctrl-C during
+mixing or decoding exits 130 and keeps the stems (`audio kept:
+calls/<ts>/`). A silent system side for 3 minutes warns once, naming the
+output device. While recording, each minute and at stop the run prints
+`track skew: them ahead of|behind me by N ms` (measured from the two
+tracks' sample clocks, never corrected), so clock drift over a long call
+is readable without `--verbose`. Missing the `listen` extra exits 2 with
+the install command.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--mic NAME` | the default input | microphone device name (avfoundation) |
+| `--me NAME` | config, else asked once | the owner's name for the transcript; the prompt runs before recording |
+| `--duration SECONDS` | until Ctrl-C | stop recording after this many seconds |
+| `--speakers` | 2-6 | diarization bounds (`N` or `MIN-MAX`), as `meeting` |
+| `--language` | `auto` | recognition language: `auto`, `fi`, or `en` (invariant 3) |
+| `--glossary` | layered merge | explicit glossary file (replaces both `.vemoizer` layers) |
+| `--config` | layered search | explicit LLM config path |
+| `--repair` / `--no-repair` | on | LLM repair pass over the final paragraphs |
+| `--no-diarize` | off (diarize on) | skip speaker diarization of the remote side |
+| `--yes` | off | never prompt: use the fallback owner name when none is configured |
+| `--quiet` / `-q` | off | suppress the summary lines and the live progress line |
+| `--verbose` / `-v` | off | per-stage progress logging to stderr |
 
 ### `vemoizer render X.json [options]` (issue #89, M5a)
 
@@ -1061,6 +1101,12 @@ glossary for the `meeting` and `memo` presets:
 - **Python >= 3.11.**
 - **`ffmpeg` on PATH** — the only non-Python system dependency (checked at
   ingest time; a missing binary produces an actionable install message).
+- **Live capture (`listen`, issue #173)** needs the `listen` extra
+  (`uv sync --extra listen`, or `pip install 'vemoizer[listen]'`) and two
+  macOS grants for the terminal that runs vemoizer (Ghostty): Privacy &
+  Security > Microphone, and Screen & System Audio Recording > System Audio
+  Recording Only. Restart the terminal after granting. Put Do Not Disturb
+  on during a call, and use headphones (no echo cancellation).
 - **`uv`** for dependency management (`uv sync --group dev`).
 - **Models live in the HuggingFace cache** (`~/.cache/huggingface/hub`).
   Budget ~7.8 GiB for the five pipeline models (Parakeet ~2.3 GiB, Canary
