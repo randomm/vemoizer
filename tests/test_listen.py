@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from typer.testing import CliRunner
 
 import vemoizer.listen as listen
 import vemoizer.pipeline as pipeline_module
+import vemoizer.status_line as status_line
 from vemoizer.capture import Chunk, SkewLogger
 from vemoizer.cli import app
 from vemoizer.listen import ListenRun, run_listen
@@ -230,7 +232,20 @@ def test_microphone_that_never_starts_is_not_reported_as_permission(
     assert code == 1
     assert preset_calls == []
     assert "did not start" in err
+    assert "no audio within 4 s" in err
     assert "Privacy" not in err
+
+
+def test_system_audio_that_never_starts_is_a_hard_fail_with_ten_seconds(
+    home: Path, stub_mix: None, preset_calls, capsys
+) -> None:
+    """issue #205: the cold Core Audio tap gets 10 s, not the mic's 4 s."""
+    code = _run(FakeClock(), fake_hardware([_chunk(tone(2.5))], []), me="Janni")
+    err = capsys.readouterr().err
+    assert code == 1
+    assert preset_calls == []
+    assert "system audio source did not start" in err
+    assert "no audio within 10 s" in err
 
 
 def test_silent_system_audio_warns_and_the_run_continues(
@@ -241,7 +256,11 @@ def test_silent_system_audio_warns_and_the_run_continues(
     err = capsys.readouterr().err
     assert code == 0
     assert len(preset_calls) == 1
+    # issue #205: silence before the call makes sound is normal, not a warning.
+    assert "note: system audio is silent so far" in err
+    assert "That is fine if nothing is playing yet" in err
     assert "System Audio Recording Only" in err
+    assert "warning: system audio" not in err
 
 
 def test_watchdog_warns_once_after_three_minutes_and_names_the_device(
@@ -502,3 +521,40 @@ def test_skew_tick_is_silent_until_both_tracks_have_audio(
     tap.observe(Chunk(tone(61.0), 0.0))
     listen._skew_tick(SkewLogger(), mic, tap, t0=0.0)
     assert capsys.readouterr().err == ""
+
+
+# --- live draft lines on stderr (issue #205) --------------------------------
+
+
+def test_print_draft_clears_the_rec_line_on_a_tty(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
+    status_line.say("[00:03] Others: moi")
+    assert capsys.readouterr().err == "\r\033[K[00:03] Others: moi\n"
+
+
+def test_print_draft_is_a_plain_line_without_a_tty(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: False, raising=False)
+    status_line.say("[00:03] Others: moi")
+    assert capsys.readouterr().err == "[00:03] Others: moi\n"
+
+
+def test_print_draft_waits_while_the_rec_tick_holds_the_lock() -> None:
+    """Draft lines (decode thread) and the REC tick (main) share one lock."""
+    import threading
+
+    printed = threading.Event()
+
+    def draft() -> None:
+        status_line.say("x")
+        printed.set()
+
+    with status_line.STATUS_LOCK:
+        thread = threading.Thread(target=draft, daemon=True)
+        thread.start()
+        assert not printed.wait(timeout=0.2)
+    assert printed.wait(timeout=5)
+    thread.join(timeout=5)

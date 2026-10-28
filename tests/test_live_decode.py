@@ -99,6 +99,15 @@ def test_decode_passes_one_full_window_and_no_language_override() -> None:
     assert "language" not in kwargs
 
 
+def test_live_decode_requests_no_progress_bar() -> None:
+    """issue #205: the live path asks the transcriber to stay silent."""
+    fake = _FakeTranscriber()
+    decode_utterance(fake, _utt(0.0), "me")
+
+    (kwargs,) = fake.calls
+    assert kwargs["show_progress"] is False
+
+
 def test_decoded_track_is_carried_through() -> None:
     decoded = decode_utterance(_FakeTranscriber(), _utt(1.0), "them")
     assert decoded.track == "them"
