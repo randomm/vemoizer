@@ -120,7 +120,9 @@ vemoizer asks your name once, for the transcript (`--me NAME` sets it directly).
 
 Record a call straight from the Mac (Teams, Meet): `vemoizer listen --me NAME`
 records the system audio and your microphone, then transcribes the call as a
-meeting. Stop with Ctrl-C; recordings stay in `calls/<timestamp>/`. Needs the
+meeting. Stop with Ctrl-C; recordings stay in `calls/<timestamp>/`. Add
+`--live` to watch a rough draft fill in while the call runs (`live.md`, removed
+once the final transcript is written unless `--keep-live`). Needs the
 `listen` extra (`uv sync --extra listen`, or `pip install 'vemoizer[listen]'`)
 and two macOS grants for the terminal that runs vemoizer: Privacy & Security >
 Microphone, and Screen & System Audio Recording > System Audio Recording Only.

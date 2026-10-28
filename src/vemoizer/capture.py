@@ -43,6 +43,10 @@ class Chunk:
     discontinuity_frames: int = 0
 
 
+#: Receives each array written to a stem, in write order (see TrackWriter.subscribe).
+Subscriber = Callable[[np.ndarray], None]
+
+
 class CaptureSource(Protocol):
     """A live source. ``chunks()`` yields until the source is stopped."""
 
@@ -151,6 +155,15 @@ class TrackWriter:
         self._clip_warned = False
         self._usable = True
         self._closed = False
+        self._subscribers: list[Subscriber] = []
+
+    def subscribe(self, callback: Subscriber) -> None:
+        """Hand every array written to the stem to *callback*, in write order.
+
+        Runs on the writer's thread, so a callback must only queue and return.
+        A callback that raises is logged and detached; the stem keeps recording.
+        """
+        self._subscribers.append(callback)
 
     @property
     def usable(self) -> bool:
@@ -177,9 +190,9 @@ class TrackWriter:
         samples = np.asarray(chunk.samples, dtype=np.float32)
         try:
             if pad:
-                self._file.write(np.zeros(pad, dtype=np.float32))
+                self._write_block(np.zeros(pad, dtype=np.float32))
             if samples.size:
-                self._file.write(samples)
+                self._write_block(samples)
             self._frames += pad + samples.size
             self._since_flush += pad + samples.size
             if self._since_flush >= self._flush_frames:
@@ -190,6 +203,20 @@ class TrackWriter:
             return False
         self._count_clips(samples)
         return True
+
+    def _write_block(self, block: np.ndarray) -> None:
+        self._file.write(block)
+        for callback in list(self._subscribers):
+            try:
+                callback(block)
+            except Exception as exc:  # the live path must never stop a recording
+                log.warning(
+                    "live subscriber failed on %s: %s; it is detached and the "
+                    "recording continues",
+                    self._path,
+                    exc,
+                )
+                self._subscribers.remove(callback)
 
     def close(self) -> None:
         if self._closed:

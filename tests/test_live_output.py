@@ -20,6 +20,7 @@ from vemoizer.live_output import (
     headphone_bleed,
     live_draft,
     render_line,
+    render_terminal_line,
 )
 from vemoizer.preset_interrupt import InterruptTracker
 from vemoizer.tracks import REMOTE_LABEL
@@ -33,6 +34,16 @@ def test_render_line_formats_timestamp_and_label() -> None:
 
 def test_render_line_keeps_hours_beyond_a_day_digit() -> None:
     assert render_line(36000.0, "Janni", "x") == "[10:00:00] Janni: x"
+
+
+def test_render_terminal_line_uses_mm_ss() -> None:
+    """The streamed terminal line is shorter than the draft file's stamp."""
+    assert render_terminal_line(3.0, "Others", "moi") == "[00:03] Others: moi"
+    assert render_terminal_line(3599.0, "Janni", "x") == "[59:59] Janni: x"
+
+
+def test_render_terminal_line_switches_to_hms_past_an_hour() -> None:
+    assert render_terminal_line(3600.0, "Janni", "x") == "[01:00:00] Janni: x"
 
 
 def test_writer_labels_mic_as_owner_and_system_audio_as_remote() -> None:
@@ -150,12 +161,12 @@ def test_punctuation_only_lines_are_never_bleed() -> None:
 
 
 def test_bleed_warner_warns_once() -> None:
-    out = io.StringIO()
-    warner = BleedWarner(out)
+    lines: list[str] = []
+    warner = BleedWarner(lines.append)
     mic = [(10.0, "tämä on testi")]
     them = [(11.0, "tämä on testi")]
 
     assert warner.check(mic, them) is True
     assert warner.check(mic, them) is False
 
-    assert out.getvalue().count("bleed") == 1
+    assert sum("bleed" in line for line in lines) == 1

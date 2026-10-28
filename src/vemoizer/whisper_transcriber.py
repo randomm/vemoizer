@@ -136,6 +136,7 @@ class WhisperTranscriber:
         *,
         display: ProgressDisplay | None = None,
         vad_slices: list[tuple[int, int]] | None = None,
+        show_progress: bool = True,
         **kwargs: Any,
     ) -> TranscriptionResult:
         """Transcribe the recording in :data:`WINDOW_SECONDS` windows.
@@ -154,6 +155,12 @@ class WhisperTranscriber:
         so the bar's frame counter drives the display's decode task in
         file-level minutes. When None or the display is disabled (non-TTY),
         the shim is a pass-through and the decode result is identical.
+
+        ``show_progress=False`` (issue #205, the live draft path) silences
+        mlx-whisper's own tqdm bar: under the inverted verbose semantics
+        below, ``verbose=None`` disables the bar (``disable=verbose is not
+        False``) and skips the per-window "Detected language" line too. The
+        post-call pass keeps the default.
         """
         if len(audio) == 0:
             return {
@@ -199,7 +206,10 @@ class WhisperTranscriber:
         # below. The contract test in tests/test_mlx_whisper_contract.py pins
         # the inverted verbose semantics.
         options.update(kwargs)
-        options["verbose"] = False
+        # show_progress=False (issue #205): verbose=None also disables the
+        # tqdm bar and the "Detected language" print; the live draft uses it
+        # so per-utterance bars never flood the terminal.
+        options["verbose"] = False if show_progress else None
 
         window_frames = int(WINDOW_SECONDS * SAMPLE_RATE)
         # Common kwargs for every window's transcribe() call (the retry path

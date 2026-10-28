@@ -17,9 +17,14 @@ import numpy as np
 from vemoizer.audio_contract import SAMPLE_RATE
 from vemoizer.capture import Chunk, SilenceWatchdog, is_digital_silence
 
-#: How long a source may take to deliver its first audio (ffmpeg avfoundation
+#: How long the mic may take to deliver its first audio (ffmpeg avfoundation
 #: can need over a second to open the device).
 START_WAIT_S = 4.0
+
+#: How long the system audio tap may take. The Core Audio tap can be much
+#: slower on a cold start: a real Teams run failed at 4 s and worked on a
+#: second run seconds later (issue #205).
+TAP_START_WAIT_S = 10.0
 
 #: Exact zeros over this many seconds of audio count as a dead input.
 ZERO_WINDOW_S = 2.0
@@ -113,6 +118,11 @@ def _wait(
         sleep(_POLL_S)
 
 
+def _start_deadline_s(name: str) -> float:
+    """The start deadline for one source: the tap gets the cold-start grace."""
+    return TAP_START_WAIT_S if name == "tap" else START_WAIT_S
+
+
 def preflight(
     states: Sequence[TrackState],
     clock: Callable[[], float],
@@ -121,16 +131,18 @@ def preflight(
 ) -> list[Problem]:
     """Judge the sources before any recording is trusted.
 
-    Waits up to :data:`START_WAIT_S` for every source's first audio; a source
-    that never starts is reported (and the zero window is not waited for).
-    Otherwise waits for each source's zero window and reports the silent ones.
+    Waits up to :data:`START_WAIT_S` (mic) or :data:`TAP_START_WAIT_S` (tap)
+    for every source's first audio; a source that never starts is reported
+    (and the zero window is not waited for). Otherwise waits for each
+    source's zero window and reports the silent ones.
     """
-    _wait(
-        lambda: all(s.started for s in states),
-        clock,
-        sleep,
-        t0 + START_WAIT_S,
-    )
+    for state in states:
+        _wait(
+            lambda s=state: s.started,
+            clock,
+            sleep,
+            t0 + _start_deadline_s(state.name),
+        )
     missing = [Problem(s.name, "not_started") for s in states if not s.started]
     if missing:
         return missing
@@ -138,7 +150,10 @@ def preflight(
         lambda: all(s.window_done for s in states),
         clock,
         sleep,
-        t0 + START_WAIT_S + ZERO_WINDOW_S + PREFLIGHT_SLACK_S,
+        t0
+        + max(_start_deadline_s(s.name) for s in states)
+        + ZERO_WINDOW_S
+        + PREFLIGHT_SLACK_S,
     )
     return [Problem(s.name, "silent") for s in states if s.silent]
 

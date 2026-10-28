@@ -500,6 +500,26 @@ def test_verbose_false_always_passed(
     assert mock_disabled.transcribe.call_args.kwargs.get("verbose") is False
 
 
+def test_show_progress_false_silences_the_tqdm_bar() -> None:
+    """issue #205: the live path's show_progress=False must reach mlx-whisper
+    as verbose=None, which disables its tqdm bar (disable=verbose is not
+    False) and the per-window language print; the default is covered by
+    test_verbose_false_always_passed."""
+    raw = _raw([_seg("moro", [{"word": " moro", "start": 0.0, "end": 0.5}])])
+    mock_live = _mock_whisper(raw)
+    with (
+        patch.dict("sys.modules", {"mlx_whisper": mock_live}),
+        patch("huggingface_hub.snapshot_download", return_value="/tmp/turbo"),
+    ):
+        t = WhisperTranscriber()
+        t._model_path = "/tmp/turbo"
+        t._mlx_whisper = mock_live
+        t.transcribe(_audio(2.0), show_progress=False)
+    live_kwargs = mock_live.transcribe.call_args.kwargs
+    assert "verbose" in live_kwargs
+    assert live_kwargs["verbose"] is None
+
+
 def test_heal_redecode_never_gets_verbose_true() -> None:
     """The self-heal re-decode (condition_on_previous_text=False) must never
     receive verbose=True. verbose=False is always passed (issue #147) —

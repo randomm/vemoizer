@@ -2,7 +2,8 @@
 
 Orchestration only. Hardware is reached through ``capture_sources`` (the one
 module that touches catap/ffmpeg), the per-source threads and the preflight
-live in ``listen_capture``, and the stems are ``capture.TrackWriter`` files.
+live in ``listen_capture``, the stems are ``capture.TrackWriter`` files, and
+the ``--live`` draft around the recording is owned by ``listen_live``.
 The recording is kept under ``calls/<timestamp>/`` and is never reported as
 an output file.
 """
@@ -11,7 +12,6 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -19,9 +19,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
-
-import typer
+from typing import TYPE_CHECKING, Any
 
 from vemoizer import capture_sources, speaker_clips
 from vemoizer.caffeinate import caffeinate_context
@@ -33,12 +31,24 @@ from vemoizer.capture import (
     skew_message,
 )
 from vemoizer.cli_support import parse_speakers
-from vemoizer.listen_capture import Problem, TrackState, preflight, pump
+from vemoizer.listen_capture import (
+    START_WAIT_S,
+    TAP_START_WAIT_S,
+    Problem,
+    TrackState,
+    preflight,
+    pump,
+)
+from vemoizer.listen_live import run_session
 from vemoizer.owner_config import RunOwner, resolve_run_owner
 from vemoizer.preset_cli import preset_interrupt_exit
 from vemoizer.preset_interrupt import InterruptTracker, set_interrupt_stage
 from vemoizer.presets import LANGUAGE_VALUES
+from vemoizer.status_line import rec_tick, say
 from vemoizer.tracks import TrackPaths
+
+if TYPE_CHECKING:
+    from vemoizer.live_session import LiveModels, LiveSession
 
 CALLS_DIR = "calls"
 MIX_NAME = "call.flac"
@@ -76,7 +86,14 @@ _TAP_HINT = (
     "Recording Only for Ghostty (or the terminal app that runs vemoizer), "
     "restart Ghostty, and check the default output device"
 )
-_NOT_STARTED_HINT = "did not start (no audio within 4 s)"
+_NOT_STARTED_DEADLINES_S = {"mic": START_WAIT_S, "tap": TAP_START_WAIT_S}
+
+
+def _not_started_phrase(track: str) -> str:
+    """The start-failure detail: how long the source was given (issue #205)."""
+    return f"no audio within {int(_NOT_STARTED_DEADLINES_S[track])} s"
+
+
 _PROBE_CATAP_HINT = (
     "install the listen extra: run `uv sync --extra listen` or "
     "`pip install 'vemoizer[listen]'`"
@@ -101,6 +118,8 @@ class ListenRun:
     no_diarize: bool = False
     speakers: str | None = None
     language: str = "auto"
+    live: bool = False
+    keep_live: bool = False
 
 
 def catap_installed() -> bool:
@@ -128,7 +147,7 @@ def _probe_hint(track: str, kind: str | None) -> str:
     if kind is None:
         return ""
     if kind == "not_started":
-        return _NOT_STARTED_HINT
+        return f"did not start ({_not_started_phrase(track)})"
     return _MIC_HINT if track == "mic" else _TAP_HINT
 
 
@@ -199,16 +218,12 @@ def build_mix_argv(me: Path | None, them: Path | None, out: Path) -> list[str]:
 
 
 def _echo(line: str) -> None:
-    typer.echo(line, err=True)
+    say(line)
 
 
-def _kept(call_dir: Path) -> str:
+def kept_message(call_dir: Path) -> str:
+    """The line telling the user the call folder survived."""
     return f"audio kept: {call_dir.as_posix()}/"
-
-
-def _hms(elapsed: float) -> str:
-    whole = int(elapsed)
-    return f"{whole // 3600:02d}:{whole % 3600 // 60:02d}:{whole % 60:02d}"
 
 
 def _report_problems(problems: Sequence[Problem]) -> bool:
@@ -217,7 +232,10 @@ def _report_problems(problems: Sequence[Problem]) -> bool:
     for problem in problems:
         label = _LABELS[problem.track]
         if problem.kind == "not_started":
-            _echo(f"error: the {label} source did not start (no audio within 4 s)")
+            _echo(
+                f"error: the {label} source did not start "
+                f"({_not_started_phrase(problem.track)})"
+            )
             fatal = True
         elif problem.track == "mic":
             _echo(
@@ -228,9 +246,11 @@ def _report_problems(problems: Sequence[Problem]) -> bool:
             fatal = True
         else:
             _echo(
-                "warning: system audio delivered 2 s of exact zeros. Check Privacy & "
-                "Security > Screen & System Audio Recording > System Audio Recording "
-                "Only for Ghostty, restart Ghostty, and the default output device."
+                "note: system audio is silent so far. That is fine if nothing "
+                "is playing yet; if the call stays silent in the transcript, "
+                "check Privacy & Security > Screen & System Audio Recording > "
+                "System Audio Recording Only for Ghostty, restart Ghostty, and "
+                "check the default output device."
             )
     return fatal
 
@@ -257,11 +277,7 @@ def _record(
     rewrite = sys.stderr.isatty()
     while True:
         elapsed = clock() - t0
-        if rewrite:
-            sys.stderr.write(f"\r● REC {_hms(elapsed)}")
-            sys.stderr.flush()
-        elif int(elapsed) % 60 == 0:
-            _echo(f"● REC {_hms(elapsed)}")
+        rec_tick(elapsed, rewrite=rewrite)
         _skew_tick(skew, mic, tap, t0)
         if tap.check_watchdog():
             _echo(
@@ -275,7 +291,7 @@ def _record(
         sys.stderr.write("\n")
 
 
-def _capture(
+def capture_call(
     run: ListenRun,
     call_dir: Path,
     open_sources: Hardware,
@@ -283,15 +299,19 @@ def _capture(
     sleep: Sleep,
     output_name: Callable[[], str],
     tracker: InterruptTracker,
+    t0: float,
+    live: LiveSession | None,
 ) -> tuple[TrackWriter, TrackWriter] | None:
     """Preflight and record; the closed writers, or None when preflight failed.
 
     The first Ctrl-C is caught here: it ends the recording and the tracks are
     finalized normally. A Ctrl-C during finalize propagates to the caller.
     """
-    t0 = clock()
     me_w = TrackWriter(call_dir / ME_NAME, t0)
     them_w = TrackWriter(call_dir / THEM_NAME, t0)
+    if live is not None:
+        me_w.subscribe(live.subscriber("me"))
+        them_w.subscribe(live.subscriber("them"))
     try:
         mic, tap = open_sources(run.mic)
     except (OSError, RuntimeError) as exc:
@@ -335,7 +355,7 @@ def _shutdown(sources: Sequence[Any], threads: Sequence[Any]) -> None:
         thread.join(timeout=_JOIN_S)
 
 
-def _mix(
+def mix_call(
     call_dir: Path,
     me_w: TrackWriter,
     them_w: TrackWriter,
@@ -349,18 +369,18 @@ def _mix(
         _run_mix(build_mix_argv(me, them, mix))
     except KeyboardInterrupt:
         mix.unlink(missing_ok=True)
-        _echo(_kept(call_dir))
+        _echo(kept_message(call_dir))
         return 130
     except (OSError, subprocess.CalledProcessError) as exc:
         mix.unlink(missing_ok=True)
-        _echo(f"error: mixing the call failed: {exc}; {_kept(call_dir)}")
+        _echo(f"error: mixing the call failed: {exc}; {kept_message(call_dir)}")
         return 1
     # The call is dated by when it started, not when it was stopped.
     os.utime(mix, (start_epoch, start_epoch))
     return mix
 
 
-def _decode(
+def decode_call(
     run: ListenRun,
     call_dir: Path,
     owner: RunOwner,
@@ -401,40 +421,6 @@ def _decode(
             display.close()
 
 
-def _session(
-    run: ListenRun,
-    call_dir: Path,
-    owner: RunOwner,
-    tracker: InterruptTracker,
-    open_sources: Hardware,
-    clock: Callable[[], float],
-    sleep: Sleep,
-    output_name: Callable[[], str],
-    start_epoch: float,
-    speakers: Any,
-) -> int:
-    """Capture, mix, decode; each stage's failure is an exit code."""
-    try:
-        recorded = _capture(
-            run, call_dir, open_sources, clock, sleep, output_name, tracker
-        )
-    except KeyboardInterrupt:
-        _echo(_kept(call_dir))
-        return 130
-    if recorded is None:
-        shutil.rmtree(call_dir, ignore_errors=True)
-        return 1
-    me_w, them_w = recorded
-    if me_w.position_s == 0 and them_w.position_s == 0:
-        _echo("nothing was recorded; no transcript written")
-        shutil.rmtree(call_dir, ignore_errors=True)
-        return 1
-    mixed = _mix(call_dir, me_w, them_w, start_epoch)
-    if isinstance(mixed, int):
-        return mixed
-    return _decode(run, call_dir, owner, mixed, speakers, tracker)
-
-
 def run_listen(
     run: ListenRun,
     *,
@@ -445,12 +431,13 @@ def run_listen(
     input_fn: Callable[[str], str] = input,
     isatty: Callable[[], bool] | None = None,
     output_name: Callable[[], str] | None = None,
+    live_models: LiveModels | None = None,
 ) -> int:
     """Record one call, then run the meeting preset on its mix; the exit code.
 
-    The hardware, clock, sleep, prompt and TTY seams default to the real ones;
-    unit tests inject fakes. A Ctrl-C during decoding exits 130 via the preset
-    handler, which also names the kept call folder.
+    The hardware, clock, sleep, prompt, TTY and live-model seams default to the
+    real ones; unit tests inject fakes. A Ctrl-C during decoding exits 130 via
+    the preset handler, which also names the kept call folder.
     """
     language = run.language.strip().lower()
     if language not in LANGUAGE_VALUES:
@@ -473,7 +460,7 @@ def run_listen(
         _echo(f"error: cannot create {call_dir}: {exc}")
         return 1
     with caffeinate_context():
-        return _session(
+        return run_session(
             run,
             call_dir,
             owner,
@@ -484,4 +471,5 @@ def run_listen(
             output_name or capture_sources.current_output_name,
             start_epoch,
             speakers,
+            live_models,
         )
