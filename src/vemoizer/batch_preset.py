@@ -23,7 +23,7 @@ from vemoizer.diarization import SpeakerCount
 from vemoizer.ingest import IngestError
 from vemoizer.naming_hook import ask_naming_hook
 from vemoizer.output.naming import nfc_stem_and_suffix
-from vemoizer.owner_config import resolve_run_owner
+from vemoizer.owner_config import RunOwner, resolve_run_owner
 from vemoizer.preset_file_transcribe import (
     _transcribe_preset_file as _transcribe_preset_file,
 )
@@ -229,6 +229,7 @@ def run_preset(
     tracker: InterruptTracker | None = None,
     tracks: TrackPaths | None = None,
     me: str | None = None,
+    owner: RunOwner | None = None,
 ) -> int:
     """Run the *meeting* or *memo* preset over *files*.
 
@@ -238,8 +239,9 @@ def run_preset(
 
     ``tracks`` / ``me`` (issue #171): the two-track call's stems and the
     ``--me`` owner name. A tracks request that is not one meeting recording
-    exits 2 before any decode; the owner name is resolved (and, on the first
-    interactive run, asked for and saved) before the glossary is composed.
+    exits 2 before any decode; the owner is resolved from ``--me`` (and, on
+    the first interactive run, asked for and saved) before the glossary is
+    composed. A caller that already resolved it (``listen``) passes *owner*.
 
     Composes the layered glossary, resolves the preset options, then runs
     the plain per-file loop or, for meeting with 2+ files, the M3
@@ -257,19 +259,19 @@ def run_preset(
     if command not in ("meeting", "memo"):
         typer.echo(f"error: unknown preset {command!r}", err=True)
         return 2
-    owner: str | None = None
     if tracks is not None:
         error = tracks_error(command, files, speakers)
         if error is not None:
             typer.echo(f"error: {error}", err=True)
             return 2
-        interactive = not yes and (tty_isatty or sys.stdin.isatty)()
-        owner = resolve_run_owner(
-            me,
-            prompt=interactive,
-            input_fn=input_fn or input,
-            echo=lambda line: typer.echo(line, err=True),
-        )
+        if owner is None:
+            interactive = not yes and (tty_isatty or sys.stdin.isatty)()
+            owner = resolve_run_owner(
+                me,
+                prompt=interactive,
+                input_fn=input_fn or input,
+                echo=lambda line: typer.echo(line, err=True),
+            )
 
     # Layered glossary: load_layers (I/O) → merge (pure) — skipped when
     # --glossary explicitly replaces both layers entirely (no merging).
@@ -304,7 +306,8 @@ def run_preset(
             "language": language,
             "preprocess": preprocess,
             "tracks": tracks,
-            "owner": owner,
+            "owner": owner.label if owner is not None else None,
+            "owner_named": owner.named if owner is not None else False,
         },
     )
 

@@ -144,6 +144,10 @@ def run_preset_plain_loop(
                     command=command,
                     glossary_files=gfiles,
                     source_paths=[file],
+                    # Issue #202: only a named owner is seeded; the fallback
+                    # label stays unnamed so naming still asks for it.
+                    owner=options.owner if options.owner_named else None,
+                    owner_track=options.tracks.me if options.tracks else None,
                 )
                 # M6 (issue #75): stash the report-only glossary
                 # provenance before the seam writes. Source = the real

@@ -28,7 +28,7 @@ from vemoizer.caffeinate import caffeinate_context
 from vemoizer.capture import SilenceWatchdog, SkewLogger, TrackWriter, skew_message
 from vemoizer.cli_support import parse_speakers
 from vemoizer.listen_capture import Problem, TrackState, preflight, pump
-from vemoizer.owner_config import resolve_run_owner
+from vemoizer.owner_config import RunOwner, resolve_run_owner
 from vemoizer.preset_cli import preset_interrupt_exit
 from vemoizer.preset_interrupt import InterruptTracker, set_interrupt_stage
 from vemoizer.presets import LANGUAGE_VALUES
@@ -270,7 +270,7 @@ def _mix(
 def _decode(
     run: ListenRun,
     call_dir: Path,
-    owner: str,
+    owner: RunOwner,
     mix: Path,
     speakers: Any,
     tracker: InterruptTracker,
@@ -296,7 +296,7 @@ def _decode(
             display=display,
             tracker=tracker,
             tracks=tracks,
-            me=owner,
+            owner=owner,
         )
     except KeyboardInterrupt:
         preset_interrupt_exit(tracker, display, kept=call_dir)
@@ -311,7 +311,7 @@ def _decode(
 def _session(
     run: ListenRun,
     call_dir: Path,
-    owner: str,
+    owner: RunOwner,
     tracker: InterruptTracker,
     open_sources: Hardware,
     clock: Callable[[], float],

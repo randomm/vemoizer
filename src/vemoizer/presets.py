@@ -97,6 +97,9 @@ class RunOptions:
     # owner's label for the mic track. ``None`` keeps the single-mix path.
     tracks: TrackPaths | None = None
     owner: str | None = None
+    # True only when the owner was really named (issue #202): the fallback
+    # label is not recorded as an already-named speaker in the sidecar.
+    owner_named: bool = False
 
     @classmethod
     def expert_transcribe(
@@ -308,6 +311,7 @@ def resolve_options(
         base,
         tracks=tracks if isinstance(tracks, TrackPaths) else None,
         owner=owner if isinstance(owner, str) else None,
+        owner_named=overrides.get("owner_named") is True,
         profile=str(_opt("profile", base.profile)),
         diarize=bool(_opt("diarize", base.diarize)),
         repair=bool(_opt("repair", base.repair)),
