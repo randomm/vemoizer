@@ -25,11 +25,17 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+import huggingface_hub
 import numpy as np
 import pytest
 from _cli_helpers import ffmpeg_has_loudnorm
 
 from vemoizer import loudnorm as ln
+from vemoizer import whisper_transcriber
+
+# Captured before the autouse fixture swaps the class, so one test can run
+# the real transcriber and prove the download guard fires on that path.
+_REAL_WHISPER = whisper_transcriber.WhisperTranscriber
 
 # HAS_FFMPEG is NOT redundant: several group-path tests (no-flag variants)
 # need real ffmpeg to generate the .m4a fixtures but do not assert on the
@@ -131,6 +137,46 @@ def _clean_cache():
     ln._MEASURE_CACHE.clear()
 
 
+class _NoWeightsWhisper:
+    """Stand-in for the boundary ``WhisperTranscriber``.
+
+    ``run_batch`` / ``run_preset`` pass no ``transcribe_fn`` on these paths,
+    so ``decode_boundaries`` builds the real transcriber, whose first decode
+    loads whisper weights (a HuggingFace download). Empty text is what that
+    decode yields when the weights are unavailable, so the edge texts stay
+    as they were under ``HF_HUB_OFFLINE=1``; these tests assert on ffmpeg
+    argv, not on transcript text.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    def transcribe(self, audio: np.ndarray) -> dict[str, object]:
+        return {"text": "", "segments": []}
+
+
+def _refuse_download(*args: object, **kwargs: object) -> None:
+    # pytest.fail raises Failed (a BaseException). The pipeline's fail-open
+    # handlers catch Exception only, so the abort escapes them and fails the
+    # test instead of degrading to an empty transcript.
+    pytest.fail(
+        "test_preprocess_group_paths: a HuggingFace download was attempted; "
+        "this module must not touch the network",
+        pytrace=False,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _no_weights_or_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep this module off the network: no real whisper weights, and any
+    ``huggingface_hub`` download fails immediately (issue #189)."""
+    from vemoizer import whisper_transcriber
+
+    monkeypatch.setattr(whisper_transcriber, "WhisperTranscriber", _NoWeightsWhisper)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", _refuse_download)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _refuse_download)
+
+
 def _build_fake_ingest(recs: dict[str, list[list[str]]]):
     """A fake ``ingest_audio`` that records the loudnorm pass-2 argv
     (using the REAL ``_decode_args`` builder and the REAL cached
@@ -202,6 +248,24 @@ def _assert_none_filtered(recs: dict[str, list[list[str]]], label: str) -> None:
     assert not recs.get("PASS1"), (
         f"{label}: unexpected pass-1 measurement (flag not set)"
     )
+
+
+def test_boundary_decode_download_fails_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A boundary decode that reaches the REAL ``WhisperTranscriber`` and its
+    model download must abort the test. ``decode_boundaries`` fail-opens
+    per-edge errors to ``""``, so the guard must not be a plain exception
+    there, or a future download would pass silently (issue #189)."""
+    if not HAS_FFMPEG:
+        pytest.skip("ffmpeg not available")
+
+    from vemoizer import grouping_decode
+
+    monkeypatch.setattr(whisper_transcriber, "WhisperTranscriber", _REAL_WHISPER)
+    files = _make_group_files(tmp_path)
+    with pytest.raises(pytest.fail.Exception, match="must not touch the network"):
+        grouping_decode.decode_boundaries(files)
 
 
 def test_run_batch_group_path_loudnorm(
