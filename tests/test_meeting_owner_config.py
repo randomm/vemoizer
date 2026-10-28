@@ -18,7 +18,7 @@ from _cli_helpers import isolate_home, touch_files
 import vemoizer.pipeline as pipeline_module
 from vemoizer.batch_preset import run_preset
 from vemoizer.llm_config import _validate_sections
-from vemoizer.owner_config import OWNER_PROMPT, resolve_run_owner, save_owner
+from vemoizer.owner_config import OWNER_PROMPT, RunOwner, resolve_run_owner, save_owner
 from vemoizer.tracks import TrackPaths
 
 
@@ -69,7 +69,7 @@ def test_project_config_without_owner_falls_through_to_home(
 
     name = resolve_run_owner(None, prompt=False, input_fn=_no_prompt, echo=print)
 
-    assert name == "Janni"
+    assert name == RunOwner("Janni", named=True)
 
 
 def test_owner_only_project_file_beats_home_owner(
@@ -84,7 +84,7 @@ def test_owner_only_project_file_beats_home_owner(
 
     name = resolve_run_owner(None, prompt=False, input_fn=_no_prompt, echo=print)
 
-    assert name == "ProjectName"
+    assert name == RunOwner("ProjectName", named=True)
 
 
 def test_preferences_only_project_file_is_still_the_project_layer(
@@ -114,7 +114,7 @@ def test_flag_beats_project_and_home(
 
     name = resolve_run_owner("Flag", prompt=False, input_fn=_no_prompt, echo=print)
 
-    assert name == "Flag"
+    assert name == RunOwner("Flag", named=True)
 
 
 def test_first_interactive_run_prompts_once_and_saves(
@@ -126,7 +126,7 @@ def test_first_interactive_run_prompts_once_and_saves(
     first = resolve_run_owner(None, prompt=True, input_fn=asked, echo=echoed.append)
     second = resolve_run_owner(None, prompt=True, input_fn=asked, echo=echoed.append)
 
-    assert first == second == "Janni"
+    assert first == second == RunOwner("Janni", named=True)
     assert asked.prompts == [OWNER_PROMPT]
     saved = tomllib.loads(_home_config(tmp_path).read_text(encoding="utf-8"))
     assert saved["meeting"]["owner"] == "Janni"
@@ -139,7 +139,7 @@ def test_blank_answer_uses_fallback_and_saves_nothing(
 
     name = resolve_run_owner(None, prompt=True, input_fn=asked, echo=print)
 
-    assert name == "Minä"
+    assert name == RunOwner("Minä", named=False)
     assert not _home_config(tmp_path).exists()
 
 
@@ -152,7 +152,7 @@ def test_non_interactive_never_prompts_and_prints_a_hint(
         None, prompt=False, input_fn=_no_prompt, echo=echoed.append
     )
 
-    assert name == "Minä"
+    assert name == RunOwner("Minä", named=False)
     assert not _home_config(tmp_path).exists()
     assert len(echoed) == 1
     assert "--me" in echoed[0] and "owner" in echoed[0]
@@ -165,7 +165,7 @@ def test_english_config_falls_back_to_me(
 
     name = resolve_run_owner(None, prompt=False, input_fn=_no_prompt, echo=print)
 
-    assert name == "Me"
+    assert name == RunOwner("Me", named=False)
 
 
 def test_owner_only_home_file_is_not_an_llm_config(home: Path, tmp_path: Path) -> None:

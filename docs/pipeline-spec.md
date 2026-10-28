@@ -381,7 +381,11 @@ them (present-only, so old JSON without the keys and the expert
   cumulative decoded-PCM start offset. `duration_s` is the part's
   measured decoded-PCM duration, omitted when the measurement failed
   (fail-open).
-- `options` — `{command, glossary_files, glossary_sha256}`.
+- `options` — `{command, glossary_files, glossary_sha256}`; a two-track
+  call whose owner was named (`--me`, config, or the first-run answer) adds
+  `owner` (the owner's label) and `owner_track` (the mic stem path, used
+  for the owner's voice clip in `names`), issue #202. The language fallback
+  label is not recorded, so `names` still asks for it.
   `glossary_files` lists the exact glossary files the run used (project
   layer first, then home; or the single explicit `--glossary` file); `[]`
   when the run had none. `glossary_sha256` is the sha256 over the run's
@@ -609,6 +613,12 @@ speakers. The prompt is skipped entirely — no output, no prompt — for
 stdout) runs, and when no written sidecar is eligible. The hook never
 changes the run's exit code, and a per-sidecar naming failure only warns
 (`warning: naming failed for <name>: <ExcClassName>`) before continuing.
+
+The naming flow (`names`, issue #202): a two-track call's owner is
+already named, so it gets a quote and a clip (from the mic stem) but is
+never prompted or offered for `people`. An owner that fell back to the
+language label is not named and is prompted like any other speaker. Type-ahead is flushed before
+each prompt, and the sidecar's own `<stem>.md` is rewritten in place.
 
 | Flag | Default | Meaning |
 |---|---|---|

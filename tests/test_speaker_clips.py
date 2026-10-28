@@ -99,8 +99,18 @@ class TestTalkShare:
 
 
 class TestSelectClipsExclusions:
-    def test_suspect_excluded(self):
-        assert select_clips([_para(0, 10, suspect="garble")], []) == {}
+    def test_suspect_only_label_still_gets_a_clip(self):
+        # Issue #202: every label with >= 2 s of speech gets a quote and a clip.
+        clips = select_clips([_para(0, 10, suspect="garble")], [])
+        assert len(clips["A"]) == 1
+
+    def test_clean_turn_preferred_over_suspect(self):
+        paras = [
+            _para(0, 10, text="epäselvä osuus tässä", suspect="garble"),
+            _para(20, 30, text="selkeä puhe tässä lauseessa"),
+        ]
+        (clip,) = select_clips(paras, [])["A"]
+        assert clip.quote == "selkeä puhe tässä lauseessa"
 
     def test_unlabelled_excluded(self):
         assert select_clips([_para(0, 10, speaker=None)], []) == {}
@@ -108,11 +118,22 @@ class TestSelectClipsExclusions:
     def test_short_turn_excluded(self):
         assert select_clips([_para(0, 1.9)], []) == {}
 
-    def test_backchannel_single_word_excluded(self):
-        assert select_clips([_para(0, 5, text="joo")], []) == {}
+    def test_backchannel_only_label_still_gets_a_clip(self):
+        assert len(select_clips([_para(0, 5, text="joo")], [])["A"]) == 1
 
-    def test_backchannel_phrase_excluded(self):
-        assert select_clips([_para(0, 5, text="hyvä kysymys")], []) == {}
+    def test_backchannel_phrase_only_label_still_gets_a_clip(self):
+        assert len(select_clips([_para(0, 5, text="hyvä kysymys")], [])["A"]) == 1
+
+    def test_clean_turn_preferred_over_backchannel(self):
+        paras = [
+            _para(0, 5, text="joo"),
+            _para(10, 20, text="tämä on oikea puheenvuoro tässä"),
+        ]
+        (clip,) = select_clips(paras, [])["A"]
+        assert clip.quote == "tämä on oikea puheenvuoro tässä"
+
+    def test_textless_turn_excluded(self):
+        assert select_clips([_para(0, 10, text="")], []) == {}
 
     def test_backchannel_word_inside_longer_turn_not_excluded(self):
         paras = [_para(0, 10, text="joo mutta tämä on pidempi lause jatkossa")]

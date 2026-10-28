@@ -15,6 +15,7 @@ import os
 import re
 import tomllib
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -106,14 +107,28 @@ def _save_or_warn(name: str, echo: Callable[[str], None]) -> None:
         echo(f"warning: could not save the owner name to {path}: {e}")
 
 
+@dataclass(frozen=True)
+class RunOwner:
+    """The owner label for one two-track run.
+
+    ``label`` labels the owner's speech in the transcript. ``named`` is true
+    only when the user gave the name (flag, config, or the first-run answer);
+    the language fallback ("Minä"/"Me") is a label, not a name, so naming
+    still asks for it.
+    """
+
+    label: str
+    named: bool
+
+
 def resolve_run_owner(
     flag: str | None,
     *,
     prompt: bool,
     input_fn: Callable[[str], str],
     echo: Callable[[str], None],
-) -> str:
-    """The owner label for one two-track run.
+) -> RunOwner:
+    """The owner for one two-track run.
 
     *prompt* is true only for an interactive run (no ``--yes``, a TTY); it
     gates the one question, so ``input_fn`` is never called otherwise.
@@ -121,13 +136,13 @@ def resolve_run_owner(
     project_raw, home_raw = load_owner_inputs()
     named = configured_owner(flag, project_raw, home_raw)
     if named is not None:
-        return named
+        return RunOwner(named, named=True)
     fallback = fallback_owner(_parse_section_language(project_raw or home_raw))
     if not prompt:
         echo(_HINT.format(name=fallback))
-        return fallback
+        return RunOwner(fallback, named=False)
     answer = _ask(input_fn)
     if not answer:
-        return fallback
+        return RunOwner(fallback, named=False)
     _save_or_warn(answer, echo)
-    return answer
+    return RunOwner(answer, named=True)

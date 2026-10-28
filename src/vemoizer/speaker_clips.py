@@ -157,6 +157,42 @@ def _third_for(start: float, audio_end: float) -> int:
     return min(int(start // third), 2)
 
 
+def _turn_windows(
+    paragraphs: list[dict[str, Any]],
+    audio_end: float,
+    max_s: float,
+    *,
+    clean_only: bool,
+) -> dict[str, list[tuple[float, float]]]:
+    """Candidate clip windows per label, from labelled turns of >= 2 s with text.
+
+    ``clean_only`` also drops suspect turns and backchannels. The window is
+    the middle ``min(max_s, D)`` seconds centered on the turn midpoint,
+    clamped to ``[0, audio_end]``.
+    """
+    windows: dict[str, list[tuple[float, float]]] = {}
+    for p in paragraphs:
+        label = _labelled(p)
+        if label is None:
+            continue
+        text = str(p.get("text", ""))
+        if not text or (clean_only and (p.get("suspect") or _is_backchannel(text))):
+            continue
+        start, end = float(p.get("start", 0.0)), float(p.get("end", 0.0))
+        duration = end - start
+        if duration < MIN_TURN_S:
+            continue
+        length = min(max_s, duration)
+        mid = (start + end) / 2.0
+        w_start = mid - length / 2.0
+        w_end = w_start + length
+        if audio_end > 0:
+            w_end = min(w_end, audio_end)
+            w_start = max(0.0, max(w_start, w_end - length))
+        windows.setdefault(label, []).append((w_start, w_end))
+    return windows
+
+
 def select_clips(
     paragraphs: list[dict[str, Any]],
     segments: list[dict[str, Any]] | None = None,
@@ -168,8 +204,10 @@ def select_clips(
 ) -> dict[str, list[ClipWindow]]:
     """Pick up to *per_speaker* short windows per speaker label.
 
-    Rules (see module docstring): candidates are labelled, non-suspect,
-    non-backchannel turns of one speaker lasting >= 2 s; the window is the
+    Rules (see module docstring): candidates are labelled turns of one
+    speaker lasting >= 2 s with text, preferring the non-suspect,
+    non-backchannel ones (a label with only such turns still gets clips, so
+    every label with speech gets a quote and a clip); the window is the
     middle ``min(max_s, D)`` seconds of the turn (so a turn of 3-5 s yields
     a window the full length of the turn, longer turns 5 s) centered on the
     turn midpoint and clamped to the audio duration. Picks for one speaker
@@ -189,35 +227,17 @@ def select_clips(
     sorted by ``start_s``; a speaker with fewer clean turns gets fewer
     clips, without error.
     """
-    candidates: dict[str, list[tuple[float, float]]] = {}
     audio_end = total_duration
     if audio_end is None:
         audio_end = max(
             (float(p.get("end", 0.0)) for p in paragraphs if "end" in p),
             default=0.0,
         )
-
-    for p in paragraphs:
-        label = _labelled(p)
-        if label is None or p.get("suspect"):
-            continue
-        text = str(p.get("text", ""))
-        if not text or _is_backchannel(text):
-            continue
-        start, end = float(p.get("start", 0.0)), float(p.get("end", 0.0))
-        duration = end - start
-        if duration < MIN_TURN_S:
-            continue
-        # Window: middle min(max_s, D) s centered on the turn midpoint,
-        # clamped to [0, audio_end].
-        length = min(max_s, duration)
-        mid = (start + end) / 2.0
-        w_start = mid - length / 2.0
-        w_end = w_start + length
-        if audio_end > 0:
-            w_end = min(w_end, audio_end)
-            w_start = max(0.0, max(w_start, w_end - length))
-        candidates.setdefault(label, []).append((w_start, w_end))
+    # A label with a clean turn uses only clean turns; a label whose turns
+    # are all suspect or backchannels still gets its longest turn (issue #202).
+    clean = _turn_windows(paragraphs, audio_end, max_s, clean_only=True)
+    any_turn = _turn_windows(paragraphs, audio_end, max_s, clean_only=False)
+    candidates = {label: clean.get(label) or turns for label, turns in any_turn.items()}
 
     result: dict[str, list[ClipWindow]] = {}
     for label, turns in candidates.items():

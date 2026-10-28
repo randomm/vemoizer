@@ -26,6 +26,7 @@ from vemoizer.capture import Chunk, SkewLogger
 from vemoizer.cli import app
 from vemoizer.listen import ListenRun, run_listen
 from vemoizer.listen_capture import TrackState
+from vemoizer.owner_config import RunOwner
 from vemoizer.preset_interrupt import begin_interrupt_tracking
 from vemoizer.tracks import fallback_owner
 
@@ -147,7 +148,7 @@ def test_run_hands_mix_meeting_tracks_and_flags_to_the_preset(
     assert call["command"] == "meeting"
     assert call["tracks"].me == Path("calls") / call_dir.name / "me.flac"
     assert call["tracks"].them == Path("calls") / call_dir.name / "them.flac"
-    assert call["me"] == "Janni"
+    assert call["owner"] == RunOwner("Janni", named=True)
     assert call["language"] == "fi"
     assert call["speakers"] == 3
     assert call["yes"] is False
@@ -184,7 +185,7 @@ def test_owner_is_asked_before_recording_and_saved_home(
     code = _run(FakeClock(), hardware, isatty=True, input_fn=ask)
     assert code == 0
     assert events == ["ask", "open"]
-    assert preset_calls[0]["me"] == "Janni"
+    assert preset_calls[0]["owner"] == RunOwner("Janni", named=True)
     saved = (home / "home" / ".vemoizer" / "config.toml").read_text(encoding="utf-8")
     assert 'owner = "Janni"' in saved
 
@@ -194,7 +195,8 @@ def test_non_interactive_run_never_asks_and_uses_the_fallback(
 ) -> None:
     code = _run(FakeClock(), _healthy_hw(), yes=True)
     assert code == 0
-    assert preset_calls[0]["me"] == fallback_owner("fi")  # no config: Finnish default
+    # No config: the Finnish default label, which is not a name (issue #202).
+    assert preset_calls[0]["owner"] == RunOwner(fallback_owner("fi"), named=False)
     assert "--me" in capsys.readouterr().err
 
 

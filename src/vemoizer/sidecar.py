@@ -66,6 +66,8 @@ def build_sidecar(
     command: str,
     glossary_files: list[str] | None,
     source_paths: list[Path] | None = None,
+    owner: str | None = None,
+    owner_track: Path | None = None,
 ) -> dict[str, Any]:
     """Build the four M5a sidecar keys for a meeting/memo *result*.
 
@@ -98,7 +100,9 @@ def build_sidecar(
       ``None``) otherwise, so the flag-less sidecar stays byte-identical
       to before.
     * ``speaker_names``: ``{}`` by default (``render``'s ``--name`` persists
-      into it later). Never a ``clips`` key.
+      into it later). Never a ``clips`` key. A two-track run passes *owner*
+      (seeded as ``{owner: owner}``, and recorded in ``options``) and
+      *owner_track* (the mic stem, recorded in ``options.owner_track``).
 
     ``result["_source_durations"]`` (the per-part PCM durations the seam
     stashed) is consumed and removed so it never leaks into the output.
@@ -131,6 +135,13 @@ def build_sidecar(
         result.pop("preprocess", None)
 
     result.setdefault("speaker_names", {})
+    # Issue #202: a two-track call's owner is already named, so naming never
+    # prompts for it; the owner's mic stem is kept for its voice clip.
+    if owner:
+        result["options"]["owner"] = owner
+        result["speaker_names"].setdefault(owner, owner)
+        if owner_track is not None:
+            result["options"]["owner_track"] = str(owner_track)
 
     # M6 (issue #107): drop an explicit None duration_s so a failed
     # duration measurement (ffmpeg fail-open) leaves no duration_s key on

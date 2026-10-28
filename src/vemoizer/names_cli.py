@@ -18,20 +18,24 @@ Exit codes:
 from __future__ import annotations
 
 import sys
+import termios
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import typer
 
-from vemoizer.output.naming import collision_free_path
 from vemoizer.people_config import (
     find_people_config_path,
     read_people_list,
     write_people_list,
 )
 from vemoizer.render import render_markdown
-from vemoizer.render_cli import _persist_speaker_names, _read_sidecar
+from vemoizer.render_cli import (
+    _atomic_write_text,
+    _persist_speaker_names,
+    _read_sidecar,
+)
 from vemoizer.speaker_clips import (
     ClipWindow,
     clip_session,
@@ -54,6 +58,19 @@ def _stdout_isatty() -> bool:
     without touching ``sys.stdout``.
     """
     return sys.stdout.isatty()
+
+
+def _discard_pending_input() -> None:
+    """Drop keystrokes typed while clips were cut or played (issue #202).
+
+    Type-ahead typed during the wait was read as the answer to the next name
+    prompt. Flushing the terminal input queue right before each prompt stops
+    that. A stdin with no terminal queue has nothing to flush.
+    """
+    try:
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except (OSError, ValueError, termios.error):
+        return
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +105,21 @@ def _resolve_source_entry(
     if not resolved.is_file():
         return None
     return {**entry, "path": str(resolved)}
+
+
+def _owner_track_source(
+    options: Any, owner: str | None, sidecar_dir: Path, cwd: Path
+) -> list[dict[str, Any]]:
+    """The owner's mic stem as a one-entry clip source, or ``[]``.
+
+    Recorded in ``options.owner_track`` by a two-track run (issue #202); the
+    stem starts with the mix, so its timeline needs no offset.
+    """
+    track = options.get("owner_track") if isinstance(options, dict) else None
+    if owner is None or not isinstance(track, str):
+        return []
+    resolved = _resolve_source_entry({"path": track}, sidecar_dir, cwd)
+    return [resolved] if resolved is not None else []
 
 
 def _prompt_add_to_people(
@@ -171,10 +203,14 @@ def run_names(
     input_fn: Callable[[str], str] | None = None,
     tty_isatty: Callable[[], bool] | None = None,
     config_path: Path | _NotFound = _NOT_FOUND,
+    discard_input: Callable[[], None] | None = None,
 ) -> int:
     """Interactive speaker-naming loop.
 
-    Returns 0 on success, 1 on sidecar error, 2 on non-TTY.
+    Returns 0 on success, 1 on sidecar error, 2 on non-TTY. A two-track
+    call's owner (``options.owner``) is already named: it gets its quote and
+    clip, but is never prompted for. ``discard_input`` runs before each
+    prompt (default: flush the terminal input queue).
     """
     # --- Non-TTY guard (FIRST, before any other logic) ---
     isatty = tty_isatty if tty_isatty is not None else sys.stdin.isatty
@@ -231,13 +267,22 @@ def run_names(
     # separate ``has_clips`` flag.
     degraded = not resolved_source
 
+    # The owner's voice comes from the mic stem (issue #202): the mix also
+    # carries whatever the far side played back over the owner's speech.
+    options = data.get("options")
+    owner = options.get("owner") if isinstance(options, dict) else None
+    owner = owner if isinstance(owner, str) and owner else None
+    owner_source = _owner_track_source(options, owner, sidecar_dir, cwd)
+
     # --- Prompt loop (inside clip_session for temp dir cleanup) ---
     new_names: dict[str, str] = {}
     prompt_aborted = False
     prompt_fn = input_fn if input_fn is not None else input
+    discard = discard_input if discard_input is not None else _discard_pending_input
 
     def _ask(prompt_text: str) -> str | _NotFound:
-        """Call the input function; treat EOFError as an abort sentinel."""
+        """Discard type-ahead, then call the input function; EOFError aborts."""
+        discard()
         try:
             return prompt_fn(prompt_text)
         except EOFError:
@@ -249,6 +294,12 @@ def run_names(
         restore_completer = _install_completer(people_list)
         known = [p.lower() for p in people_list]
         try:
+            if (
+                not no_play
+                and (resolved_source or owner_source)
+                and any(clips.get(label) for label in shares)
+            ):
+                typer.echo("Preparing audio clips…")
             for label in sorted(shares, key=lambda x: shares[x], reverse=True):
                 share = shares[label]
                 label_clips: list[ClipWindow] = clips.get(label, [])
@@ -258,14 +309,21 @@ def run_names(
                     typer.echo(f'  "{w.quote}"')
 
                 # Play clips (skipped under --no-play; quotes only then)
-                if not degraded and not no_play and label_clips:
-                    clip_map = extract_clips(resolved_source, label_clips[:3], tmp_dir)
+                is_owner = label == owner
+                source = owner_source if is_owner and owner_source else resolved_source
+                if source and not no_play and label_clips:
+                    clip_map = extract_clips(source, label_clips[:3], tmp_dir)
                     for w in label_clips[:3]:
                         path = clip_map.get(w)
                         if path is not None and path.is_file():
                             play(path)
                         else:
                             degraded = True
+
+                # The owner of a two-track call is already named: no prompt,
+                # and no offer to add them to the people list.
+                if is_owner:
+                    continue
 
                 # Prompt for name. A label with a stored name shows it as a
                 # bracketed default; empty keeps it, non-empty replaces.
@@ -317,11 +375,11 @@ def run_names(
             typer.echo(f"error: could not persist speaker names: {e}", err=True)
             return 1
 
-        # --- Re-render Markdown ---
+        # --- Re-render Markdown in place (issue #202: one .md per sidecar) ---
         markdown = render_markdown(data, corrections={}, speaker_names=new_names)
-        md_path = collision_free_path(sidecar_path.parent, sidecar_path.stem, ".md")
+        md_path = sidecar_path.with_suffix(".md")
         try:
-            md_path.write_text(markdown, encoding="utf-8")
+            _atomic_write_text(md_path, markdown)
         except OSError as e:
             typer.echo(f"error: could not write {md_path}: {e}", err=True)
             return 1
