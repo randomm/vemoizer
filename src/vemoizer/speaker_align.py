@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .diarization import speaker_for_span
+
 #: Timestamp jitter tolerance: whisper word times wobble ~0.1-0.2s.
 BOUNDARY_TOLERANCE_S = 0.2
 
@@ -108,6 +110,74 @@ def assign_word_speakers(
     return _merge_short_runs(words, labels, turns, trusted)
 
 
+def turns_for_track(
+    track: str | None,
+    turns: list[Turn],
+    trusted: frozenset[str],
+) -> list[Turn]:
+    """Diarization turns eligible for labelling one track's words.
+
+    In a two-track call (issue #207) the owner's mic (``me``) words may
+    only take a trusted (owner) label and the remote (``them``) words only
+    a non-trusted one, so an overlapping turn of the other side can never
+    steal a word or a segment. No track key (single-file runs) and an
+    empty *trusted* set (no owner configured) keep the all-turns behaviour
+    (fail-open).
+    """
+    if track not in ("me", "them") or not trusted:
+        return turns
+    want_trusted = track == "me"
+    return [t for t in turns if (t[2] in trusted) == want_trusted]
+
+
+def assign_track_labels(
+    words: list[dict[str, Any]],
+    turns: list[Turn],
+    trusted: frozenset[str] = frozenset(),
+) -> list[str | None]:
+    """:func:`assign_word_speakers` restricted to each word's own track.
+
+    Words carry the ``track`` key :func:`merge_track_results` tagged them
+    with (``me`` for the mic stem, ``them`` for the system stem); each
+    group is labelled only from the turns that can legitimately own it
+    (:func:`turns_for_track`) and the labels are recombined in the
+    original word order. Words without a track key (single-file runs) see
+    every turn, so the output matches :func:`assign_word_speakers`.
+    """
+    labels: list[str | None] = [None] * len(words)
+    groups: dict[str | None, list[int]] = {}
+    for i, word in enumerate(words):
+        groups.setdefault(word.get("track"), []).append(i)
+    for track, indexes in groups.items():
+        group_words = [words[i] for i in indexes]
+        group_turns = turns_for_track(track, turns, trusted)
+        group_labels = assign_word_speakers(group_words, group_turns, trusted=trusted)
+        for i, label in zip(indexes, group_labels, strict=True):
+            labels[i] = label
+    return labels
+
+
+def label_segments_by_track(
+    segments: list[dict[str, Any]],
+    turns: list[Turn],
+    trusted: frozenset[str] = frozenset(),
+) -> None:
+    """Attach the best-overlap speaker to every segment from its own track.
+
+    Mutates *segments*; see :func:`turns_for_track` for the per-track
+    restriction. A segment labelled by none of its track's turns keeps the
+    speaker a previous stage set (fail-open, as in ``speaker_for_span``).
+    """
+    for segment in segments:
+        speaker = speaker_for_span(
+            float(segment["start"]),
+            float(segment["end"]),
+            turns_for_track(segment.get("track"), turns, trusted),
+        )
+        if speaker is not None:
+            segment["speaker"] = speaker
+
+
 def _ends_question(word: dict[str, Any]) -> bool:
     return str(word.get("word", "")).rstrip().endswith("?")
 
@@ -188,10 +258,16 @@ def split_segments_at_speaker_changes(
     out: list[dict[str, Any]] = []
     for seg in segments:
         s_start, s_end = float(seg["start"]), float(seg["end"])
+        # Track matters as much as time: on a two-track call the owner's
+        # and the remote's segments overlap, and time alone pulls the
+        # other track's words in (issue #207). None == None keeps
+        # single-file behaviour byte-identical.
         members = [
             (w, label)
             for w, label in zip(words, labels, strict=False)
-            if s_start <= float(w.get("start", 0.0)) < s_end and label is not None
+            if s_start <= float(w.get("start", 0.0)) < s_end
+            and label is not None
+            and w.get("track") == seg.get("track")
         ]
         if not members:
             out.append(seg)

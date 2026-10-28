@@ -160,13 +160,13 @@ def test_assemble_passes_trusted_labels_to_word_attribution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: dict[str, object] = {}
-    real_assign = pipeline.assign_word_speakers
+    real_assign = pipeline.assign_track_labels
 
     def spy(words, turns, **kwargs):
         seen.update(kwargs)
         return real_assign(words, turns, **kwargs)
 
-    monkeypatch.setattr(pipeline, "assign_word_speakers", spy)
+    monkeypatch.setattr(pipeline, "assign_track_labels", spy)
     result_a = {"text": TEXT, "words": WORDS, "segments": SEGMENTS}
     turns = [(0.0, 1.0, "Janni"), (2.5, 3.5, REMOTE_LABEL)]
 
