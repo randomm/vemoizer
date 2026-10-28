@@ -124,7 +124,8 @@ meeting. Stop with Ctrl-C; recordings stay in `calls/<timestamp>/`. Needs the
 `listen` extra (`uv sync --extra listen`, or `pip install 'vemoizer[listen]'`)
 and two macOS grants for the terminal that runs vemoizer: Privacy & Security >
 Microphone, and Screen & System Audio Recording > System Audio Recording Only.
-Restart the terminal after granting, and use headphones.
+Restart the terminal after granting, and use headphones. If a recording is
+silent, `vemoizer doctor --listen` checks both sources (it plays a short tone).
 
 ## Accuracy is measured, not asserted
 

@@ -20,6 +20,22 @@ sends transcript text — not audio — to the OpenAI-compatible endpoint
 configured by the user. No LLM is configured by default; every LLM call
 fails open when the config, the key, or the endpoint is unavailable.
 
+## Call capture (`vemoizer listen`)
+
+`listen` records other people's voices: the Mac's system audio (every
+call participant, through the speakers) and the owner's microphone.
+
+- **Consent is yours to get.** A reminder prints before any source starts;
+  tell everyone on the call that it is being recorded first.
+- **Audio is kept by default** in `calls/<YYYY-MM-DD_HH-MM-SS>/` under the
+  current directory: `me.flac` (mic), `them.flac` (system audio), and
+  `call.flac` (the mix). Only the transcript pair is listed as output.
+- **Delete a call** by removing its folder, for example
+  `rm -r calls/<YYYY-MM-DD_HH-MM-SS>/`. Nothing else copies the audio.
+- **Capture stays local.** The audio never leaves the machine; ASR runs
+  on-device. Only transcript text may reach the configured LLM, as above.
+- `vemoizer doctor --listen` plays a short system tone to test capture.
+
 ## Secrets
 
 - The config file names the environment variable that holds the LLM API

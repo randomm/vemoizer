@@ -78,11 +78,19 @@ def doctor(
             "measurement pass (about a minute per hour of audio)."
         ),
     ),
+    listen: bool = typer.Option(  # noqa: B008
+        False,
+        "--listen",
+        help=(
+            "Also probe live capture: catap, a 2 s mic check, and a system-audio "
+            "check that plays a short tone. May trigger macOS permission prompts."
+        ),
+    ),
 ) -> None:
     """Run local health checks; exit non-zero on any red check."""
     from .doctor_cli import run_doctor_command
 
-    run_doctor_command(preprocess)
+    run_doctor_command(preprocess, listen)
 
 
 @models_app.command("pull")

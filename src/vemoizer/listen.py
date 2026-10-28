@@ -23,9 +23,15 @@ from typing import Any
 
 import typer
 
-from vemoizer import capture_sources
+from vemoizer import capture_sources, speaker_clips
 from vemoizer.caffeinate import caffeinate_context
-from vemoizer.capture import SilenceWatchdog, SkewLogger, TrackWriter, skew_message
+from vemoizer.capture import (
+    Chunk,
+    SilenceWatchdog,
+    SkewLogger,
+    TrackWriter,
+    skew_message,
+)
 from vemoizer.cli_support import parse_speakers
 from vemoizer.listen_capture import Problem, TrackState, preflight, pump
 from vemoizer.owner_config import RunOwner, resolve_run_owner
@@ -58,6 +64,24 @@ _CATAP_HINT = (
 )
 _LABELS = {"mic": "microphone", "tap": "system audio"}
 
+#: The system sound the doctor probe plays while the tap listens (issue #174).
+TONE_PATH = "/System/Library/Sounds/Tink.aiff"
+_MIC_HINT = (
+    "check Privacy & Security > Microphone for Ghostty (or the terminal app "
+    "that runs vemoizer), restart Ghostty, keep the lid open, or pick the "
+    "device with `listen --mic NAME`"
+)
+_TAP_HINT = (
+    "check Privacy & Security > Screen & System Audio Recording > System Audio "
+    "Recording Only for Ghostty (or the terminal app that runs vemoizer), "
+    "restart Ghostty, and check the default output device"
+)
+_NOT_STARTED_HINT = "did not start (no audio within 4 s)"
+_PROBE_CATAP_HINT = (
+    "install the listen extra: run `uv sync --extra listen` or "
+    "`pip install 'vemoizer[listen]'`"
+)
+
 Sleep = Callable[[float], None]
 Hardware = Callable[[str | None], tuple[Any, Any]]
 
@@ -82,6 +106,75 @@ class ListenRun:
 def catap_installed() -> bool:
     """Whether the ``listen`` extra is present (checked without importing it)."""
     return importlib.util.find_spec("catap") is not None
+
+
+@dataclass(frozen=True)
+class ProbeResult:
+    """One ``doctor --listen`` line: ``name``, pass/fail, and the fix hint."""
+
+    name: str
+    ok: bool
+    hint: str = ""
+
+
+class _Discard:
+    """A track writer for the probe: the audio is judged, never kept."""
+
+    def write(self, chunk: Chunk) -> bool:
+        return True
+
+
+def _probe_hint(track: str, kind: str | None) -> str:
+    if kind is None:
+        return ""
+    if kind == "not_started":
+        return _NOT_STARTED_HINT
+    return _MIC_HINT if track == "mic" else _TAP_HINT
+
+
+def probe_capture(
+    *,
+    hardware: Hardware | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Sleep = time.sleep,
+) -> list[ProbeResult]:
+    """Check the catap install and both capture sources; nothing is recorded.
+
+    The mic must not be exact zeros for its first 2 s. The system tap must not
+    be exact zeros while the Tink tone plays through the speaker clip seam,
+    so a revoked Screen & System Audio grant is caught before a call.
+    """
+    if hardware is None and not catap_installed():
+        return [ProbeResult("catap importable", False, _PROBE_CATAP_HINT)]
+    open_sources = hardware or capture_sources._open_real_sources
+    try:
+        mic, tap = open_sources(None)
+    except (OSError, RuntimeError) as exc:
+        return [
+            ProbeResult("catap importable", True),
+            ProbeResult("capture devices", False, str(exc)),
+        ]
+    mic_state, tap_state = TrackState("mic"), TrackState("tap")
+    threads = [pump(mic, _Discard(), mic_state), pump(tap, _Discard(), tap_state)]
+    try:
+        speaker_clips._run_player(["afplay", TONE_PATH])
+        problems = preflight([mic_state, tap_state], clock, sleep, clock())
+    finally:
+        _shutdown([mic, tap], threads)
+    kinds = {p.track: p.kind for p in problems}
+    return [
+        ProbeResult("catap importable", True),
+        ProbeResult(
+            "microphone (2 s exact-zero check)",
+            "mic" not in kinds,
+            _probe_hint("mic", kinds.get("mic")),
+        ),
+        ProbeResult(
+            "system audio (tone + tap, exact-zero check)",
+            "tap" not in kinds,
+            _probe_hint("tap", kinds.get("tap")),
+        ),
+    ]
 
 
 def _run_mix(argv: list[str]) -> None:
