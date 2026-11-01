@@ -347,6 +347,16 @@ def test_probe_mic_that_never_starts_is_reported_not_as_permission() -> None:
     assert "Privacy" not in mic.hint
 
 
+def test_probe_tap_that_never_starts_names_the_ten_second_window() -> None:
+    """issue #205: the cold-start tap gets 10 s, and the probe says so."""
+    clock = FakeClock()
+    hardware = fake_hardware([_chunk(tone(2.5))], [])
+    results = listen.probe_capture(hardware=hardware, clock=clock, sleep=clock.sleep)
+    tap = next(r for r in results if r.name.startswith("system audio"))
+    assert tap.ok is False
+    assert "no audio within 10 s" in tap.hint
+
+
 def test_cli_doctor_listen_flag_runs_the_probe(monkeypatch, capture_hw) -> None:
     capture_hw([_chunk(tone(2.5))], [_chunk(tone(2.5))])
     _mock_env(monkeypatch)

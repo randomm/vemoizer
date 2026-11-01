@@ -9,7 +9,7 @@ so an interrupted run keeps whatever was captured.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Literal, TextIO
 
@@ -38,9 +38,22 @@ def _clock(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def _stamp(seconds: float) -> str:
+    """Terminal stamp: ``mm:ss``, switching to ``hh:mm:ss`` once past an hour."""
+    whole = int(seconds)
+    if whole >= 3600:
+        return _clock(whole)
+    return f"{whole // 60:02d}:{whole % 60:02d}"
+
+
 def render_line(start_s: float, label: str, text: str) -> str:
     """One draft line: ``[hh:mm:ss] Label: text``."""
     return f"[{_clock(start_s)}] {label}: {text}"
+
+
+def render_terminal_line(start_s: float, label: str, text: str) -> str:
+    """One streamed terminal line: ``[mm:ss] Label: text`` (hh:mm:ss past an hour)."""
+    return f"[{_stamp(start_s)}] {label}: {text}"
 
 
 class LiveWriter:
@@ -55,10 +68,13 @@ class LiveWriter:
         self._out = out
         self._owner = owner
 
+    def label_for(self, track: Track) -> str:
+        """The speaker label for one track: the owner, or the remote label."""
+        return self._owner if track == "me" else REMOTE_LABEL
+
     def write_turn(self, start_s: float, track: Track, text: str) -> None:
         """Write one turn line; ``me`` is the owner, ``them`` the remote side."""
-        label = self._owner if track == "me" else REMOTE_LABEL
-        self._out.write(render_line(start_s, label, text) + "\n")
+        self._out.write(render_line(start_s, self.label_for(track), text) + "\n")
         self._out.flush()
 
 
@@ -88,10 +104,10 @@ def headphone_bleed(
 
 
 class BleedWarner:
-    """Warns once, on the injected stream, the first time bleed is seen."""
+    """Warns once, through the injected *emit*, the first time bleed is seen."""
 
-    def __init__(self, out: TextIO) -> None:
-        self._out = out
+    def __init__(self, emit: Callable[[str], None]) -> None:
+        self._emit = emit
         self._warned = False
 
     def check(self, mic_lines: Sequence[Line], them_lines: Sequence[Line]) -> bool:
@@ -99,11 +115,10 @@ class BleedWarner:
         if self._warned or not headphone_bleed(mic_lines, them_lines):
             return False
         self._warned = True
-        self._out.write(
+        self._emit(
             "warning: possible headphone bleed (the mic is picking up the call); "
-            "wear headphones for a clean Me track\n"
+            "wear headphones for a clean Me track"
         )
-        self._out.flush()
         return True
 
 

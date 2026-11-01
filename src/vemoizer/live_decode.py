@@ -76,9 +76,13 @@ def decode_utterance(transcriber: Transcriber, utt: Utterance, track: Track) -> 
 
     The transcriber's own pipeline (glossary prompt, per-call language ID,
     echo filter, lost-window retry) runs unchanged; this only places its
-    output on the timeline.
+    output on the timeline. ``show_progress=False`` (issue #205): the live
+    draft must not print mlx-whisper's tqdm bar for every utterance; the
+    post-call pass keeps its normal progress display.
     """
-    raw = transcriber.transcribe(utt.audio, vad_slices=[(0, len(utt.audio))])
+    raw = transcriber.transcribe(
+        utt.audio, vad_slices=[(0, len(utt.audio))], show_progress=False
+    )
     return Decoded(
         track=track,
         start_s=utt.start_s,
@@ -149,6 +153,9 @@ class LagReport:
 #: Queue key that sorts after every real utterance end: stop() drains first.
 _STOP_KEY = math.inf
 
+#: Audio waiting for the decoder above this many seconds triggers one warning.
+BACKLOG_WARN_S = 30.0
+
 _Job = tuple[Track, Utterance]
 
 
@@ -173,10 +180,31 @@ class DecodeWorker(threading.Thread):
         )
         self._seq = itertools.count()
         self._lag = LagLog()
+        self._pending_s = 0.0
+        self._pending_lock = threading.Lock()
+        self._backlog_warned = False
 
     def submit(self, track: Track, utt: Utterance) -> None:
         """Queue one utterance; ordering is by its end time across tracks."""
+        self._add_pending(utt.end_s - utt.start_s)
         self._queue.put((utt.end_s, next(self._seq), (track, utt)))
+
+    def _add_pending(self, seconds: float) -> None:
+        with self._pending_lock:
+            self._pending_s += seconds
+            behind = self._pending_s
+            warn = behind > BACKLOG_WARN_S and not self._backlog_warned
+            if warn:
+                self._backlog_warned = True
+        if warn:
+            logger.warning(
+                "live decode backlog: %.0f s of audio waiting; nothing is dropped",
+                behind,
+            )
+
+    def _settle(self, seconds: float) -> None:
+        with self._pending_lock:
+            self._pending_s -= seconds
 
     def stop(self) -> LagReport:
         """Drain the queue, tear MLX down on the worker thread, join, report lag."""
@@ -224,6 +252,8 @@ class DecodeWorker(threading.Thread):
                 utt.start_s,
                 exc,
             )
+        finally:
+            self._settle(utt.end_s - utt.start_s)
 
 
 def _teardown(transcriber: Transcriber) -> None:

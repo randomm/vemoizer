@@ -27,7 +27,41 @@ def test_preflight_reports_source_that_never_delivers_after_four_seconds() -> No
     tap = _settle(TrackState("tap"), [Chunk(tone(2.5), 0.0)])
     problems = preflight([mic, tap], clock, clock.sleep, t0=0.0)
     assert [(p.track, p.kind) for p in problems] == [("mic", "not_started")]
-    assert clock.t >= 4.0
+    # The mic keeps the 4 s deadline; it must not inherit the tap's 10 s.
+    assert 4.0 <= clock.t < 10.0
+
+
+def test_preflight_gives_the_system_tap_ten_seconds_to_start() -> None:
+    """issue #205: a cold Core Audio tap can be slower than 4 s."""
+    clock = FakeClock()
+    mic = _settle(TrackState("mic"), [Chunk(tone(2.5), 0.0)])
+    problems = preflight([mic, TrackState("tap")], clock, clock.sleep, t0=0.0)
+    assert [(p.track, p.kind) for p in problems] == [("tap", "not_started")]
+    assert clock.t >= 10.0
+
+
+def test_preflight_accepts_a_tap_that_starts_after_the_mic_deadline() -> None:
+    """A tap delivering its first audio at 9 s is not judged not_started."""
+    clock = FakeClock()
+    mic = _settle(TrackState("mic"), [Chunk(tone(2.5), 0.0)])
+    assert preflight([mic, _SlowTap(9.0, clock)], clock, clock.sleep, t0=0.0) == []
+
+
+class _SlowTap(TrackState):
+    """A tap that starts delivering only once the fake clock reaches *at_s*."""
+
+    def __init__(self, at_s: float, clock: FakeClock) -> None:
+        super().__init__("tap")
+        self._at_s = at_s
+        self._clock = clock
+        self._fed = False
+
+    @property
+    def started(self) -> bool:
+        if not self._fed and self._clock() >= self._at_s:
+            self._fed = True
+            self.observe(Chunk(tone(2.5), self._clock()))
+        return super().started
 
 
 def test_preflight_ignores_empty_chunks_when_judging_started() -> None:

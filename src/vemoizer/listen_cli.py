@@ -79,6 +79,16 @@ def register_listen(app: typer.Typer) -> None:
             "--duration",
             help="Stop recording after SECONDS (default: until Ctrl-C).",
         ),
+        live: bool = typer.Option(  # noqa: B008
+            False,
+            "--live",
+            help="Stream a single-decode draft while recording (not the deliverable).",
+        ),
+        keep_live: bool = typer.Option(  # noqa: B008
+            False,
+            "--keep-live",
+            help="Keep the live draft after the final transcript is written.",
+        ),
     ) -> None:
         """Record a call (system audio + mic), then transcribe it as a meeting."""
         warn_on_battery()
@@ -106,6 +116,8 @@ def register_listen(app: typer.Typer) -> None:
             no_diarize=no_diarize,
             speakers=speakers,
             language=language,
+            live=live,
+            keep_live=keep_live,
         )
         try:
             exit_code = run_listen(run, tracker=tracker)

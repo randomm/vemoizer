@@ -19,7 +19,7 @@ import numpy as np
 from vemoizer.audio_contract import SAMPLE_RATE
 from vemoizer.live_decode import Decoded, DecodeWorker, LagReport, Utterance
 from vemoizer.live_output import Track
-from vemoizer.transcriber import Transcriber
+from vemoizer.transcriber import Transcriber, TranscriptionResult
 from vemoizer.vad import SpeechSegment
 
 BLOCK_SAMPLES = 320  # 20 ms at 16 kHz
@@ -86,3 +86,43 @@ def _submit(worker: DecodeWorker, audio: np.ndarray, seg: SpeechSegment) -> None
         _TRACK,
         Utterance(start_s=seg.start / SAMPLE_RATE, audio=audio[seg.start : seg.end]),
     )
+
+
+class EnergyVad:
+    """silero stand-in: a window is speech when it has any non-zero sample."""
+
+    def __init__(self, fail_on_call: int | None = None) -> None:
+        self._calls = 0
+        self._fail_on_call = fail_on_call
+
+    def reset_states(self) -> None:
+        return None
+
+    def __call__(self, window: np.ndarray, sample_rate: int) -> np.ndarray:
+        self._calls += 1
+        if self._fail_on_call == self._calls:
+            raise RuntimeError("onnx session died")
+        return np.array([[1.0 if np.any(window) else 0.0]], dtype=np.float32)
+
+
+class ScriptedWhisper:
+    """Whisper stand-in: returns *text* and records decode/teardown in *events*."""
+
+    def __init__(
+        self,
+        text: str = "hi",
+        events: list[str] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        self._text = text
+        self.events = events if events is not None else []
+        self._error = error
+
+    def transcribe(self, audio: np.ndarray, **kwargs: object) -> TranscriptionResult:
+        self.events.append("decode")
+        if self._error is not None:
+            raise self._error
+        return {"text": self._text, "words": [], "segments": []}
+
+    def cleanup(self) -> None:
+        self.events.append("teardown")

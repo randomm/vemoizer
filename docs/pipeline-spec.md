@@ -704,6 +704,30 @@ the install command.
 | `--yes` | off | never prompt: use the fallback owner name when none is configured |
 | `--quiet` / `-q` | off | suppress the summary lines and the live progress line |
 | `--verbose` / `-v` | off | per-stage progress logging to stderr |
+| `--live` | off | stream a single-decode draft of the call while recording (`calls/<ts>/live.md`); needs the `listen` extra; never the deliverable |
+| `--keep-live` | off | keep `live.md` after the final pass succeeded (by default it is removed on success) |
+
+**Live draft contract (issue #180).** The draft is a preview; the post-call
+`meeting` pass always runs in full (invariant 2).
+
+- Per track: the stem writer hands each block it wrote to a subscriber; a
+  track thread feeds a streaming silero VAD (500 ms of silence closes an
+  utterance, forced split at `MAX_UTTERANCE_S` = 10 s); closed utterances go
+  to one shared whisper-turbo decode worker in end-time order, one window per
+  utterance.
+- Lines read `[hh:mm:ss] Label: text` on the capture clock. The owner's label
+  is `--me`; the remote side is `Others`.
+- Lag = emit time − (capture start + utterance end). At stop the run prints
+  `live draft lag: utterance end p50 … p90 … max …`; per-word lag is
+  informational only.
+- Audio waiting for the decoder above 30 s logs one backlog warning; nothing
+  is dropped.
+- A failed live track or decode is logged and that part of the draft goes
+  quiet. The stems are byte-identical with `--live` off, on, or failing.
+- A mic line that repeats a nearby remote line (speakers, no headphones)
+  triggers one "possible headphone bleed" warning.
+- Drain order at stop: flush the VADs, drain the worker, tear MLX down on the
+  worker thread, join, print the lag summary, then the final pass.
 
 ### `vemoizer doctor [--listen]` (issue #174)
 

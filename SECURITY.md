@@ -15,6 +15,10 @@ OpenTelemetry usage metrics enabled by default, sending spans to
 `docs/pipeline-spec.md` §9 for the policy. `OTEL_SDK_DISABLED=true` is set
 as belt-and-braces; both are `setdefault`, so a user can opt in.
 
+The live draft (`listen --live`, `calls/<ts>/live.md`) holds third-party
+speech as text, on the same machine. It is deleted once the final transcript
+is written, unless `--keep-live` is given; an interrupted call keeps it.
+
 The optional LLM stage (adjudication, Markdown notes, speaker naming)
 sends transcript text — not audio — to the OpenAI-compatible endpoint
 configured by the user. No LLM is configured by default; every LLM call
