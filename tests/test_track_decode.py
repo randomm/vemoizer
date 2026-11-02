@@ -25,7 +25,6 @@ from vemoizer.pipeline import transcribe_file
 from vemoizer.progress import ProgressDisplay
 from vemoizer.track_decode import (
     decode_tracks,
-    mask_outside,
     merge_track_results,
 )
 from vemoizer.tracks import TrackPaths
@@ -34,38 +33,6 @@ from vemoizer.vad import SpeechSegment
 SR = 16_000
 OWNER = Path("call-me.wav")
 THEM = Path("call-them.wav")
-
-
-# -- mask_outside ---------------------------------------------------------
-
-
-def test_mask_outside_keeps_inside_and_zeroes_outside() -> None:
-    audio = np.full(SR * 2, 0.5, dtype=np.float32)
-    masked = mask_outside(audio, [{"start": 0.25, "end": 0.75}], pad_s=0.0)
-    assert masked is not audio
-    assert masked[round(0.30 * SR) : round(0.70 * SR)] == pytest.approx(0.5)
-    assert not masked[: round(0.25 * SR)].any()
-    assert not masked[round(0.75 * SR) :].any()
-    assert audio == pytest.approx(0.5), "input must not be mutated"
-
-
-def test_mask_outside_pads_spans_by_default() -> None:
-    audio = np.ones(SR, dtype=np.float32)
-    masked = mask_outside(audio, [{"start": 0.5, "end": 0.6}])
-    assert masked[round(0.30 * SR) : round(0.75 * SR)] == pytest.approx(1.0)
-    assert not masked[: round(0.20 * SR)].any()
-    assert not masked[round(0.85 * SR) :].any()
-
-
-def test_mask_outside_clamps_spans_to_the_samples() -> None:
-    audio = np.ones(SR, dtype=np.float32)
-    masked = mask_outside(audio, [{"start": -5.0, "end": 30.0}], pad_s=0.0)
-    assert masked == pytest.approx(1.0)
-
-
-def test_mask_outside_with_no_spans_silences_everything() -> None:
-    audio = np.ones(SR, dtype=np.float32)
-    assert not mask_outside(audio, []).any()
 
 
 # -- merge_track_results --------------------------------------------------
@@ -327,22 +294,78 @@ def test_decode_tracks_decodes_each_stem_with_the_right_audio(
     assert result is not None
     assert len(calls) == 2
     assert all(c["initial_prompt"] == "glossary" for c in calls)
-    # The mic stem arrives masked: owner speech (plus the mask padding)
-    # kept, everything beyond it silent.
+    # The mic stem arrives compacted: its own speech (plus the padding),
+    # back to back, and nothing else (issue #209).
     mic_call = calls[0]
-    assert mic_call["audio"][:SR] == pytest.approx(1.0)
-    assert mic_call["audio"][SR : round(1.2 * SR)] == pytest.approx(1.0)
-    assert not mic_call["audio"][round(1.3 * SR) :].any()
+    assert len(mic_call["audio"]) == round(1.25 * SR)
+    assert mic_call["audio"] == pytest.approx(1.0)
     # The them stem is decoded unchanged.
     them_call = calls[1]
     assert them_call["audio"] == pytest.approx(them)
-    # Slices and vad_slices cover only the stem's own speech span.
+    # Slices and vad_slices cover only the stem's own speech.
     assert mic_call["slices"][0][0] == 0
+    assert len(mic_call["slices"][0][1]) == round(1.25 * SR)
     assert them_call["slices"][0][0] == SR
-    assert mic_call["vad_slices"] == [(0, SR)]
+    assert mic_call["vad_slices"] == [(0, round(1.25 * SR))]
     assert them_call["vad_slices"] == [(SR, SR * 2)]
     # Both sides came out on one timeline, each with its own language.
     assert [w["word"] for w in result["words"]] == ["moi", "hi"]
+
+
+def test_decode_tracks_decodes_the_mic_stem_from_a_compact_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """issue #209: one owner turn late in a long memo is decoded as one
+    dense block, not as the mostly-silent windows the frame gate leaves
+    behind (which is what made Whisper loop on it), and its words come back
+    on the recording timeline."""
+    mic = np.zeros(SR * 120, dtype=np.float32)
+    mic[round(100.0 * SR) : round(101.0 * SR)] = 1.0
+    them = np.zeros(SR * 120, dtype=np.float32)
+    _patch_stems(monkeypatch, mic, them)
+    monkeypatch.setattr(track_decode, "load_vad_model", lambda: object())
+    monkeypatch.setattr(
+        track_decode,
+        "vad_segments",
+        lambda audio, model, **kw: (
+            [SpeechSegment(start=round(100.0 * SR), end=round(101.0 * SR))]
+            if audio.any()
+            else []
+        ),
+    )
+    calls: list[dict[str, Any]] = []
+
+    def fake(audio, slices, initial_prompt=None, language=None, vad_slices=None, **kw):
+        calls.append(
+            {"audio": audio.copy(), "slices": slices, "vad_slices": vad_slices}
+        )
+        return {
+            "text": "moi",
+            "words": [{"word": "moi", "start": 0.3, "end": 0.6}],
+            "segments": [{"start": 0.3, "end": 0.6, "text": "moi"}],
+            "slices": [],
+            "language": "fi",
+        }
+
+    monkeypatch.setattr(track_decode, "decode_meeting", fake)
+
+    result = decode_tracks(
+        TrackPaths(me=OWNER, them=THEM),
+        SR * 120,
+        initial_prompt="glossary",
+        language=None,
+    )
+
+    assert result is not None
+    assert len(calls) == 1, "the silent system stem is skipped"
+    # The padded owner turn only: 1.5 s of audio, not the 120 s stem.
+    assert len(calls[0]["audio"]) == round(1.5 * SR)
+    assert calls[0]["vad_slices"] == [(0, round(1.5 * SR))]
+    # The decode answered in compact time; the part starts 0.25 s before the
+    # speech was spoken (its padding), and that is where the word lands.
+    assert result["words"][0]["start"] == pytest.approx(100.05)
+    assert result["words"][0]["end"] == pytest.approx(100.35)
+    assert result["segments"][0]["start"] == pytest.approx(100.05)
 
 
 def test_decode_tracks_forwards_the_display_to_every_stem(

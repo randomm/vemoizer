@@ -6,6 +6,12 @@ for both speakers, so a Finnish owner with an English counterpart loses
 one of the two (invariant #3: language is a property of a span, not of a
 recording). Each stem is decoded on its own; fail-open, any problem
 yields ``None`` and the caller decodes the mix.
+
+The owner's stem is decoded from a compacted buffer rather than its masked
+timeline (issue #209, see :mod:`.speech_compact`): the frame-level owner
+gate fragments a sentence into sub-second spans, and a 30 s window that is
+mostly digital silence with the speech starting late decodes — with the
+glossary prompt seeding it — to a repetition loop instead of the words.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ import numpy as np
 
 from .audio_contract import SAMPLE_RATE
 from .progress import ProgressDisplay
+from .speech_compact import bridge_spans, compact_spans, remap_result
 from .tracks import (
     TrackPaths,
     ingest_stems,
@@ -32,36 +39,12 @@ from .whisper_windows import normalize_lost_windows
 
 logger = logging.getLogger(__name__)
 
-#: Silence padded around a kept span so word boundaries are not clipped.
-MASK_PAD_S = 0.25
-
 #: Sort key of a slice record (see ``slice_records_from_words``).
 _SLICE_START_KEY = "start_s"
 
 #: One "lang n/m" item of a ``language_summary`` string (see
 #: ``whisper_windows.process_window_raws``, the producer).
 _SUMMARY_ITEM = re.compile(r"(\S+) (\d+)/(\d+)")
-
-
-def mask_outside(
-    samples: np.ndarray,
-    spans_s: Sequence[Mapping[str, float]],
-    pad_s: float = MASK_PAD_S,
-) -> np.ndarray:
-    """Copy of *samples* with everything outside *spans_s* silenced.
-
-    *spans_s* are ``{"start", "end"}`` second spans, widened by *pad_s* on
-    both sides and clamped to the recording. The mic stem is masked to the
-    owner's own speech so leakage cannot feed its language detection.
-    """
-    masked = np.zeros_like(samples)
-    total = len(samples)
-    for span in spans_s:
-        lo = max(0, round((float(span["start"]) - pad_s) * SAMPLE_RATE))
-        hi = min(total, round((float(span["end"]) + pad_s) * SAMPLE_RATE))
-        if hi > lo:
-            masked[lo:hi] = samples[lo:hi]
-    return masked
 
 
 def _sorted_sides(
@@ -241,8 +224,13 @@ def decode_tracks(
     """Decode the mic and the system stem separately; ``None`` to fail open.
 
     The mic stem is VAD'd, gated down to the owner's own speech (leakage
-    removed) and masked, then both stems are sliced and decoded the way
-    the mix would be, one ``decode_meeting`` call per stem with speech.
+    removed) and COMPACTED (issue #209): bridging the fragments the frame
+    gate leaves and concatenating what is left back to back, so the 30 s
+    window decode never sees a window that is mostly digital silence — with
+    the glossary prompt that is what made Whisper loop. Its times are mapped
+    back to the recording timeline. The system stem is decoded as it is,
+    sliced to its own speech. Both stems go through one ``decode_meeting``
+    call each when they have speech.
     """
     try:
         kwargs: dict[str, Any] = {
@@ -255,11 +243,7 @@ def decode_tracks(
         vad_model = load_vad_model()
         mic_spans = owner_speech_segments(_speech_seconds(mic, vad_model), mic, them)
         them_spans = _speech_seconds(them, vad_model)
-        mic_result = (
-            _decode_stem(mask_outside(mic, mic_spans), mic_spans, kwargs)
-            if mic_spans
-            else None
-        )
+        mic_result = _decode_mic(mic, mic_spans, kwargs) if mic_spans else None
         them_result = _decode_stem(them, them_spans, kwargs) if them_spans else None
         for side, spans, result in (
             ("me", mic_spans, mic_result),
@@ -281,15 +265,40 @@ def decode_tracks(
 
 
 def _decode_stem(
-    stem: np.ndarray,
-    spans_s: Sequence[Mapping[str, float]],
-    kwargs: Mapping[str, Any],
+    stem: np.ndarray, spans_s: Sequence[Mapping[str, float]], kwargs: Mapping[str, Any]
 ) -> dict[str, Any] | None:
     """One ``decode_meeting`` over one stem's own speech spans."""
     slices, vad_slices = _stem_slices(stem, spans_s)
     if not slices:
         return None
     return decode_meeting(stem, slices, vad_slices=vad_slices, **dict(kwargs))
+
+
+def _decode_mic(
+    stem: np.ndarray, spans_s: Sequence[Mapping[str, float]], kwargs: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """One ``decode_meeting`` over the owner's speech, compacted (issue #209).
+
+    The kept spans are bridged and concatenated into one dense buffer, so no
+    30 s window is mostly silence with the speech starting late: with the
+    glossary prompt such a window decodes to a repetition loop that swallows
+    the real words, and the frame gate's sub-second holes in a sentence
+    decode to garbled words. The parts are the slices, and the decode result
+    is mapped back to the recording timeline.
+    """
+    compact, cmap = compact_spans(stem, bridge_spans(spans_s))
+    slices = [
+        (compact_start, compact[compact_start : compact_start + length])
+        for compact_start, _orig_start, length in cmap.parts
+    ]
+    if not slices:
+        return None
+    vad_slices = [
+        (compact_start, compact_start + length)
+        for compact_start, _, length in cmap.parts
+    ]
+    result = decode_meeting(compact, slices, vad_slices=vad_slices, **dict(kwargs))
+    return None if result is None else remap_result(result, cmap)
 
 
 def _speech_seconds(stem: np.ndarray, model: Any) -> list[Mapping[str, float]]:
