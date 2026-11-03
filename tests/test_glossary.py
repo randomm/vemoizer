@@ -114,6 +114,35 @@ def test_prompt_tail_priority_and_drop_notice(caplog: pytest.LogCaptureFixture) 
     )
 
 
+def test_drop_notice_lists_lowest_priority_first(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """REGRESSION (issue #217): the logged dropped list must be in file
+    order — earliest-listed (lowest priority) first — not the reverse-file
+    order the budget loop fills it in. The kept prompt is unaffected."""
+    terms = [f"Termi{i}" for i in range(200)]
+    tok = FakeTokenizer()
+    with caplog.at_level(logging.WARNING, logger="vemoizer.glossary"):
+        prompt = glossary_prompt(terms, tok)
+    assert prompt is not None
+
+    notices = [r.getMessage() for r in caplog.records if "dropped" in r.getMessage()]
+    assert len(notices) == 1
+    listed = notices[0].split("lowest priority first: ", 1)[1]
+    dropped_list = listed.rstrip("…").split(", ")
+    assert len(dropped_list) >= 2, "need two dropped terms to check ordering"
+    # Earliest-listed (lowest priority) casualties lead the notice, in
+    # file order.
+    assert dropped_list == [f"Termi{i}" for i in range(len(dropped_list))]
+
+    # The prompt itself is unchanged: kept terms are the file-order tail.
+    kept = prompt[:-1].split(", ")
+    assert kept == terms[-len(kept) :]
+    # The most important casualty (the term just before the kept tail) is
+    # not what leads the logged list.
+    assert dropped_list[0] != terms[len(terms) - len(kept) - 1]
+
+
 def test_prompt_at_prefixed_never_enter_whisper() -> None:
     """REGRESSION (issue #76): @-prefixed LLM-only names must never enter
     the whisper prompt, at any budget, and cannot occupy the tail via the
