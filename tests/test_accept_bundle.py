@@ -186,6 +186,41 @@ def test_window_clipping_and_time_shift(tmp_path: Path, fake_cut: list[Any]) -> 
     assert segs[1].end == pytest.approx(1.0)  # 1.6 clipped to 1.5, shifted
 
 
+def test_zero_length_sidecar_segment_keeps_its_word(
+    tmp_path: Path, fake_cut: list[Any]
+) -> None:
+    # Whisper emits start == end for a word at a chunk boundary ("Mutta");
+    # the word is real speech, so it gets a 0.1 s span instead of aborting.
+    sidecar = _sidecar(
+        tmp_path / "zero.json",
+        [
+            {"start": 0.7, "end": 0.7, "speaker": "SPEAKER_01", "text": "Mutta"},
+            {"start": 1.45, "end": 1.45, "speaker": "SPEAKER_01", "text": "ja"},
+        ],
+        {"SPEAKER_01": "Anna"},
+    )
+    _, bench = _freeze_mix(tmp_path, fake_cut, sidecar=sidecar)
+    _, refs = load_bundle(bench)
+    segs = refs["ex1"].segments
+    assert [s.text for s in segs] == ["Mutta", "ja"]
+    assert segs[0].start == pytest.approx(0.2)
+    assert segs[0].end == pytest.approx(0.3)
+    assert segs[1].end == pytest.approx(1.0)  # 0.1 s widening clamped to window
+
+
+@pytest.mark.parametrize("start,end", [(1, True), (0, False), (True, True)])
+def test_zero_length_widening_rejects_bool(
+    tmp_path: Path, fake_cut: list[Any], start: Any, end: Any
+) -> None:
+    # bool is an int subclass: 1 == True must not sneak in as a zero-length word.
+    sidecar = _sidecar(
+        tmp_path / "bool.json",
+        [{"start": start, "end": end, "speaker": "SPEAKER_01", "text": "x"}],
+    )
+    with pytest.raises(ValueError, match="finite numbers"):
+        _freeze_mix(tmp_path, fake_cut, sidecar=sidecar)
+
+
 def test_speaker_name_mapping_and_unclear(tmp_path: Path, fake_cut: list[Any]) -> None:
     sidecar = _sidecar(
         tmp_path / "orig.json",
