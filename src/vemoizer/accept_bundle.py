@@ -20,6 +20,7 @@ from typing import Any
 from .audio_contract import SAMPLE_RATE
 
 MANIFEST_VERSION = 1  # the manifest schema version we read and write
+ZERO_LENGTH_SPAN_S = 0.1  # span given to a zero-length sidecar word
 UNCLEAR = "unclear"  # speaker placeholder until the owner names the segment
 
 # The two legal audio layouts: a single mix, or the two-track call stems.
@@ -329,7 +330,12 @@ def _draft_reference(
     for d in sidecar["segments"]:
         if not isinstance(d, dict) or not all(k in d for k in ("start", "end", "text")):
             raise ValueError(f"sidecar segment needs start/end/text: {d!r}")
-        s, e = _require_span("sidecar segment", "start/end", d["start"], d["end"])
+        raw_end = d["end"]
+        if _num(raw_end) and _num(d["start"]) and raw_end == d["start"]:
+            # Whisper emits start == end for a word at a chunk boundary; the
+            # word is real speech, so give it a token span instead of failing.
+            raw_end = d["start"] + ZERO_LENGTH_SPAN_S
+        s, e = _require_span("sidecar segment", "start/end", d["start"], raw_end)
         if e <= win_start or s >= win_end:
             continue
         text = d["text"]
@@ -339,7 +345,7 @@ def _draft_reference(
         speaker = names.get(label) if isinstance(label, str) else None
         if owner is not None and d.get("track") == "me":
             speaker = owner  # the owner's own mic stem beats any diarization label
-        edge = d["start"] < win_start or d["end"] > win_end
+        edge = s < win_start or e > win_end
         s0, e0 = max(s, win_start) - win_start, min(e, win_end) - win_start
         segs.append(RefSegment(s0, e0, speaker or UNCLEAR, text, edge))
     empty = {"must_contain": [], "forbid": []}
