@@ -14,8 +14,8 @@ degenerate. When the primary re-decode still loops or fails, an optional
 *fallback* (the caller passes a prompt-free decode) gets one try: a
 name-heavy glossary prompt can itself be what whisper echoes ("Janni."
 walls), and re-sending that prompt reproduces the loop. If both fail
-the original slice is kept (fail-open, invariant #5). Detection and
-splicing are pure functions.
+the original slice is kept (fail-open, invariant #5). Wall detection lives
+in :mod:`vemoizer.loops`; the splicing here is a pure function.
 """
 
 from __future__ import annotations
@@ -27,27 +27,9 @@ from typing import Any
 import numpy as np
 
 from .audio_contract import SAMPLE_RATE
-from .textnorm import textnorm
+from .loops import find_degenerate_windows
 
 logger = logging.getLogger(__name__)
-
-#: A wall segment carries at most this many normalized tokens ("Kiitos."
-#: is one, "DCS. DCS." is two). Real sentences are longer and never join
-#: a run.
-MAX_TOKENS_PER_SEGMENT = 4
-
-#: Consecutive qualifying segments needed before a run counts as a wall.
-#: Below this, short segments are ordinary backchannels.
-MIN_RUN = 5
-
-#: A run is a wall only when its whole vocabulary collapses to at most
-#: this many distinct tokens — "Kiitos." x50 has one, the "DCS."/"D-css."
-#: drift has three, while five varied backchannels stay above it.
-MAX_DISTINCT_TOKENS = 4
-
-#: Windows closer than this merge: one real sentence surfacing inside a
-#: wall does not end the wall.
-MERGE_GAP_S = 10.0
 
 #: A slice is re-decoded when it overlaps a degenerate window by more
 #: than this.
@@ -59,51 +41,10 @@ MIN_OVERLAP_S = 0.2
 #: of such walls unhealed.
 MAX_HEAL_SECONDS = 1800.0
 
+#: Flag stamp on a wall that survived the heal (issue #219).
+SUSPECT_LOOP = "loop"
+
 RedecodeFn = Callable[[np.ndarray], dict[str, Any]]
-
-
-def find_degenerate_windows(
-    segments: list[dict[str, Any]],
-) -> list[tuple[float, float]]:
-    """Time windows ``[(start, end), ...]`` covered by hallucination walls.
-
-    A wall is a run of at least :data:`MIN_RUN` consecutive segments,
-    each at most :data:`MAX_TOKENS_PER_SEGMENT` normalized tokens, whose
-    union of distinct tokens is at most :data:`MAX_DISTINCT_TOKENS`.
-    Windows separated by less than :data:`MERGE_GAP_S` merge.
-    """
-    windows: list[tuple[float, float]] = []
-    run: list[dict[str, Any]] = []
-    run_tokens: set[str] = set()
-
-    def _close() -> None:
-        nonlocal run, run_tokens
-        if len(run) >= MIN_RUN and len(run_tokens) <= MAX_DISTINCT_TOKENS:
-            windows.append((float(run[0]["start"]), float(run[-1]["end"])))
-        run, run_tokens = [], set()
-
-    for seg in segments:
-        tokens = textnorm(str(seg.get("text", ""))).split()
-        if run and float(seg.get("start", 0.0)) - float(run[-1]["end"]) >= (
-            MERGE_GAP_S
-        ):
-            # A long silence ends the wall even with nothing decoded in
-            # between: two distant walls are two windows, not one.
-            _close()
-        if 0 < len(tokens) <= MAX_TOKENS_PER_SEGMENT:
-            run.append(seg)
-            run_tokens.update(tokens)
-        else:
-            _close()
-    _close()
-
-    merged: list[tuple[float, float]] = []
-    for start, end in windows:
-        if merged and start - merged[-1][1] < MERGE_GAP_S:
-            merged[-1] = (merged[-1][0], end)
-        else:
-            merged.append((start, end))
-    return merged
 
 
 def _shift(items: list[dict[str, Any]], offset_s: float) -> list[dict[str, Any]]:
@@ -137,6 +78,66 @@ def _attempt(
     return replacement
 
 
+def _unhealed(
+    windows: list[tuple[float, float]], healed: list[tuple[float, float]]
+) -> list[tuple[float, float]]:
+    """The parts of *windows* not covered by *healed* slice bounds.
+
+    Sorted and non-overlapping. A healed slice far from a window clips to
+    nothing and must not move the window's end.
+    """
+    out: list[tuple[float, float]] = []
+    for w_start, w_end in windows:
+        cursor = w_start
+        cuts = [(max(lo, w_start), min(hi, w_end)) for lo, hi in healed]
+        for lo, hi in sorted(cut for cut in cuts if cut[0] < cut[1]):
+            if lo > cursor:
+                out.append((cursor, lo))
+            cursor = max(cursor, hi)
+        if cursor < w_end:
+            out.append((cursor, w_end))
+    return out
+
+
+def _mark_residual_loops(
+    segments: list[dict[str, Any]],
+    originals: set[int],
+    healed_bounds: list[tuple[float, float]],
+) -> tuple[list[dict[str, Any]], float]:
+    """Copy *segments*, stamping ``suspect: loop`` on the walls left over.
+
+    Only the ORIGINAL segments the heal kept are candidates: *originals*
+    carries their ``id()``. A replacement from a healed slice is never
+    stamped — it came from a re-decode that was itself checked for
+    degeneracy before being accepted, and calling it a loop would punish
+    the one part that got fixed.
+
+    The residual time is the detected window minus the healed slice bounds,
+    so a half-healed wall is reported (and flagged) by the seconds still
+    looping, not by the whole window. A real sentence that sits inside a
+    merged window is flagged too — intended: the merge decided the whole
+    stretch reads as one wall, and the reader should re-check all of it.
+
+    Returns the (possibly new) segment list and the seconds of residual
+    window. A flagged entry is always a copy, so the caller's dicts are never
+    mutated.
+    """
+    windows = _unhealed(find_degenerate_windows(segments), healed_bounds)
+    if not windows:
+        return segments, 0.0
+    residual_s = sum(w_end - w_start for w_start, w_end in windows)
+    out: list[dict[str, Any]] = []
+    for seg in segments:
+        start = float(seg.get("start", 0.0))
+        if id(seg) in originals and any(
+            w_start <= start < w_end for w_start, w_end in windows
+        ):
+            out.append({**seg, "suspect": SUSPECT_LOOP})
+        else:
+            out.append(seg)
+    return out, residual_s
+
+
 def heal(
     result: dict[str, Any],
     slices: list[tuple[int, np.ndarray]],
@@ -148,8 +149,9 @@ def heal(
     *redecode* transcribes one slice with conditioning off and returns
     ``{"segments": [...], "words": [...]}`` on slice-local time;
     *fallback* is tried when that still loops or fails. Returns
-    *result* unchanged when nothing is degenerate or nothing could be
-    healed; otherwise a new dict with segments/words/text rebuilt.
+    *result* unchanged when nothing is degenerate; otherwise a new dict
+    with segments/words/text rebuilt and any surviving wall flagged
+    ``suspect: "loop"`` plus one warning naming its seconds.
     """
     segments = list(result.get("segments") or [])
     windows = find_degenerate_windows(segments)
@@ -190,9 +192,6 @@ def heal(
         new_segments.extend(_shift(repl_segments, start_s))
         new_words.extend(_shift(list(replacement.get("words") or []), start_s))
 
-    if not healed_bounds:
-        return result
-
     def _healed(t: float) -> bool:
         return any(lo <= t < hi for lo, hi in healed_bounds)
 
@@ -204,15 +203,32 @@ def heal(
     ]
     out_segments = sorted(kept_segments + new_segments, key=lambda s: float(s["start"]))
     out_words = sorted(kept_words + new_words, key=lambda w: float(w["start"]))
+    # Whatever is still a wall after the heal (unfixable by the fallback, or
+    # never reached by the time budget) is labelled for the reader and the
+    # quality report instead of shipping as fact: a wall is the loudest thing
+    # in a transcript and must never be silent.
+    out_segments, residual_s = _mark_residual_loops(
+        out_segments, {id(s) for s in kept_segments}, healed_bounds
+    )
     logger.info(
-        "self-heal: re-decoded %d slice(s), %d -> %d segments",
+        "self-heal: re-decoded %d slice(s), %d -> %d segments, %.0fs still looping",
         len(healed_bounds),
         len(segments),
         len(out_segments),
+        residual_s,
     )
-    return {
-        **result,
-        "segments": out_segments,
-        "words": out_words,
-        "text": " ".join(str(s["text"]) for s in out_segments).strip(),
-    }
+    out: dict[str, Any] = {**result, "segments": out_segments}
+    if healed_bounds:
+        out["words"] = out_words
+        out["text"] = " ".join(str(s["text"]) for s in out_segments).strip()
+    if residual_s > 0.0:
+        # The run-dict "warnings" list every stage appends to: the CLI/batch
+        # layer builds the quality report from it (report.py renders the loop
+        # category, seconds included) BEFORE batch_output._check_result pops
+        # it to stderr.
+        out["warnings"] = [
+            *list(result.get("warnings") or []),
+            f"self-heal: {residual_s:.0f}s of repetition loops could not be "
+            "repaired and are flagged as suspect",
+        ]
+    return out

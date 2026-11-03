@@ -136,6 +136,25 @@ def test_suspect_number_renders_luku() -> None:
     assert "[00:00:00] ⚠ luku numero kohta" in md
 
 
+def test_suspect_loop_renders_toisto() -> None:
+    """issue #219: an unhealed loop wall gets its own reader warning."""
+    md = format_md(
+        {
+            "text": "x",
+            "paragraphs": [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "jumala jumala jumala",
+                    "suspect": "loop",
+                },
+            ],
+        }
+    )
+    assert "⚠ toisto" in md
+    assert "[00:00:00] ⚠ toisto jumala jumala jumala" in md
+
+
 def test_suspect_garble_outranks_number() -> None:
     """When a paragraph has suspect='garble', it renders epäselvä, not luku."""
     md = format_md(

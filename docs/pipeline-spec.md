@@ -314,7 +314,10 @@ pure function of the dict):
 - **`[hh:mm:ss]` per-paragraph prefix** — from `para["start"]`; omitted
   when the key is missing (no placeholder).
 - **Labelled suspect prefix** — `suspect="garble"` → `⚠ epäselvä`,
-  `suspect="number"` → `⚠ luku` (replaces the old bare `⚠ ` prefix).
+  `suspect="number"` → `⚠ luku` (replaces the old bare `⚠ ` prefix),
+  `suspect="loop"` → `⚠ toisto` (the wall flag `selfheal.heal` stamps on
+  the ORIGINAL segments of a loop it could not repair — the replacement
+  segments of a healed slice are never stamped; issue #219).
 - **Section language** — `format_md(transcript, language=...)` selects
   Finnish (default) or English headings; the value rides on the run
   dict as `transcript["language"]` (loaded by
@@ -362,6 +365,15 @@ path (expert `transcribe`, `run_batch` groups, the preset plain loop).
 The quality report is computed from the warnings list BEFORE that pop
 (`_render_quality_report` in `batch_output`), so the report's warnings
 section is populated in every real run.
+
+**Suspect/warning categories of the report** (issue #219): the suspects
+section counts and lists the SAME categories — `loop` before `garble`
+before `number` (the `readability.SUSPECT_RANK` order, ties earliest
+start) — so the count never promises more lines than the section prints.
+The warnings section renders the anchor categories `diarization`, `notes`
+and `loop`; the `loop` category carries the `selfheal.heal` unhealed-wall
+warning with its seconds ("self-heal: 12s of repetition loops could not be
+repaired…"), which is the reader's only signal that a wall shipped.
 
 ### 15. M5a JSON sidecar keys (issue #89)
 
@@ -568,7 +580,18 @@ with 30 s per-call windows its silence heuristics are meaningless — the
 "surrounded by silence" test is always true by construction for a window
 that spans ~0–30 s — and it deletes real speech. Loops are handled by the
 temperature ladder, the compression and logprob thresholds, the echo
-filter, and self-heal.
+filter, and self-heal (`loops.find_degenerate_windows`, issue #219): a
+wall is a run of at least `MIN_RUN` short segments whose vocabulary
+collapses to at most `MAX_DISTINCT_TOKENS` distinct tokens, or ONE long
+segment of at least `MIN_TOKENS_LONG_SEGMENT` tokens whose
+`compression_ratio` exceeds `COMPRESSION_RATIO_CUT` (whisper's own discard
+cut, stored by the only decode that calls `heal`). Word repetition is not
+a signal on its own — natural Finnish repeats itself ("no niin no niin …")
+and must not be read as a wall. `heal` re-decodes the VAD slices under the
+windows, stamps `suspect="loop"` on the kept ORIGINAL segments of whatever
+still loops (never on a healed slice's replacements), and warns with the
+seconds that are still looping, i.e. the windows minus the healed slice
+bounds.
 
 ## CLI spec
 

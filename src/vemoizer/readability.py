@@ -25,6 +25,19 @@ from .textnorm import textnorm
 #: Silence between consecutive segments that starts a new paragraph.
 PARAGRAPH_GAP_S = 1.5
 
+#: "Worst suspect wins" when segments merge into one paragraph (issue
+#: #219): a verified loop wall is the strongest warning a reader can get
+#: — the recognizer repeated itself and nothing fixed it — so it outranks
+#: garble, which outranks a shaky number.
+SUSPECT_RANK = {"loop": 3, "garble": 2, "number": 1}
+
+
+def _suspect_rank(suspect: Any) -> int:
+    """Rank of *suspect*; unknown or non-string values rank 0 (never win)."""
+    if not isinstance(suspect, str):
+        return 0
+    return SUSPECT_RANK.get(suspect, 0)
+
 
 def splice_verdicts(
     text: str,
@@ -146,10 +159,8 @@ def paragraphs(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if speaker is not None and current_speaker is None:
                 current["speaker"] = speaker
                 current_speaker = speaker
-            # worst suspect wins: garble outranks number
-            if suspect == "garble" or (
-                suspect == "number" and current.get("suspect") is None
-            ):
+            # worst suspect wins: loop > garble > number
+            if _suspect_rank(suspect) > _suspect_rank(current.get("suspect")):
                 current["suspect"] = suspect
     return paras
 

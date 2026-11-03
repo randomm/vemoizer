@@ -23,8 +23,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .loops import find_degenerate_windows
 from .output.markdown import _clock_or_none
-from .selfheal import find_degenerate_windows
+from .readability import SUSPECT_RANK
 from .whisper_windows import normalize_lost_windows
 
 #: Stable warning anchors (substring match) → report category. The
@@ -33,6 +34,11 @@ from .whisper_windows import normalize_lost_windows
 #: un-categorise the warning.
 _DIARIZATION_ANCHOR = "diarization"
 _NOTES_ANCHOR = "notes"
+
+#: The self-heal stage's unhealed-wall warning ("self-heal: Ns of
+#: repetition loops …"), rendered under the loop category so the seconds
+#: a wall still costs the reader survive the warnings pop (issue #219).
+_LOOP_ANCHOR = "self-heal"
 
 #: The 3-worst-suspects cap (the ticket: "⚠ count with 3 worst
 #: timestamps").
@@ -64,20 +70,22 @@ def _start_value(para: dict[str, Any]) -> float:
 def _worst_suspects(paragraphs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Up to ``_MAX_SUSPECTS`` suspect paragraphs, ranked for the report.
 
-    Rank: ``garble`` before ``number`` (garble is the stronger reader
-    warning), ties broken by earliest ``start``. Suspect values other
-    than the two known ones are excluded (the markdown fallback renders
-    them, but the report only tracks the two labelled categories).
+    Rank: ``loop`` before ``garble`` before ``number`` (the
+    ``readability.SUSPECT_RANK`` order — a verified wall is the strongest
+    warning a reader can get), ties broken by earliest ``start``. Suspect
+    values other than the three known ones are excluded (the markdown
+    fallback renders them, but the report only tracks the labelled
+    categories).
     """
-    suspects = [p for p in paragraphs if p.get("suspect") in ("garble", "number")]
-    suspects.sort(key=lambda p: (0 if p["suspect"] == "garble" else 1, _start_value(p)))
+    suspects = [p for p in paragraphs if p.get("suspect") in SUSPECT_RANK]
+    suspects.sort(key=lambda p: (-SUSPECT_RANK[p["suspect"]], _start_value(p)))
     return suspects[:_MAX_SUSPECTS]
 
 
 def _residual_windows(transcript: dict[str, Any]) -> list[tuple[float, float]]:
     """``find_degenerate_windows`` over the FINAL segments, ``[]`` on absence.
 
-    Runs the pure detector (``selfheal.find_degenerate_windows``) on
+    Runs the pure detector (``loops.find_degenerate_windows``) on
     ``transcript["segments"]`` — the post-heal list, so only windows the
     pipeline's own ``heal`` pass did NOT fix are reported. A missing or
     non-list ``segments`` key yields ``[]`` (section omitted), never a
@@ -122,12 +130,13 @@ def _categorized_warnings(warnings: list[str]) -> dict[str, list[str]]:
 
     ``diarization``-anchored warnings (attribution, "diarization failed")
     go under "diarization"; ``notes``-anchored warnings (the notes-failed
-    warning) under "notes". A warning matching no anchor is NOT listed
+    warning) under "notes"; ``self-heal``-anchored ones (the unhealed-wall
+    warning) under "loop". A warning matching no anchor is NOT listed
     (it still reaches stderr via the CLI pop path). No repair producer
     exists in the codebase (repair.py logs internally only), so no
     repair category is rendered.
     """
-    out: dict[str, list[str]] = {"diarization": [], "notes": []}
+    out: dict[str, list[str]] = {"diarization": [], "notes": [], "loop": []}
     for warning in warnings:
         text = str(warning)
         lowered = text.lower()
@@ -135,6 +144,8 @@ def _categorized_warnings(warnings: list[str]) -> dict[str, list[str]]:
             out["diarization"].append(text)
         elif _NOTES_ANCHOR in lowered:
             out["notes"].append(text)
+        elif _LOOP_ANCHOR in lowered:
+            out["loop"].append(text)
         # No anchor match → not listed in the report.
     return out
 
@@ -165,16 +176,16 @@ def render_report(
       requested state — ``diarize_requested`` with zero speaker-labeled
       paragraphs is the "requested but absent" state, rendered
       honestly (never a fabricated speaker list).
-    - **Suspects**: ``⚠`` count plus the 3 worst timestamps (garble
-      before number, ties earliest start). Count 0 → section omitted.
+    - **Suspects**: ``⚠`` count plus the 3 worst timestamps (loop before
+      garble before number, ties earliest start). Count 0 → section omitted.
     - **Residual loops**: ``find_degenerate_windows`` over the FINAL
       segments; count and time windows. 0 → "none" rendered only when
       the section has something to anchor against; per the ticket, count
       0 omits the line.
     - **Glossary**: whole-word, case-insensitive hits of the prompt
       terms; shown honestly (``0 of N`` when nothing matched).
-    - **Warnings**: classified by stable anchor (diarization / notes).
-      Unmatched warnings dropped from the report (still on stderr).
+    - **Warnings**: classified by stable anchor (diarization / notes /
+      loop). Unmatched warnings dropped from the report (still on stderr).
     """
     lang = _normalize_language(language)
     paragraphs = _paragraphs(transcript)
@@ -205,10 +216,10 @@ def render_report(
             stamp = _clock_or_none(para.get("start"))
             time_part = f" {stamp}" if stamp else ""
             worst_lines.append(f"- {para['suspect']}{time_part}")
-        total_suspects = len([p for p in paragraphs if p.get("suspect")])
-        suspect_labels = [
-            "garble" if s["suspect"] == "garble" else "number" for s in suspects
-        ]
+        total_suspects = len(
+            [p for p in paragraphs if p.get("suspect") in SUSPECT_RANK]
+        )
+        suspect_labels = [str(s["suspect"]) for s in suspects]
         sections.append(
             f"{label}: {total_suspects} "
             f"({', '.join(suspect_labels)})"
@@ -270,7 +281,7 @@ def render_report(
     warnings = transcript.get("warnings")
     warnings = [w for w in warnings] if isinstance(warnings, list) else []
     categorized = _categorized_warnings([str(w) for w in warnings])
-    for category in ("diarization", "notes"):
+    for category in ("diarization", "loop", "notes"):
         items = categorized[category]
         if items:
             label = {"fi": "Varoitukset", "en": "Warnings"}[lang]

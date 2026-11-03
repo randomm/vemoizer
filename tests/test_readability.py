@@ -245,3 +245,45 @@ def test_single_shared_word_is_not_an_echo() -> None:
     ]
     out = tidy_paragraphs(paras)
     assert out[1]["text"] == "huomenna on parempi päivä"
+
+
+# -- issue #219: worst suspect wins, loop first ---------------------------
+#
+# selfheal flags walls it could not heal as suspect="loop". When segments
+# merge into one paragraph the reader must still see the strongest label:
+# loop > garble > number.
+
+
+def test_loop_outranks_garble_and_number() -> None:
+    segs = [
+        _seg("eka lause", 0.0, 1.0, suspect="number"),
+        _seg("toka lause", 1.0, 2.0, suspect="garble"),
+        _seg("kolmas lause", 2.0, 3.0, suspect="loop"),
+    ]
+    assert paragraphs(segs)[0]["suspect"] == "loop"
+
+
+def test_loop_survives_weaker_later_segments() -> None:
+    segs = [
+        _seg("eka lause", 0.0, 1.0, suspect="loop"),
+        _seg("toka lause", 1.0, 2.0, suspect="garble"),
+        _seg("kolmas lause", 2.0, 3.0, suspect="number"),
+    ]
+    assert paragraphs(segs)[0]["suspect"] == "loop"
+
+
+def test_garble_still_outranks_number() -> None:
+    segs = [
+        _seg("eka lause", 0.0, 1.0, suspect="number"),
+        _seg("toka lause", 1.0, 2.0, suspect="garble"),
+    ]
+    assert paragraphs(segs)[0]["suspect"] == "garble"
+
+
+def test_unhashable_suspect_value_never_wins() -> None:
+    """A garbage suspect value from a sidecar must not crash the merge."""
+    segs = [
+        _seg("eka lause", 0.0, 1.0, suspect=["weird", "value"]),
+        _seg("toka lause", 1.0, 2.0, suspect="number"),
+    ]
+    assert paragraphs(segs)[0]["suspect"] == "number"
