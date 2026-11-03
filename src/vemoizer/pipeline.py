@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import logging
 import time
-from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -30,20 +29,12 @@ from .canary_transcriber import CanaryTranscriber
 from .confidence import flag_suspect_segments
 from .decode_stage import decode_all
 from .diarization import SpeakerCount, speaker_for_span
-from .glossary import (
-    apply_corrections,
-    glossary_prompt,
-    load_corrections,
-    load_glossary,
-)
+from .glossary import glossary_prompt, load_corrections, load_glossary
 from .ingest import IngestError, ingest_audio
 from .llm import LLMClient, LLMConfig
-from .llm_config import (
-    _parse_meeting_language,
-    _parse_section_language,
-    load_default_config,
-)
+from .llm_config import _parse_section_language, load_default_config
 from .llm_tail import apply_llm_tail
+from .meeting_stage import resolve_meeting_language, run_profile_decodes
 from .notes import generate_notes  # noqa: F401
 from .parakeet_transcriber import ParakeetTranscriber
 from .presets import _normalize_language
@@ -339,21 +330,9 @@ def transcribe_file(
     # pre-check) and its parsed raw dict feeds the ``[meeting]``
     # recognition-language override and the cosmetic section language below.
     llm_config, config_raw = load_default_config(config_path)
-    # Issue #108, option B: an explicit run-level recognition-language
-    # choice (CLI ``--language`` / presets ``RunOptions.language``),
-    # else the ``[meeting] language`` key of the same config file, else
-    # per-window detection (``None``). ``"auto"`` and other non-codes
-    # never pin — ``transcribe_file`` is the single coercion point.
-    meeting_language: str | None
-    if language is not None and language != "auto":
-        meeting_language = language
-    else:
-        if isinstance(config_raw, dict):
-            meeting_section = config_raw.get("meeting")
-        else:
-            meeting_section = None
-        configured = _parse_meeting_language(meeting_section)
-        meeting_language = None if configured == "auto" else configured
+    # Issue #108, option B: the run-level recognition-language pin for the
+    # meeting decode (CLI ``--language`` -> [meeting] language -> None).
+    meeting_language = resolve_meeting_language(language, config_raw)
     # M6 (issue #75): duration (decoded-audio, never ffprobe) and section
     # language ride on the run dict — format_md / the report read them.
     result: dict[str, Any] = {
@@ -365,68 +344,28 @@ def transcribe_file(
     )
     slices, vad_found_speech = _speech_slices(audio)
 
-    result_a: dict[str, Any] | None = None
-    result_b: dict[str, Any] | None = None
-    parakeet: Any = None
-    canary: Any = None
-    run_consensus = True
-    meeting_fallback = False
     glossary = load_glossary(glossary_path)
     corrections = load_corrections(glossary_path)
-    if profile == "meeting":
-        vad_kwargs: dict[str, Any] = (
-            {"vad_slices": [(s, s + len(a)) for s, a in slices]}
-            if vad_found_speech
-            else {"vad_slices": None}
-        )
-        kwargs: dict[str, Any] = {
-            "initial_prompt": glossary_prompt(glossary),
-            "language": meeting_language,
-            **vad_kwargs,
-        }
-        if display is not None:
-            kwargs["display"] = display
-        # Two-track call: each stem holds one speaker, so decoding them
-        # separately keeps each side's language; the mix decode is the fallback.
-        if tracks is not None:
-            result_a = track_decode.decode_tracks(
-                tracks,
-                len(audio),
-                initial_prompt=kwargs["initial_prompt"],
-                language=meeting_language,
-                display=display,
-            )
-            if result_a is None:
-                logger.warning("per-track meeting decode failed; decoding the mix")
-        if result_a is None:
-            result_a = decode_meeting(audio, slices, **kwargs)
-        if result_a is not None:
-            # Meeting profile skips decode B / re-decode / adjudication
-            # entirely (invariant #2 allows skip-by-flag; see issue #71).
-            run_consensus = False
-        else:
-            logger.warning("meeting decode failed; falling back to dictation path")
-            meeting_fallback = True
-    if result_a is None:
-        try:
-            parakeet = ParakeetTranscriber()
-            result_a = decode_all(parakeet, slices, "decode A")
-        except Exception as e:  # noqa: BLE001 - fail-open stage boundary
-            logger.warning("decode A failed, using best available result: %s", e)
-        finally:
-            if parakeet is not None:
-                with suppress(Exception):  # cleanup is best-effort (fail-open)
-                    parakeet.cleanup()
-    if run_consensus:
-        try:
-            canary = CanaryTranscriber()
-            result_b = decode_all(canary, slices, "decode B")
-        except Exception as e:  # noqa: BLE001 - fail-open stage boundary
-            logger.warning("decode B failed, using best available result: %s", e)
-        finally:
-            if canary is not None:
-                with suppress(Exception):  # cleanup is best-effort (fail-open)
-                    canary.cleanup()
+    # The profile decode selection lives in meeting_stage; the seam names
+    # are read from this module's namespace and passed in so test
+    # monkeypatching of vemoizer.pipeline still governs the decoders (the
+    # same convention as apply_llm_tail's *_fn / llm_client_cls args below).
+    result_a, result_b, run_consensus, meeting_fallback = run_profile_decodes(
+        audio,
+        slices,
+        meeting=profile == "meeting",
+        vad_found_speech=vad_found_speech,
+        glossary=glossary,
+        language=meeting_language,
+        tracks=tracks,
+        display=display,
+        decode_meeting_fn=decode_meeting,
+        track_decode_module=track_decode,
+        glossary_prompt_fn=glossary_prompt,
+        decode_all_fn=decode_all,
+        parakeet_cls=ParakeetTranscriber,
+        canary_cls=CanaryTranscriber,
+    )
 
     spans = _find_spans(result_a, result_b) if run_consensus else []
     redecoded: list[dict[str, Any]] | None = None
@@ -462,10 +401,6 @@ def transcribe_file(
         result_a, result_b, redecoded, llm_config, speaker.turns, spans, speaker.trusted
     )
     result.update(assembled)
-    if corrections and result.get("paragraphs"):
-        # Deterministic known-garble replacement: "Blacksit" -> "Flagship"
-        # must never depend on a model's judgment.
-        result["paragraphs"] = apply_corrections(result["paragraphs"], corrections)
     for warning in speaker.warnings:
         result.setdefault("warnings", []).append(warning)
     if meeting_fallback:

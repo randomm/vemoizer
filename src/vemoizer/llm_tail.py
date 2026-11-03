@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from rich.progress import TaskID
 
-from .glossary import apply_corrections_to_notes
+from .glossary import apply_corrections, apply_corrections_to_notes
 from .llm import LLMClient, LLMConfig
 from .llm_budget import StageBudget
 from .notes import generate_notes
@@ -148,9 +148,11 @@ def apply_llm_tail(
 ) -> None:
     """Run the repair and notes stages in place on the assembled *result*.
 
-    ``corrections`` is the deterministic glossary corrections table applied
-    to the notes (never to the verbatim segments). Both stages are skipped
-    without an LLM config (fail-open).
+    ``corrections`` is the deterministic glossary corrections table: known
+    garble pairs are applied to the assembled paragraphs before any LLM
+    stage ("Blacksit" -> "Flagship" must never depend on a model's
+    judgment) and to the notes (never to the verbatim segments). Both LLM
+    stages are skipped without an LLM config (fail-open).
 
     ``glossary`` is the list ``load_glossary`` returns (bare prompt terms
     plus ``@``-prefixed LLM-only terms, one list for both consumers). The
@@ -168,6 +170,10 @@ def apply_llm_tail(
     # here, at the LLM boundary — the recognizer never sees them.
     if glossary is not None:
         glossary = [t[1:].lstrip() if t.startswith("@") else t for t in glossary]
+    if corrections and result.get("paragraphs"):
+        # Deterministic known-garble replacement, BEFORE the repair pass may
+        # rewrite the paragraphs (and even when no LLM is configured).
+        result["paragraphs"] = apply_corrections(result["paragraphs"], corrections)
     if repair and llm_config is not None and result.get("paragraphs"):
         _run_repair(
             result,
