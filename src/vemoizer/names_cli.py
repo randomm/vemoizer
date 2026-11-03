@@ -107,21 +107,6 @@ def _resolve_source_entry(
     return {**entry, "path": str(resolved)}
 
 
-def _owner_track_source(
-    options: Any, owner: str | None, sidecar_dir: Path, cwd: Path
-) -> list[dict[str, Any]]:
-    """The owner's mic stem as a one-entry clip source, or ``[]``.
-
-    Recorded in ``options.owner_track`` by a two-track run (issue #202); the
-    stem starts with the mix, so its timeline needs no offset.
-    """
-    track = options.get("owner_track") if isinstance(options, dict) else None
-    if owner is None or not isinstance(track, str):
-        return []
-    resolved = _resolve_source_entry({"path": track}, sidecar_dir, cwd)
-    return [resolved] if resolved is not None else []
-
-
 def _prompt_add_to_people(
     answer: str,
     resolved_config: Path | None,
@@ -133,7 +118,9 @@ def _prompt_add_to_people(
     Shared by the stored-name and new-name branches. Returns ``True`` when
     EOF aborted the prompt (caller must stop the run). The ask callable is
     passed in so the closure (and its ``_NotFound`` sentinel handling) stays
-    with the caller.
+    with the caller. On a write, ``people_list`` is updated in place so a
+    later addition in the same run builds on it instead of overwriting it
+    (issue #212).
     """
     cfg_display = str(resolved_config) if resolved_config else "(no config)"
     add_result = ask(f"Add {answer} to people in {cfg_display}? [y/N] ")
@@ -145,6 +132,7 @@ def _prompt_add_to_people(
     if answer not in new_people:
         new_people.append(answer)
     write_people_list(resolved_config, new_people)
+    people_list[:] = new_people
     return False
 
 
@@ -208,9 +196,9 @@ def run_names(
     """Interactive speaker-naming loop.
 
     Returns 0 on success, 1 on sidecar error, 2 on non-TTY. A two-track
-    call's owner (``options.owner``) is already named: it gets its quote and
-    clip, but is never prompted for. ``discard_input`` runs before each
-    prompt (default: flush the terminal input queue).
+    call's owner (``options.owner``) is already named: it is shown as one
+    line, with no quotes, clips or prompt (issue #213). ``discard_input``
+    runs before each prompt (default: flush the terminal input queue).
     """
     # --- Non-TTY guard (FIRST, before any other logic) ---
     isatty = tty_isatty if tty_isatty is not None else sys.stdin.isatty
@@ -267,12 +255,9 @@ def run_names(
     # separate ``has_clips`` flag.
     degraded = not resolved_source
 
-    # The owner's voice comes from the mic stem (issue #202): the mix also
-    # carries whatever the far side played back over the owner's speech.
     options = data.get("options")
     owner = options.get("owner") if isinstance(options, dict) else None
     owner = owner if isinstance(owner, str) and owner else None
-    owner_source = _owner_track_source(options, owner, sidecar_dir, cwd)
 
     # --- Prompt loop (inside clip_session for temp dir cleanup) ---
     new_names: dict[str, str] = {}
@@ -292,16 +277,26 @@ def run_names(
         # Install readline completer (if applicable); restores the previous
         # completer on every exit path, including KeyboardInterrupt.
         restore_completer = _install_completer(people_list)
-        known = [p.lower() for p in people_list]
+        # Names already in the list, or offered once in this run (added or
+        # declined): never offered again, e.g. for a second label of the
+        # same person.
+        offered = {p.lower() for p in people_list}
         try:
             if (
                 not no_play
-                and (resolved_source or owner_source)
-                and any(clips.get(label) for label in shares)
+                and resolved_source
+                and any(clips.get(label) for label in shares if label != owner)
             ):
                 typer.echo("Preparing audio clips…")
             for label in sorted(shares, key=lambda x: shares[x], reverse=True):
                 share = shares[label]
+                # The owner of a two-track call is already named: one line,
+                # no quotes, no clips, no prompt, no people-list offer.
+                if label == owner:
+                    typer.echo(
+                        f"\n{label}  ({share:.0%} of talk) — you (own mic track)"
+                    )
+                    continue
                 label_clips: list[ClipWindow] = clips.get(label, [])
 
                 typer.echo(f"\n{label}  ({share:.0%} of talk)")
@@ -309,21 +304,14 @@ def run_names(
                     typer.echo(f'  "{w.quote}"')
 
                 # Play clips (skipped under --no-play; quotes only then)
-                is_owner = label == owner
-                source = owner_source if is_owner and owner_source else resolved_source
-                if source and not no_play and label_clips:
-                    clip_map = extract_clips(source, label_clips[:3], tmp_dir)
+                if resolved_source and not no_play and label_clips:
+                    clip_map = extract_clips(resolved_source, label_clips[:3], tmp_dir)
                     for w in label_clips[:3]:
                         path = clip_map.get(w)
                         if path is not None and path.is_file():
                             play(path)
                         else:
                             degraded = True
-
-                # The owner of a two-track call is already named: no prompt,
-                # and no offer to add them to the people list.
-                if is_owner:
-                    continue
 
                 # Prompt for name. A label with a stored name shows it as a
                 # bracketed default; empty keeps it, non-empty replaces.
@@ -351,14 +339,13 @@ def run_names(
                 # People list: ask to add a NEW name (replacing or fresh)
                 # that is not already there (case-insensitive). A kept
                 # stored name is skipped (it was added when originally named).
-                if not keep_stored and (
-                    answer.lower() not in known
-                    and _prompt_add_to_people(
+                if not keep_stored and answer.lower() not in offered:
+                    offered.add(answer.lower())
+                    if _prompt_add_to_people(
                         answer, resolved_config, people_list, _ask
-                    )
-                ):
-                    prompt_aborted = True
-                    break
+                    ):
+                        prompt_aborted = True
+                        break
         finally:
             if restore_completer is not None:
                 restore_completer()
