@@ -296,14 +296,16 @@ def glossary_prompt(terms: list[str], tokenizer: Tokenizer | None = None) -> str
     kept.reverse()  # prompt order = file order, highest-priority last
 
     if dropped:
-        # The dropped list is in reverse file order: it leads with the
-        # LOWEST-priority (earliest-listed) casualties, not the most
-        # important ones, so say so explicitly.
+        # ``dropped`` is filled by the reverse loop, so it leads with the
+        # highest-priority casualty; log it back in file order so the list
+        # really leads with the LOWEST-priority (earliest-listed)
+        # casualties, not the most important ones.
+        lowest_first = list(reversed(dropped))
         logger.warning(
             "glossary: %d terms dropped (prompt budget %d tokens exceeded); "
             "dropped, lowest priority first: %s",
             len(dropped),
             GLOSSARY_PROMPT_TOKEN_BUDGET,
-            ", ".join(dropped[:10]) + ("…" if len(dropped) > 10 else ""),
+            ", ".join(lowest_first[:10]) + ("…" if len(dropped) > 10 else ""),
         )
     return _SEPARATOR.join(kept) + "."
