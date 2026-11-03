@@ -88,3 +88,37 @@ def test_normal_prose_has_low_bigram_rate() -> None:
         [_seg("tämä on ihan tavallinen lause jossa ei toistu mikään")]
     )
     assert "suspect" not in out[0]
+
+
+# -- issue #218: non-finite logprobs are noise, not signal ----------------
+#
+# A NaN avg_logprob (JSON sidecar, broken decoder) survives a `is not
+# None` filter, lands in the sorted distribution at an arbitrary position
+# and poisons median/MAD — so the relative cut goes garbage for the whole
+# file. Non-finite values must act exactly like missing ones.
+
+
+def _relative_distribution() -> list[dict]:
+    """Enough segments for the relative rule, with one relative outlier."""
+    segs = [_seg(f"selvä lause {i}", logprob=-0.2) for i in range(29)]
+    segs.insert(0, _seg("sotkuinen kohta", logprob=-0.6))
+    return segs
+
+
+def test_nan_segment_does_not_perturb_other_flags() -> None:
+    base = _relative_distribution()
+    clean = flag_suspect_segments(base)
+    assert clean[0]["suspect"] == "garble"  # sanity: relative rule is armed
+    with_nan = list(base)
+    pos = len(base) // 2  # where sorted() would drop the NaN onto the median
+    with_nan.insert(pos, _seg("hukkaan heitetty", logprob=float("nan")))
+    out = flag_suspect_segments(with_nan)
+    expected = [s.get("suspect") for s in clean]
+    expected.insert(pos, None)
+    assert [s.get("suspect") for s in out] == expected
+
+
+def test_non_finite_logprob_segment_is_not_flagged_by_logprob() -> None:
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        out = flag_suspect_segments([_seg("selvä lause", logprob=bad)])
+        assert "suspect" not in out[0], bad
