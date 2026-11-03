@@ -10,6 +10,7 @@ own ``logprob_threshold`` (-1.0 = discard-grade; flagging warns earlier).
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -49,6 +50,20 @@ def _repeated_bigram_rate(text: str) -> float:
     return repeats / max(len(bigrams) - 2, 1)
 
 
+def _finite_logprob(seg: dict[str, Any]) -> float | None:
+    """Segment avg_logprob as a float, or None when missing/non-finite.
+
+    A NaN or +/-inf from a JSON sidecar or a broken decoder would land
+    at an arbitrary position in sorted() and compare False against every
+    cut, poisoning the file's own distribution (issue #218).
+    """
+    raw = seg.get("avg_logprob")
+    if raw is None:
+        return None
+    value = float(raw)
+    return value if math.isfinite(value) else None
+
+
 def flag_suspect_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Mark low-confidence segments with ``suspect: garble|number``.
 
@@ -56,9 +71,7 @@ def flag_suspect_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]
     confidence) pass through untouched, so the dictation path is
     unaffected.
     """
-    logprobs = [
-        float(s["avg_logprob"]) for s in segments if s.get("avg_logprob") is not None
-    ]
+    logprobs = [v for s in segments if (v := _finite_logprob(s)) is not None]
     relative_cut: float | None = None
     if len(logprobs) >= MIN_SEGMENTS_FOR_RELATIVE:
         ordered = sorted(logprobs)
@@ -75,12 +88,11 @@ def flag_suspect_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]
 
     out: list[dict[str, Any]] = []
     for seg in segments:
-        logprob = seg.get("avg_logprob")
+        value = _finite_logprob(seg)
         text = str(seg.get("text", ""))
         entry = dict(seg)
         garble = _repeated_bigram_rate(text) >= BIGRAM_REPEAT_RATE
-        if logprob is not None:
-            value = float(logprob)
+        if value is not None:
             if (
                 value < GARBLE_LOGPROB
                 or relative_cut is not None
