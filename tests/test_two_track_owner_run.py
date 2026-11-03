@@ -165,9 +165,9 @@ def test_two_track_naming_never_prompts_for_the_owner(
     assert asked.prompts, "the naming hook should have offered to name the speakers"
     assert not [p for p in asked.prompts if OWNER in p], asked.prompts
     assert [p for p in asked.prompts if "Others" in p], asked.prompts
-    # The owner still gets a clip, from the mic stem rather than the mix.
-    assert fake_clips, "naming should have cut the owner's clip"
-    assert fake_clips[0] == ["me.flac"]
+    # The owner is shown as one line and never clipped (#213): only the far
+    # side is cut, from the mix.
+    assert fake_clips == [["call.m4a"]]
 
 
 def test_fallback_owner_sidecar_still_prompts_for_the_owner(

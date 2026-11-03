@@ -1,7 +1,7 @@
 """Listen naming UX fixes (issue #202).
 
 Feedback while clips are prepared, type-ahead discarded before each prompt,
-the two-track owner never prompted (and always clipped from the mic stem),
+the two-track owner shown as one line (never prompted or clipped, #213),
 and the sidecar's own ``.md`` updated in place. TTY, prompts, clip extraction
 and playback are all faked: no audio plays, no ffmpeg runs.
 """
@@ -20,6 +20,7 @@ from _cli_helpers import isolate_home
 
 import vemoizer.names_cli as names_cli
 from vemoizer.names_cli import _discard_pending_input, run_names
+from vemoizer.people_config import read_people_list
 from vemoizer.sidecar import build_sidecar
 
 OWNER = "Janni"
@@ -215,7 +216,7 @@ class TestOwner:
             "Add Bot to people in " + str(tmp_path / "people.toml") + "? [y/N] ",
         ]
 
-    def test_owner_gets_quote_and_clip_from_mic_stem(
+    def test_owner_shown_as_one_line_without_quotes_or_clips(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -226,11 +227,27 @@ class TestOwner:
         sc = _two_track_sidecar(tmp_path)
         assert _run(sc, _Recorder(["Bot", "n"])) == 0
         out = capsys.readouterr().out
-        assert f'"{OWNER_TEXT[:40]}' in out
-        # The owner's clip comes from the mic stem; the other side from the mix.
-        assert clips["sources"][0] == ["me.flac"]
-        assert clips["sources"][1] == ["call.flac"]
-        assert len(clips["played"]) == 2
+        assert f"{OWNER}  (73% of talk) — you (own mic track)" in out
+        assert OWNER_TEXT[:40] not in out
+        # Only the other side is clipped, from the mix; the owner is not played.
+        assert clips["sources"] == [["call.flac"]]
+        assert len(clips["played"]) == 1
+
+    def test_no_preparing_line_when_only_the_owner_has_clips(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        clips: dict[str, list],
+    ) -> None:
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        sc = _two_track_sidecar(tmp_path)
+        data = json.loads(sc.read_text(encoding="utf-8"))
+        data["paragraphs"] = data["paragraphs"][:1]
+        sc.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        assert _run(sc, _Recorder([])) == 0
+        assert "Preparing audio clips" not in capsys.readouterr().out
+        assert clips["sources"] == []
 
     def test_owner_name_kept_and_other_side_named(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clips: dict
@@ -278,3 +295,72 @@ class TestOneMarkdown:
         text = original.read_text(encoding="utf-8")
         assert "STALE RENDER" not in text
         assert "Bot" in text
+
+
+# --- 4. people list: every name added in one run is kept (issue #212) ---
+
+
+def _three_speaker_sidecar(tmp_path: Path) -> Path:
+    _make_wav(tmp_path / "calls" / "t" / "call.flac")
+    data = {
+        "text": "a b c",
+        "paragraphs": [
+            {
+                "start": 0.0,
+                "end": 9.0,
+                "text": "Ensimmäinen puhuja.",
+                "speaker": "SPEAKER_00",
+            },
+            {
+                "start": 10.0,
+                "end": 17.0,
+                "text": "Toinen puhuja.",
+                "speaker": "SPEAKER_01",
+            },
+            {
+                "start": 18.0,
+                "end": 23.0,
+                "text": "Kolmas puhuja.",
+                "speaker": "SPEAKER_02",
+            },
+        ],
+        "source": [{"path": "calls/t/call.flac", "part_offset_s": 0.0}],
+        "options": {
+            "command": "meeting",
+            "glossary_files": [],
+            "glossary_sha256": None,
+        },
+        "speaker_names": {},
+    }
+    path = tmp_path / "2026-11-03 Testi.json"
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+class TestPeopleList:
+    def test_every_name_added_in_one_run_is_kept(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        cfg = tmp_path / "people.toml"
+        cfg.write_text('people = ["Mikko"]\n', encoding="utf-8")
+        sc = _three_speaker_sidecar(tmp_path)
+        rec = _Recorder(["Eero", "y", "Iris", "y", "Antti", "y"])
+        assert _run(sc, rec, no_play=True) == 0
+        assert read_people_list(cfg) == ["Mikko", "Eero", "Iris", "Antti"]
+
+    def test_name_added_or_declined_is_not_offered_again(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        cfg = tmp_path / "people.toml"
+        cfg.write_text("people = []\n", encoding="utf-8")
+        sc = _three_speaker_sidecar(tmp_path)
+        # Eero added, Iris declined, then a second label also named Eero.
+        rec = _Recorder(["Eero", "y", "Iris", "n", "eero"])
+        assert _run(sc, rec, no_play=True) == 0
+        assert [p for p in rec.prompts if p.startswith("Add ")] == [
+            f"Add Eero to people in {cfg}? [y/N] ",
+            f"Add Iris to people in {cfg}? [y/N] ",
+        ]
+        assert read_people_list(cfg) == ["Eero"]
