@@ -154,6 +154,26 @@ def _manifest_entries(bench: Path, *, required: bool) -> list[Excerpt]:
     return [_excerpt_from_manifest(e) for e in entries]
 
 
+def find_bench(start: Path | None = None) -> Path | None:
+    """The nearest ``./.vemoizer/bench`` walking up from *start* (cwd default).
+
+    A bench is a project-layer artefact (like the layered config and
+    glossary), so it is discovered the same way, including the symlink-loop
+    guard those helpers use. ``None`` when no layer has a bench.
+    """
+    current = Path(start) if start is not None else Path(os.getcwd())
+    seen: set[str] = set()
+    while True:
+        candidate = current / ".vemoizer" / "bench"
+        real = str(candidate.resolve())
+        if candidate.is_dir() and real not in seen:
+            return candidate
+        if real in seen or current == current.parent:  # loop or filesystem root
+            return None
+        seen.add(real)
+        current = current.parent
+
+
 def load_bundle(bench_dir: Path) -> tuple[list[Excerpt], dict[str, Reference]]:
     """Load and validate a bench: every manifest audio file is sha256-checked.
 

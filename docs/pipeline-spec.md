@@ -1017,6 +1017,96 @@ traceback. A known exit `134` after a successful table is the Metal teardown
 quirk, not a result. A SIGTERM exits `143` and a SIGINT exits `130`, both after the scratch directory is removed and with no traceback. Seeds derive from base seed 154, the profile and the clip
 stem (`src/vemoizer/degrade_signal.py`).
 
+### `vemoizer accept` — real-meeting acceptance gate (issue #229, epic #220)
+
+`vemoizer accept` is registered with `hidden=True` and does not appear in the
+main `--help`. It runs the CURRENT meeting pipeline on every frozen excerpt of
+the private acceptance bench, scores the fresh result against the owner's
+reviewed reference (`accept_metrics.score_excerpt`), and gates against a
+numbers-only baseline. The bench (`manifest.json` + `audio/<id>/<slot>.flac` +
+`reference/<id>.json`) lives in a project layer and is never committed
+(`accept_bundle.py`); the baseline holds numbers and anonymised ids only, so
+the printed report and the baseline file are both safe to paste into a PR
+body.
+
+**Flags.**
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--bench DIR` | nearest `.vemoizer/bench` walking up from the cwd | Bench directory. Not found: clear error naming the cwd, exit 2. A directory that is not `<project>/.vemoizer/bench` (both names exact): exit 2 before any decode — its project layer is what drives the glossary and the config this run measures. |
+| `--baseline PATH` | `tests/fixtures/accept_baseline.json` | Numbers-only baseline read/written by the gate flags. Printed back exactly as passed (absolute, not resolve(), is used for IO only), so the report carries no absolute paths. |
+| `--check` | off | Gate against the baseline; exit 2 on any regression. |
+| `--update-baseline` | off | Write the measured numbers as the new baseline (keeps an existing `tolerance` block). Refused (exit 2, nothing written, an existing baseline untouched) when any excerpt failed. |
+
+**What is run.** The whole per-excerpt run happens with the cwd at the bench's
+PROJECT ROOT (`bench.parent.parent`, validated as above, restored afterwards
+including on error), because every layered lookup — glossary, LLM config,
+people, run logs — walks up from the cwd and `vemoizer accept` is usually
+invoked from the vemoizer checkout, not from the bench's project. Each
+excerpt, in manifest order, goes through
+`batch_guard._transcribe_one` — the wrapper `vemoizer meeting` itself uses
+(fail-loud config check, then `vemoizer.pipeline.transcribe_file` looked up at
+call time) — with the `RunOptions` that
+`batch_preset.resolve_preset_glossary_options("meeting", …)` resolves, so the
+bench runs EXACTLY the pipeline a user's `vemoizer meeting` run does:
+`profile="meeting"`, `diarize=True`, `repair=True`, `speakers=MEETING_SPEAKERS`,
+the layered `config_path`, the recognition `language`, `preprocess`, and a
+`glossary_path` naming the temp file written from the SAME meeting glossary
+composition (`meeting_glossary_lines`: merged home+project layers, prompt
+terms, `@`-prefixed LLM terms, correction pairs; deleted in a `finally`
+afterwards, merge notices to stderr). A two-track
+excerpt passes `tracks=TrackPaths(me=…, them=…)` (the mic stem is the ingest
+path; the stems drive the decode); a mix excerpt passes the mix path. The
+hypothesis is always this fresh decode: an excerpt's corrected sidecar is
+where its reference came from, so reading it would score the sidecar, not the
+pipeline. Glossary-insertion terms come from the same resolved options: the
+prompt terms plus the `@`-LLM-only terms (`@` stripped), deduplicated in
+order; a correction pair's wrong side is not a term and is never counted.
+The run-and-score code is `accept_run.py`.
+
+**What is scored.** The hypothesis speech units are the result's `paragraphs`
+— the post-repair text the user reads, with `speaker`, `suspect` and times
+(glossary insertions are made by the repair stage, so the raw segments are not
+what the user is judged on). `loop_seconds` is deliberately re-computed from
+the result's raw `segments`, because `compression_ratio` — the hallucination
+-wall signal — only survives there. An excerpt whose result carries an
+`error` key, or whose pipeline run RAISES, is a failed excerpt: it prints
+`FAILED`, contributes no numbers, logs the exception type to stderr (never a
+path or transcript text) and is a regression under `--check`. A crash in one
+excerpt never aborts the bench.
+
+**Output.** One tab-separated line per excerpt plus an aggregate line and the
+bench fingerprint. Excerpts are named `E1`..`Ek` by manifest order; real
+excerpt ids, speaker names, paths, titles and transcript text are never
+printed. Every metric key is printed on its excerpt's line, `None` as `-`
+("no signal", e.g. no flags raised, so precision is undefined). The aggregate
+line is the mean of the rates and accuracies over the excerpts where they
+exist and the sum of the counts and seconds. The fingerprint is 12 hex
+characters of sha256 over the manifest bytes plus each reference file's bytes
+in sorted id order: it changes when the bench does.
+
+**Baseline and gate.** The baseline is
+`{"fingerprint", "tolerance": {key: float}, "excerpts": {"E1": {…}},
+"aggregate": {…}}`. `--check` compares the per-excerpt and aggregate values
+against it with each key's direction: `speaker_name_acc`,
+`speaker_mapped_acc`, `flag_precision` and `flag_recall` are higher-is-better,
+everything else lower-is-better. Each key has its own tolerance; the defaults
+in `accept_baseline.py` are 0.03 for rates, 5.0 s for second-valued keys and 0
+for counts until #230 calibrates them over repeated runs. A fingerprint
+mismatch is bench drift (exit 2, before any decode), as is a missing baseline,
+a draft reference, or any regression; otherwise `accept check passed` is
+printed and the exit is 0. The gate also FAILS CLOSED: a baseline missing the
+`aggregate` block, or missing an excerpt or a metric key the current run
+measured, is a `BaselineDrift` error (exit 2 naming the block, key and scope),
+never a silent skip that prints a pass. `tests/fixtures/accept_baseline.json`
+is recorded by #230 in its own chore PR.
+
+**Drafts.** A reference with no `reviewed_by` is a draft. `--check` and
+`--update-baseline` refuse to run on a bench containing drafts (exit 2, listing
+the anonymised ids), because an unreviewed answer must never become the gate.
+Without either flag the run happens anyway and those rows are marked `(draft)`
+— the owner previews the numbers before spending the listening time.
+
 ## Configuration
 
 The LLM (adjudication / cleanup / summary) is selected by a user config

@@ -29,6 +29,7 @@ from pathlib import Path
 
 import typer
 
+from vemoizer.accept_cli import register_accept
 from vemoizer.cli_support import (
     parse_speakers as _parse_speakers,
 )
@@ -58,6 +59,7 @@ models_app = typer.Typer(
 )
 app.add_typer(models_app, name="models")
 register_eval(app)
+register_accept(app)
 register_render(app)
 register_names(app)
 
