@@ -167,12 +167,11 @@ def test_render_renames_action_item_owner_prefix() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_render_same_name_labels_merge_to_earliest_label() -> None:
-    """Two labels named the same person collapse to the earliest label."""
+def test_render_same_name_labels_render_as_one_named_speaker() -> None:
+    """Two labels named the same person (one person split into two
+    diarization clusters) both carry the name: no bare label survives, and
+    the speaker legend has one entry with the combined share (issue #215)."""
     sidecar = _sidecar()
-    # SPEAKER_1 (start 0.0) is earlier than SPEAKER_2 (start 8.0), so
-    # SPEAKER_1 is canonical: every other label in the group is rewritten
-    # to it, and the canonical label itself carries the given name.
     md = render_markdown(
         sidecar,
         corrections={},
@@ -180,16 +179,15 @@ def test_render_same_name_labels_merge_to_earliest_label() -> None:
     )
 
     assert "[Mats] Puhuttiin" in md
-    assert "[SPEAKER_1] epittä" in md
-    assert "[Mats]" not in md.replace("[Mats] Puhuttiin", "", 1)
-    assert "[SPEAKER_2]" not in md
+    assert "[Mats] epittä" in md
+    assert "SPEAKER_1" not in md
+    assert "SPEAKER_2" not in md
+    assert "Mats (100%)" in md
 
 
-def test_render_merge_picks_earliest_label_by_paragraph_start() -> None:
-    """The label with the earliest first-seen start becomes canonical."""
+def test_render_same_name_labels_order_does_not_matter() -> None:
+    """Whichever label speaks first, every paragraph carries the name."""
     sidecar = _sidecar()
-    # Make SPEAKER_2 the earliest: reorder starts so its first paragraph
-    # comes before SPEAKER_1's.
     sidecar["paragraphs"] = [
         {"start": 0.0, "text": "Aloitus.", "speaker": "SPEAKER_2"},
         {"start": 5.0, "text": "Jatko.", "speaker": "SPEAKER_1"},
@@ -202,19 +200,19 @@ def test_render_merge_picks_earliest_label_by_paragraph_start() -> None:
         speaker_names={"SPEAKER_1": "Mats", "SPEAKER_2": "Mats"},
     )
 
-    # SPEAKER_2 starts at 0.0 → canonical; SPEAKER_1 is rewritten to the
-    # canonical label, and SPEAKER_2 carries the given name.
     assert "[Mats] Aloitus." in md
-    assert "[SPEAKER_2] Jatko." in md
+    assert "[Mats] Jatko." in md
     assert "[Mats] Lopetus." in md
-    assert "[SPEAKER_1]" not in md
+    assert "[SPEAKER_" not in md
 
 
-def test_render_merge_rewrites_notes_owner_prefixes() -> None:
+def test_render_names_replace_raw_labels_in_notes_text() -> None:
     sidecar = _sidecar()
+    sidecar["notes"]["title"] = "SPEAKER_2 ja alusta"
+    sidecar["notes"]["summary"] = "SPEAKER_1 esitteli, SPEAKER_12 kommentoi."
     sidecar["notes"]["action_items"] = [
         "SPEAKER_1: Kirjaa epittä",
-        "SPEAKER_2: Lähetä päiväraja",
+        "SPEAKER_2: Lähetä päiväraja SPEAKER_1:lle",
     ]
     sidecar["notes"]["key_points"] = ["SPEAKER_1 esitteli alustan"]
 
@@ -224,12 +222,20 @@ def test_render_merge_rewrites_notes_owner_prefixes() -> None:
         speaker_names={"SPEAKER_1": "Mats", "SPEAKER_2": "Mats"},
     )
 
-    # SPEAKER_1 (start 0.0) is canonical → the merged label (SPEAKER_2)
-    # is rewritten to it, and the canonical label itself becomes "Mats".
+    assert "# Mats ja alusta" in md
+    assert "Mats esitteli, SPEAKER_12 kommentoi." in md  # whole-word only
     assert "- [ ] Mats: Kirjaa epittä" in md
-    assert "- [ ] SPEAKER_1: Lähetä päiväraja" in md
-    assert "SPEAKER_1 esitteli alustan" in md
-    assert "Mats esitteli" not in md  # key_points carry no owner prefix rewrite
+    assert "- [ ] Mats: Lähetä päiväraja Mats:lle" in md
+    assert "Mats esitteli alustan" in md
+
+
+def test_render_notes_text_keeps_non_label_words() -> None:
+    """Only raw SPEAKER_N labels are replaced inside free notes text: a
+    label like "Others" is an ordinary word there."""
+    sidecar = _sidecar()
+    sidecar["notes"]["summary"] = "Others joined late."
+    md = render_markdown(sidecar, corrections={}, speaker_names={"Others": "Bot"})
+    assert "Others joined late." in md
 
 
 # ---------------------------------------------------------------------------

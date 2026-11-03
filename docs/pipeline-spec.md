@@ -761,6 +761,11 @@ warns that new PROMPT terms need a re-transcribe (corrections and names
 are applied regardless). A missing glossary file warns to stderr and
 proceeds (fail-open).
 
+Every named label renders as its name. Labels given the same name (one
+person split into two diarization clusters) render as one speaker with a
+combined talk share, and raw `SPEAKER_N` labels in the notes text (title,
+summary, key points, action items) are replaced by their names (issue #215).
+
 `--name LABEL=NAME` values are persisted into the sidecar's
 `speaker_names` key by rewriting the JSON in place atomically (temp
 file in the same directory + `os.replace`). The output `.md` is written
