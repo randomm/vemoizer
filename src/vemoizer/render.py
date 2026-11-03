@@ -13,9 +13,10 @@ Speaker names are applied by REWRITING the ``speaker`` fields of
 paragraphs/segments and the flat ``OWNER: item`` action-item strings
 BEFORE ``format_md`` runs — never by post-render substitution, so the
 rendered ``[LABEL]`` prefixes and ``- [ ] OWNER: item`` bullets carry the
-names. When several labels are mapped to the same name, the EARLIEST
-label in time order (first paragraph/segment carrying that speaker)
-becomes canonical and every other label is rewritten to it.
+names. Labels mapped to the same name (one person split into two
+diarization clusters) all carry that name, so they render as one speaker
+(issue #215). Raw ``SPEAKER_N`` labels the notes LLM wrote into the notes
+text are replaced by their names too.
 """
 
 from __future__ import annotations
@@ -75,7 +76,7 @@ def _render_dict(
     if isinstance(paragraphs, list) and paragraphs:
         # ``apply_corrections`` maps over dict entries (``para.get``) and
         # ``format_md`` does the same — a corrupted sidecar can carry
-        # non-dict entries, so drop them here (consistent with ``_blocks``)
+        # non-dict entries, so drop them here
         # rather than raising ``AttributeError`` downstream.
         out["paragraphs"] = [p for p in paragraphs if isinstance(p, dict)] or None
         if out["paragraphs"]:
@@ -83,13 +84,13 @@ def _render_dict(
 
     # Speaker names: ``--name`` rewrites a label to a display name; the
     # stored sidecar ``speaker_names`` (persisted by a previous render) is
-    # merged in so a plain re-render stays stable. The two maps compose
-    # (merge rule over all named labels), then the effective rename is
-    # applied to the structured ``speaker`` fields.
+    # merged in so a plain re-render stays stable. Every named label maps
+    # straight to its name: two labels named the same person then share one
+    # ``speaker`` value and render as one speaker (issue #215).
     stored = out.get("speaker_names")
     sidecar_names = stored if isinstance(stored, dict) else {}
     effective_names = {**sidecar_names, **speaker_names}
-    rename = _resolve_rename(out, effective_names)
+    rename = {str(k): str(v) for k, v in effective_names.items() if v}
     for key in ("paragraphs", "segments"):
         blocks = out.get(key)
         if not isinstance(blocks, list):
@@ -107,83 +108,44 @@ def _render_dict(
     return out
 
 
-def _resolve_rename(result: dict[str, Any], names: dict[str, str]) -> dict[str, str]:
-    """Effective ``old label -> new value`` map, with the merge rule.
-
-    ``names`` maps speaker labels to display names (``--name`` values plus
-    the sidecar's stored ``speaker_names``). Every label mapped to the same
-    target name is rewritten to the EARLIEST label (by first paragraph/
-    segment start) that carries that name, so two labels named the same
-    person become one speaker in the rendered output. The canonical label
-    of a merge group carries the given name (it IS that person); every
-    other label in the group is rewritten to the canonical LABEL, so the
-    rendered output shows one speaker rather than two names for the same
-    person. Single-label names map label → name directly.
-    """
-    if not names:
-        return {}
-    first_seen: dict[str, float] = {}
-    for para in _blocks(result):
-        label = para.get("speaker")
-        if label is None:
-            continue
-        label = str(label)
-        name = names.get(label)
-        if name is None:
-            continue
-        start = _block_start(para)
-        if label not in first_seen or start < first_seen[label]:
-            first_seen[label] = start
-
-    # Merge rule: labels sharing a target name collapse to the earliest
-    # label in time order; that canonical label keeps the given name, and
-    # every other label in the group is rewritten to the canonical LABEL
-    # (so one speaker remains in the rendered output). `by_target` is
-    # built ONCE up front (the old code rebuilt the sibling list per
-    # label); iteration stays over ``names.items()`` so the rename dict
-    # keeps dict insertion order (tests assert on it).
-    by_target: dict[str, list[str]] = {}
-    for label, name in names.items():
-        by_target.setdefault(name, []).append(label)
-
-    rename: dict[str, str] = {}
-    for label, name in names.items():
-        siblings = by_target[name]
-        if len(siblings) == 1:
-            rename[label] = name
-            continue
-        canonical = min(siblings, key=lambda lb: first_seen.get(lb, float("inf")))
-        rename[label] = name if label == canonical else canonical
-    return rename
-
-
-def _blocks(result: dict[str, Any]) -> list[dict[str, Any]]:
-    """Paragraphs, else segments — the structures carrying ``speaker``."""
-    for key in ("paragraphs", "segments"):
-        blocks = result.get(key)
-        if isinstance(blocks, list) and blocks:
-            return [b for b in blocks if isinstance(b, dict)]
-    return []
-
-
-def _block_start(block: dict[str, Any]) -> float:
-    try:
-        return float(block.get("start", 0.0))
-    except (TypeError, ValueError):
-        return 0.0
-
-
 def _apply_names_to_notes(
     notes: dict[str, Any], rename: dict[str, str]
 ) -> dict[str, Any]:
-    """Copy *notes* with owner prefixes rewritten on the action items."""
+    """Copy *notes* with names applied.
+
+    Action items get their ``OWNER: `` prefix rewritten; raw ``SPEAKER_N``
+    labels anywhere in the notes text (title, summary, key points, action
+    items) are replaced by their names (issue #215).
+    """
     out = dict(notes)
     items = out.get("action_items")
     if isinstance(items, list):
         out["action_items"] = _apply_names_to_items(
             [str(item) for item in items], rename
         )
+    labels = {k: v for k, v in rename.items() if _RAW_LABEL.fullmatch(k)}
+    if not labels:
+        return out
+    for key in ("title", "summary"):
+        if isinstance(out.get(key), str):
+            out[key] = _replace_labels(out[key], labels)
+    for key in ("key_points", "action_items"):
+        if isinstance(out.get(key), list):
+            out[key] = [_replace_labels(str(item), labels) for item in out[key]]
     return out
+
+
+#: A raw diarization label, the only kind replaced inside free notes text
+#: (a label like "Others" is also an ordinary word there).
+_RAW_LABEL = re.compile(r"SPEAKER_\d+")
+
+
+def _replace_labels(text: str, labels: dict[str, str]) -> str:
+    """Whole-word label -> name; ``_`` is a word character, so ``SPEAKER_1``
+    never matches inside ``SPEAKER_12``."""
+    for label, name in labels.items():
+        text = re.sub(rf"\b{re.escape(label)}\b", lambda _m, n=name: n, text)
+    return text
 
 
 def render_markdown(

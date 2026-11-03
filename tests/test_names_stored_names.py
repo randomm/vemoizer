@@ -172,7 +172,7 @@ class TestStoredNameMergeStillApplies:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Replacing SPEAKER_2's stored name with the same name as SPEAKER_1
-        still collapses to the earliest label via the render merge rule."""
+        renders both labels as that one name (issue #215)."""
         isolate_home(monkeypatch, tmp_path, tmp_path)
         sc = _write_sidecar(
             tmp_path, _sidecar_with_stored({"SPEAKER_1": "Mikko", "SPEAKER_2": "Old"})

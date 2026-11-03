@@ -341,7 +341,7 @@ class TestSameNameCollapse:
     def test_two_labels_same_name(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        """Two labels given the same name → collapse to earliest via render merge."""
+        """Two labels given the same name render as that one name (issue #215)."""
         isolate_home(monkeypatch, tmp_path, tmp_path)
         data = _sidecar()
         data.pop("source", None)
