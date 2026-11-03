@@ -91,6 +91,10 @@ def flag_suspect_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]
         value = _finite_logprob(seg)
         text = str(seg.get("text", ""))
         entry = dict(seg)
+        # A loop wall verified by selfheal.heal() outranks every rule here:
+        # it comes from the detector, not from a shaky logprob, and
+        # relabelling it "garble" would hide what the reader is looking at.
+        verified_loop = seg.get("suspect") == "loop"
         garble = _repeated_bigram_rate(text) >= BIGRAM_REPEAT_RATE
         if value is not None:
             if (
@@ -99,9 +103,9 @@ def flag_suspect_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]
                 and value < relative_cut
             ):
                 garble = True
-            elif value < NUMBER_LOGPROB and _DIGIT.search(text):
+            elif value < NUMBER_LOGPROB and _DIGIT.search(text) and not verified_loop:
                 entry["suspect"] = "number"
-        if garble:
+        if garble and not verified_loop:
             entry["suspect"] = "garble"
         out.append(entry)
     return out

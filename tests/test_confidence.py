@@ -122,3 +122,32 @@ def test_non_finite_logprob_segment_is_not_flagged_by_logprob() -> None:
     for bad in (float("nan"), float("inf"), float("-inf")):
         out = flag_suspect_segments([_seg("selvä lause", logprob=bad)])
         assert "suspect" not in out[0], bad
+
+
+# -- issue #219: a verified loop wall outranks confidence guesses ---------
+#
+# selfheal.heal() stamps suspect="loop" on walls it could not repair. That
+# flag comes from the detector, not from a shaky logprob, so confidence
+# must not relabel it ("garble" would hide what the reader is looking at).
+
+
+def test_loop_flag_survives_garble_rules() -> None:
+    seg = _seg("Kiitos. Kiitos. Kiitos. Kiitos. Kiitos.", logprob=-0.9)
+    seg["suspect"] = "loop"
+    out = flag_suspect_segments([seg])
+    assert out[0]["suspect"] == "loop"
+
+
+def test_loop_flag_survives_number_rules() -> None:
+    seg = _seg("vuonna 2013 vuonna 2013 vuonna 2013 vuonna 2013", logprob=-0.6)
+    seg["suspect"] = "loop"
+    out = flag_suspect_segments([seg])
+    assert out[0]["suspect"] == "loop"
+
+
+def test_other_suspect_values_are_still_replaced() -> None:
+    """Only "loop" is sacred; a stale "number" still loses to garble."""
+    seg = _seg("selvä", logprob=-0.9)
+    seg["suspect"] = "number"
+    out = flag_suspect_segments([seg])
+    assert out[0]["suspect"] == "garble"

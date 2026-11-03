@@ -9,11 +9,15 @@ injected callable, so no models load here.
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import numpy as np
+import pytest
 
-from vemoizer.selfheal import find_degenerate_windows, heal
+from vemoizer import selfheal
+from vemoizer.loops import find_degenerate_windows, loop_seconds
+from vemoizer.selfheal import heal
 
 SR = 16_000
 
@@ -245,3 +249,230 @@ def test_heal_budget_is_time_based_not_slice_count() -> None:
 
     heal(result, slices, counting)
     assert len(calls) == 300  # the old 200-slice cap would stop here
+
+
+# --- one long looping segment (issue #219) ------------------------------
+#
+# A loop whisper emits as ONE 20 s segment ("Jumala, Jumala, …") never
+# joins a run, so the run rule above cannot see it at all. The signal is
+# whisper's own per-segment compression_ratio (its discard cut is 2.4),
+# which the only heal caller — the whisper decode — stores. A word-
+# repetition rule is NOT the signal: natural Finnish repeats itself
+# ("no niin no niin …") and would be flagged as a wall.
+
+
+def _long(text: str, start: float, end: float, **extra: Any) -> dict[str, Any]:
+    return {"start": start, "end": end, "text": text, **extra}
+
+
+LOOP_TEXT = "Jumala, " * 12
+NORMAL_LONG = "Kokouksessa käytiin läpi budjetti ja seuraavan vaiheen aikataulu"
+
+
+def test_long_segment_is_a_window_by_compression_ratio() -> None:
+    seg = _long(NORMAL_LONG, 0.0, 20.0, compression_ratio=3.1)
+    assert find_degenerate_windows([seg]) == [(0.0, 20.0)]
+
+
+def test_normal_long_segment_is_not_a_window() -> None:
+    seg = _long(NORMAL_LONG, 0.0, 20.0, compression_ratio=1.6)
+    assert find_degenerate_windows([seg]) == []
+
+
+def test_short_segment_below_token_floor_needs_a_run() -> None:
+    """A few repeated words in one short segment is emphasis, not a wall."""
+    seg = _long("Jumala, Jumala, Jumala", 0.0, 2.0, compression_ratio=3.5)
+    assert find_degenerate_windows([seg]) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Backchannel chains and quoted speech: repeated words, no wall.
+        "no niin no niin mennään sitten seuraavaan kohtaan",
+        "minä sanon että minä sanon että se on hyvä asia",
+        "mä luulen että mä luulen että tämä menee hyvin",
+    ],
+)
+def test_natural_repetition_in_a_long_segment_is_not_a_window(text: str) -> None:
+    """Word repetition at a normal compression ratio is Finnish, not a loop."""
+    seg = _long(text, 0.0, 20.0, compression_ratio=1.3)
+    assert find_degenerate_windows([seg]) == []
+
+
+def test_long_segment_window_merges_with_a_nearby_run_wall() -> None:
+    seg = _long(LOOP_TEXT, 10.0, 14.0, compression_ratio=3.1)
+    wall = [_seg("Kiitos.", 15.0 + i, 16.0 + i) for i in range(5)]
+    assert find_degenerate_windows([seg] + wall) == [(10.0, 20.0)]
+
+
+# --- loop_seconds (shared with `vemoizer accept`) -----------------------
+
+
+def test_loop_seconds_sums_the_windows() -> None:
+    wall = [_seg("Kiitos.", float(i), float(i) + 1.0) for i in range(6)]
+    distant = _long(LOOP_TEXT, 100.0, 112.5, compression_ratio=3.1)
+    assert loop_seconds(wall + [distant]) == 18.5
+
+
+def test_loop_seconds_is_zero_on_clean_segments() -> None:
+    assert loop_seconds(_normal_segments()) == 0.0
+
+
+# --- walls that survive the heal are flagged, not kept silently ---------
+
+
+def test_unhealed_wall_is_flagged_and_warned() -> None:
+    result = _wall_result()
+    healed = heal(result, _slices(), _looping, fallback=_looping)
+    wall = [s for s in healed["segments"] if s["text"] == "Kiitos."]
+    assert len(wall) == 8  # the wall is still there (fail-open)...
+    assert all(s["suspect"] == "loop" for s in wall)  # ...but it is labelled
+    assert not any("suspect" in s for s in healed["segments"] if "Alussa" in s["text"])
+    assert len(healed["warnings"]) == 1
+    assert "8s" in healed["warnings"][0]
+    assert "loop" in healed["warnings"][0].lower()
+
+
+def test_healed_wall_gets_no_flag_and_no_warning() -> None:
+    healed = heal(_wall_result(), _slices(), _good_redecode)
+    assert not any("suspect" in s for s in healed["segments"])
+    assert "warnings" not in healed
+
+
+def test_partially_healed_wall_flags_only_the_unhealed_half() -> None:
+    """A healed replacement is never a loop; only unhealed time is counted.
+
+    10 x "Kiitos." over 0-10 s; [0,5) heals into three "Hyvä asia."
+    segments, [5,10) still loops. The replacements must not be stamped
+    suspect, and the warning must name the 5 s still looping, not 10 s.
+    """
+    wall = [_seg("Kiitos.", float(i), float(i) + 1.0) for i in range(10)]
+    result = {"text": "", "segments": wall, "words": []}
+    slices = [
+        (0, np.zeros(5 * SR, dtype=np.float32)),
+        (5 * SR, np.zeros(5 * SR, dtype=np.float32)),
+    ]
+    calls: list[int] = []
+
+    def half_heals(chunk: np.ndarray) -> dict[str, Any]:
+        calls.append(len(chunk))
+        if len(calls) == 1:
+            return {
+                "segments": [
+                    _seg("Hyvä asia.", 0.5, 1.5),
+                    _seg("Hyvä asia.", 1.5, 2.5),
+                    _seg("Hyvä asia.", 2.5, 3.5),
+                ],
+                "words": [],
+            }
+        return {
+            "segments": [_seg("Kiitos.", float(i), float(i) + 1.0) for i in range(5)],
+            "words": [],
+        }
+
+    healed = heal(result, slices, half_heals)
+    replacements = [s for s in healed["segments"] if s["text"] == "Hyvä asia."]
+    kept = [s for s in healed["segments"] if s["text"] == "Kiitos."]
+    assert len(replacements) == 3
+    assert not any("suspect" in s for s in replacements)
+    assert len(kept) == 5  # the [5,10) wall survived the fail-open heal
+    assert all(s["suspect"] == "loop" for s in kept)
+    assert all(float(s["start"]) >= 5.0 for s in kept)
+    assert len(healed["warnings"]) == 1
+    assert "5s" in healed["warnings"][0]
+    assert "10s" not in healed["warnings"][0]
+
+
+def test_residual_ignores_a_healed_slice_far_from_the_remaining_wall() -> None:
+    """A healed slice elsewhere must not stretch the residual window."""
+    wall_a = [_seg("Kiitos.", float(i), float(i) + 1.0) for i in range(6)]
+    wall_b = [_seg("Joo.", 100.0 + i, 101.0 + i) for i in range(6)]
+    result = {"text": "", "segments": wall_a + wall_b, "words": []}
+    slices = [
+        (0, np.zeros(6 * SR, dtype=np.float32)),
+        (100 * SR, np.zeros(6 * SR, dtype=np.float32)),
+    ]
+    calls: list[int] = []
+
+    def second_only(chunk: np.ndarray) -> dict[str, Any]:
+        calls.append(len(chunk))
+        if len(calls) == 1:
+            return {
+                "segments": [
+                    _seg("Kiitos.", float(i), float(i) + 1.0) for i in range(6)
+                ],
+                "words": [],
+            }
+        return {
+            "segments": [_seg("Tässä on oikeaa puhetta demosta.", 0.0, 5.0)],
+            "words": [],
+        }
+
+    healed = heal(result, slices, second_only)
+    assert len(healed["warnings"]) == 1
+    assert "6s" in healed["warnings"][0]  # wall A only, not 0-100 s
+    assert all(
+        s.get("suspect") == "loop" for s in healed["segments"] if "Kiitos" in s["text"]
+    )
+    assert not any("suspect" in s for s in healed["segments"] if "demosta" in s["text"])
+
+
+def test_healed_slice_inside_a_window_leaves_both_flanks_residual() -> None:
+    """Healing the middle of a wall flags and counts only the flanks."""
+    wall = [_seg("Kiitos.", float(i), float(i) + 1.0) for i in range(10)]
+    result = {"text": "", "segments": wall, "words": []}
+    slices = [
+        (0, np.zeros(3 * SR, dtype=np.float32)),
+        (3 * SR, np.zeros(4 * SR, dtype=np.float32)),
+        (7 * SR, np.zeros(3 * SR, dtype=np.float32)),
+    ]
+    calls: list[int] = []
+
+    def middle_only(chunk: np.ndarray) -> dict[str, Any]:
+        calls.append(len(chunk))
+        if len(calls) == 2:
+            return {
+                "segments": [
+                    _seg("Hyvä asia.", float(i), float(i) + 1.0) for i in range(4)
+                ],
+                "words": [],
+            }
+        return {  # still looping -> rejected, slice kept as-is
+            "segments": [_seg("Kiitos.", float(i), float(i) + 1.0) for i in range(6)],
+            "words": [],
+        }
+
+    healed = heal(result, slices, middle_only)
+    flagged = [
+        float(s["start"]) for s in healed["segments"] if s.get("suspect") == "loop"
+    ]
+    assert flagged == [0.0, 1.0, 2.0, 7.0, 8.0, 9.0]  # the flanks, not 3-7
+    assert len(healed["warnings"]) == 1
+    assert "6s" in healed["warnings"][0]  # 3 s + 3 s, not the whole 10 s
+
+
+def test_budget_skipped_wall_is_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The MAX_HEAL_SECONDS backstop must not swallow the remaining wall."""
+    monkeypatch.setattr(selfheal, "MAX_HEAL_SECONDS", 5.0)
+    wall = [_seg("Kiitos.", float(i), float(i) + 1.0) for i in range(40)]
+    result = {"text": "", "segments": wall, "words": []}
+    slices = [(i * SR, np.zeros(SR, dtype=np.float32)) for i in range(40)]
+
+    def quiet(chunk: np.ndarray) -> dict[str, Any]:
+        seg = _seg("Tässä on oikeaa puhetta demosta.", 0.0, 1.0)
+        return {"segments": [seg], "words": []}
+
+    healed = heal(result, slices, quiet)
+    flagged = [s for s in healed["segments"] if s.get("suspect") == "loop"]
+    assert len(flagged) == 35  # 5 slices healed, the rest kept as-is
+    assert any("loop" in w.lower() for w in healed["warnings"])
+
+
+def test_heal_does_not_mutate_the_input_segments() -> None:
+    result = _wall_result()
+    before = copy.deepcopy(result["segments"])
+    heal(result, _slices(), _looping, fallback=_looping)
+    assert result["segments"] == before
+    assert all("suspect" not in s for s in result["segments"])
+    assert "warnings" not in result

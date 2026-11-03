@@ -19,19 +19,22 @@ absent, so the document degrades gracefully. Each timestamped paragraph
 is prefixed with its start time as ``[hh:mm:ss]`` (omitted when the
 paragraph has no ``start``), and a suspect paragraph renders a labelled
 warning — ``suspect="garble"`` → ``⚠ epäselvä``, ``suspect="number"`` →
-``⚠ luku`` (replacing the old bare ``⚠ `` prefix). The section headings
-honour the ``language`` parameter (``"fi"`` default, ``"en"``), with the
-section language threaded from the run dict / batch layer.
+``⚠ luku``, ``suspect="loop"`` (the unhealed wall flag from
+``selfheal.heal``) → ``⚠ toisto`` (replacing the old bare ``⚠ ``
+prefix). The section headings honour the ``language`` parameter
+(``"fi"`` default, ``"en"``), with the section language threaded from
+the run dict / batch layer.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-# Reader-warning labels for the two suspect values stamped by
-# ``confidence.flag_suspect_segments``. Any other (future) suspect value
+# Reader-warning labels for the suspect values stamped by
+# ``confidence.flag_suspect_segments`` (garble/number) and by
+# ``selfheal.heal`` (loop, issue #219). Any other (future) suspect value
 # renders as ``⚠ {value} `` via the fallback in ``_suspect_prefix``.
-_SUSPECT_LABELS = {"garble": "⚠ epäselvä", "number": "⚠ luku"}
+_SUSPECT_LABELS = {"garble": "⚠ epäselvä", "number": "⚠ luku", "loop": "⚠ toisto"}
 
 
 def _part_markers(transcript: dict[str, Any]) -> list[dict[str, Any]]:

@@ -140,6 +140,26 @@ def test_suspects_garble_outranks_number_in_selection() -> None:
     assert "[00:00:50]" not in result
 
 
+def test_suspects_loop_outranks_garble_and_is_listed() -> None:
+    """The counted categories are the listed ones (issue #219).
+
+    ``total_suspects`` counted ``loop`` while ``_worst_suspects`` dropped it,
+    so the heading promised more lines than it printed.
+    """
+    t = {
+        "text": "x",
+        "paragraphs": [
+            {"start": 40.0, "end": 45.0, "text": "Kiitos. Kiitos.", "suspect": "loop"},
+            {"start": 30.0, "end": 32.0, "text": "garble", "suspect": "garble"},
+            {"start": 5.0, "end": 7.0, "text": "number", "suspect": "number"},
+        ],
+    }
+    result = render_report(t)
+    assert "Epävarmat kohdat: 3 (loop, garble, number)" in result
+    assert result.index("[00:00:40]") < result.index("[00:00:30]")
+    assert result.index("[00:00:30]") < result.index("[00:00:05]")
+
+
 # ---------------------------------------------------------------------------
 # Residual loops (find_degenerate_windows on final segments)
 # ---------------------------------------------------------------------------
@@ -359,6 +379,19 @@ def test_warnings_both_categories() -> None:
     result = render_report(t)
     assert "diarization" in result
     assert "notes" in result
+
+
+def test_warnings_self_heal_loop_classified() -> None:
+    """The unhealed-wall warning is rendered with its seconds (issue #219)."""
+    t = _transcript(
+        warnings=[
+            "self-heal: 12s of repetition loops could not be repaired "
+            "and are flagged as suspect"
+        ]
+    )
+    result = render_report(t)
+    assert "Varoitukset (loop):" in result
+    assert "self-heal: 12s of repetition loops" in result
 
 
 def test_warnings_non_list_falls_back_to_empty() -> None:
