@@ -6,7 +6,9 @@ models, no CLI (#229 renders them). Walls and WER reuse
 ``vemoizer.loops.loop_seconds`` and ``vemoizer.eval_harness.wer`` so a
 wall is counted one way. Seconds are relative to the excerpt start;
 reference ``speaker`` is a name or ``"unclear"``, hypothesis segments
-may lack a speaker and add ``suspect`` / ``compression_ratio``.
+may lack a speaker and add ``suspect`` / ``compression_ratio``. The
+string-only title checks live in :mod:`vemoizer.accept_title` and are
+imported here so the CLI scores against one module.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+from .accept_title import title_hits
 from .eval_harness import wer as _wer
 from .loops import loop_seconds
 from .textnorm import textnorm
@@ -205,56 +208,6 @@ def glossary_insertions(ref_text: str, hyp_text: str, terms: list[str]) -> int:
                 - _count_token_run(ref_tokens, term_tokens),
             )
     return total
-
-
-def _token_matches(token: str, pattern: str) -> bool:
-    # "kont*" is a stem (prefix); anything else must equal the whole word.
-    if pattern.endswith("*"):
-        return token.startswith(pattern[:-1])
-    return token == pattern
-
-
-def _title_term_hit(term: str, title_tokens: list[str]) -> bool:
-    """True when the words of *term* appear consecutively in the title.
-
-    Matching is whole-word unless a word ends in ``*``, which makes it a
-    stem: Finnish inflects word endings ("kontti" -> "kontin"), so the
-    reviewer writes "kont*". Whole-word by default because a short
-    acronym ("AI") is a prefix of ordinary words ("aina").
-    """
-    # textnorm drops "*" and may split a word ("IWS:n" -> "iws n"), so
-    # normalise per raw word and re-attach the marker to its last piece.
-    patterns: list[str] = []
-    for word in term.split():
-        pieces = textnorm(word.rstrip("*")).split()
-        if pieces and word.endswith("*"):
-            pieces[-1] += "*"
-        patterns.extend(pieces)
-    if not patterns:
-        return False
-    for i in range(len(title_tokens) - len(patterns) + 1):
-        window = title_tokens[i : i + len(patterns)]
-        if all(_token_matches(t, p) for t, p in zip(window, patterns, strict=True)):
-            return True
-    return False
-
-
-def _count_hits(terms: list[str], toks: list[str], want: bool) -> int:
-    # A term textnorm() empties (pure punctuation) can never match: ignore
-    # it as neither missing nor a hit rather than emitting a false signal.
-    return sum(1 for t in terms if textnorm(t) and _title_term_hit(t, toks) is want)
-
-
-def title_hits(title: str, title_expect: dict[str, list[str]]) -> dict[str, int]:
-    """Title checks: ``must_contain_missing`` and ``forbid_hits``, matched
-    case-insensitively, whole-word or ``stem*`` (see :func:`_title_term_hit`)."""
-    title_tokens = textnorm(title).split()
-    must = title_expect.get("must_contain") or []
-    forbid = title_expect.get("forbid") or []
-    return {
-        "must_contain_missing": _count_hits(must, title_tokens, False),
-        "forbid_hits": _count_hits(forbid, title_tokens, True),
-    }
 
 
 def _speech_spans(seg: Segment, ref: list[Segment]) -> list[tuple[float, float]]:

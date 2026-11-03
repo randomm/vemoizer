@@ -20,6 +20,7 @@ import typer
 
 from vemoizer.batch_output import PRESET_FORMATS, _write_preset_output
 from vemoizer.diarization import SpeakerCount
+from vemoizer.glossary_layers import load_layers, merge
 from vemoizer.ingest import IngestError
 from vemoizer.naming_hook import ask_naming_hook
 from vemoizer.output.naming import nfc_stem_and_suffix
@@ -63,6 +64,58 @@ def _mtime_date_str(path: Path) -> str:
     except OSError:
         return date.today().isoformat()
     return datetime.fromtimestamp(mtime).date().isoformat()
+
+
+def meeting_glossary_lines(options: RunOptions) -> list[str]:
+    """The lines a meeting run writes to its temp glossary file.
+
+    The whisper prompt terms, then the ``@``-prefixed LLM-only terms, then
+    the ``wrong => right`` correction pairs. One function, two callers
+    (issue #229): ``run_preset`` writes it, and ``vemoizer accept`` writes
+    the same lines so the bench measures what a user's meeting run feeds the
+    pipeline rather than a diverging copy of the composition.
+    """
+    return [
+        *options.whisper_prompt,
+        *[f"@{t}" for t in options.llm_terms],
+        *[f"{w} => {r}" for w, r in options.corrections.items()],
+    ]
+
+
+def resolve_preset_glossary_options(
+    command: str, cli_overrides: dict[str, object]
+) -> RunOptions:
+    """Resolve preset options from the layered glossary plus *cli_overrides*.
+
+    Layered glossary: ``load_layers`` (I/O) → ``merge`` (pure) — skipped when
+    ``--glossary`` explicitly replaces both layers entirely (no merging) — and
+    the merge notices (dropped terms) go to stderr, so stdout stays the
+    command's own output. ``run_preset`` and ``vemoizer accept`` both come
+    through here (issue #229): the layers are read from the CURRENT WORKING
+    DIRECTORY's project layer, which is why a caller that measures another
+    project's configuration chdirs there first.
+    """
+    if cli_overrides.get("glossary") is None:
+        home_terms, home_corr, project_terms, project_corr = load_layers()
+        merged_terms, merged_corrections, notices = merge(
+            project_terms,
+            project_corr,
+            home_terms,
+            home_corr,
+        )
+        for notice in notices:
+            typer.echo(notice, err=True)
+    else:
+        merged_terms, merged_corrections = [], {}
+    return resolve_options(
+        command,
+        layers=None,
+        cli_overrides={
+            **cli_overrides,
+            "glossary_terms": merged_terms,
+            "glossary_corrections": merged_corrections,
+        },
+    )
 
 
 def _run_preset_groups(
@@ -273,33 +326,13 @@ def run_preset(
                 echo=lambda line: typer.echo(line, err=True),
             )
 
-    # Layered glossary: load_layers (I/O) → merge (pure) — skipped when
-    # --glossary explicitly replaces both layers entirely (no merging).
-    merged_terms: list[str] = []
-    merged_corrections: dict[str, str] = {}
-    if glossary_path is None:
-        from vemoizer.glossary_layers import load_layers, merge
-
-        home_terms, home_corr, project_terms, project_corr = load_layers()
-        merged_terms, merged_corrections, notices = merge(
-            project_terms,
-            project_corr,
-            home_terms,
-            home_corr,
-        )
-        for notice in notices:
-            typer.echo(notice, err=True)
-
-    # Pure core: resolve the preset options from the merged layers and
-    # the CLI overrides (CLI > layers > preset defaults).
-    options = resolve_options(
+    # Layered glossary + preset options (CLI > layers > preset defaults),
+    # through the same composition ``vemoizer accept`` uses (issue #229).
+    options = resolve_preset_glossary_options(
         command,
-        layers=None,
-        cli_overrides={
+        {
             "glossary": glossary_path,
             "config": config_path,
-            "glossary_terms": merged_terms,
-            "glossary_corrections": merged_corrections,
             "repair": repair,
             "diarize": diarize,
             "speakers": speakers,
@@ -325,11 +358,7 @@ def run_preset(
             if command == "memo":
                 lines = [f"{w} => {r}" for w, r in options.corrections.items()]
             else:
-                lines = [
-                    *options.whisper_prompt,
-                    *[f"@{t}" for t in options.llm_terms],
-                    *[f"{w} => {r}" for w, r in options.corrections.items()],
-                ]
+                lines = meeting_glossary_lines(options)
             if lines:
                 temp_path = Path(_write_temp_glossary(lines))
                 effective_glossary = str(temp_path)

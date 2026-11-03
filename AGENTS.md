@@ -258,6 +258,9 @@ Before creating documentation, ask: "Will this be true in 200 PRs?"
 | Transcribe a memo | `uv run vemoizer transcribe memo.m4a --out memo.md` |
 | WER regression gate | `uv run vemoizer eval --backend all --check` |
 | Update WER baseline | `uv run vemoizer eval --backend all --update-baseline` |
+| Acceptance bench report | `uv run vemoizer accept` |
+| Acceptance bench gate | `uv run vemoizer accept --check` |
+| Update accept baseline | `uv run vemoizer accept --update-baseline` |
 | Pre-download models | `uv run vemoizer models pull` |
 
 Every `vemoizer` subcommand row above is the target CLI surface, not a
