@@ -233,6 +233,26 @@ def test_out_of_range_samples_are_counted_and_warned_once(caplog) -> None:
     assert len(warnings) == 1
 
 
+def test_clip_notice_fires_once_per_track() -> None:
+    """issue #236: the console hears about a hot input once per recording, not
+    once per chunk; the writer owns the latch."""
+    notices: list[str] = []
+    writer = _writer(FakeFile(), on_clip=lambda: notices.append("clip"))
+    x = np.array([0.5, 1.2, -1.5, 0.1], dtype=np.float32)
+    for i in range(5):
+        writer.write(Chunk(x, i / SR))
+    assert notices == ["clip"]
+
+
+def test_clip_notice_that_raises_never_stops_the_recording() -> None:
+    def boom() -> None:
+        raise RuntimeError("stderr is gone")
+
+    writer = _writer(FakeFile(), on_clip=boom)
+    writer.write(Chunk(np.array([2.0, 0.1], dtype=np.float32), 0.0))
+    assert writer.usable
+
+
 def test_is_digital_silence_is_exact_zero_only() -> None:
     assert is_digital_silence(np.zeros(1000, np.float32))
     rng = np.random.default_rng(1)

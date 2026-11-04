@@ -143,6 +143,7 @@ class TrackWriter:
         *,
         open_file: Callable[[str | Path], Any] | None = None,
         flush_frames: int = FLUSH_FRAMES,
+        on_clip: Callable[[], None] | None = None,
     ) -> None:
         self._path = path
         self._t0 = t0
@@ -153,6 +154,7 @@ class TrackWriter:
         self._started = False
         self._clipped = 0
         self._clip_warned = False
+        self._on_clip = on_clip
         self._usable = True
         self._closed = False
         self._subscribers: list[Subscriber] = []
@@ -232,9 +234,17 @@ class TrackWriter:
         if not over:
             return
         self._clipped += over
-        if not self._clip_warned:
-            self._clip_warned = True
-            log.warning("input exceeds +/-1.0 in %s; samples are clipped", self._path)
+        if self._clip_warned:
+            return
+        # One notice per track per recording (issue #236): the writer owns the
+        # latch, so neither the log nor the console gets a line every chunk.
+        self._clip_warned = True
+        log.warning("input exceeds +/-1.0 in %s; samples are clipped", self._path)
+        if self._on_clip is not None:
+            try:
+                self._on_clip()
+            except Exception as exc:  # a dead console must not stop the recording
+                log.warning("clip notice failed: %s", exc)
 
     def _fail(self, exc: BaseException) -> None:
         self._usable = False

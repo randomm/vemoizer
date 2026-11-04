@@ -137,11 +137,24 @@ def _record_mix_decode(
 ) -> int:
     # The recording stages live in ``listen``, which imports this module, so
     # they are imported here at call time to keep the import cycle one-way.
-    from vemoizer.listen import capture_call, decode_call, kept_message, mix_call
+    from vemoizer.listen import capture_call, decode_call, mix_call
+    from vemoizer.listen_console import CallStatus, kept_message
 
+    # One console voice for the whole stop: the first line goes out before
+    # anything slow starts (#236), so the owner knows the audio is saved.
+    status = CallStatus(quiet=run.quiet)
     try:
         recorded = capture_call(
-            run, call_dir, open_sources, clock, sleep, output_name, tracker, t0, live
+            run,
+            call_dir,
+            open_sources,
+            clock,
+            sleep,
+            output_name,
+            tracker,
+            t0,
+            live,
+            status,
         )
     except KeyboardInterrupt:
         typer.echo(kept_message(call_dir), err=True)
@@ -155,7 +168,9 @@ def _record_mix_decode(
         typer.echo("nothing was recorded; no transcript written", err=True)
         shutil.rmtree(call_dir, ignore_errors=True)
         return 1
+    status.mixing()
     mixed = mix_call(call_dir, me_w, them_w, start_epoch)
     if isinstance(mixed, int):
         return mixed
+    status.transcribing()
     return decode_call(run, call_dir, owner, mixed, speakers, tracker)

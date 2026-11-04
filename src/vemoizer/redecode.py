@@ -247,6 +247,11 @@ class WhisperReDecodeTranscriber:
                 # on text from outside the disputed slice.
                 temperature=0.0,
                 condition_on_previous_text=False,
+                # verbose=None (issue #236): mlx-whisper's bar is drawn only
+                # when verbose is False, so naming it here keeps the dozens of
+                # seconds-long span re-decodes silent beside the run's own
+                # stage display even if the library's default ever changes.
+                verbose=None,
             )
         except Exception as e:  # noqa: BLE001 - logged; re-decode fails open
             logger.warning(

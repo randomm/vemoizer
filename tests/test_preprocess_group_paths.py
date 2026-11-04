@@ -151,7 +151,10 @@ class _NoWeightsWhisper:
     def __init__(self, *args: object, **kwargs: object) -> None:
         pass
 
-    def transcribe(self, audio: np.ndarray) -> dict[str, object]:
+    def transcribe(self, audio: np.ndarray, **kwargs: object) -> dict[str, object]:
+        # **kwargs: the Transcriber Protocol's backend-specific options
+        # (``show_progress``, the self-heal overrides) reach every fake that
+        # stands in for WhisperTranscriber.
         return {"text": "", "segments": []}
 
 

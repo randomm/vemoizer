@@ -110,6 +110,7 @@ def register_listen(app: typer.Typer) -> None:
             duration=duration,
             yes=yes,
             quiet=quiet,
+            verbose=verbose,
             config_path=str(config) if config is not None else None,
             glossary_path=str(glossary) if glossary is not None else None,
             repair=repair,
