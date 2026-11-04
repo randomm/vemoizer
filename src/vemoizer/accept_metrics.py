@@ -33,13 +33,13 @@ def _duration(seg: Segment) -> float:
     return max(0.0, float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)))
 
 
-def _overlap(a: Segment, b: Segment) -> float:
+def overlap(a: Segment, b: Segment) -> float:
     lo = max(float(a.get("start", 0.0)), float(b.get("start", 0.0)))
     hi = min(float(a.get("end", 0.0)), float(b.get("end", 0.0)))
     return max(0.0, hi - lo)
 
 
-def _label(seg: Segment) -> str:
+def speaker_label(seg: Segment) -> str:
     # A missing hypothesis speaker is its own label "", never a name match.
     return str(seg.get("speaker") or "").casefold()
 
@@ -52,7 +52,7 @@ def _ref_name(seg: Segment) -> str | None:
     return None if not name or name == UNCLEAR else name
 
 
-def _at(segments: list[Segment], t: float) -> Segment | None:
+def segment_at(segments: list[Segment], t: float) -> Segment | None:
     """Segment covering time *t*: latest start wins, ties keep the segment
     listed first, so overlapping hypotheses yield one deterministic label."""
     best: Segment | None = None
@@ -81,10 +81,10 @@ def _frame_samples(ref: list[Segment], hyp: list[Segment]) -> list[tuple[str, st
     i = 0
     while t0 + (i + 0.5) * FRAME < t1:  # frame midpoint, global 0.1 s grid
         t = t0 + (i + 0.5) * FRAME
-        r = _at(ref, t)
+        r = segment_at(ref, t)
         if (name := _ref_name(r) if r else None) is not None:
-            h = _at(hyp, t)
-            samples.append((name, _label(h) if h else ""))
+            h = segment_at(hyp, t)
+            samples.append((name, speaker_label(h) if h else ""))
         i += 1
     return samples
 
@@ -94,7 +94,7 @@ def _frame_matrix(samples: list[tuple[str, str]]) -> dict[tuple[str, str], float
     return {cell: n * FRAME for cell, n in Counter(samples).items()}
 
 
-def _greedy_mapping(cells: dict[tuple[str, str], float]) -> dict[str, str]:
+def greedy_mapping(cells: dict[tuple[str, str], float]) -> dict[str, str]:
     """One-to-one hyp label -> ref name maximizing overlap (greedy, largest
     cell first; exact enough for a handful of speakers)."""
     names = {name for name, _label_ in cells}
@@ -124,7 +124,7 @@ def speaker_accuracy(ref: list[Segment], hyp: list[Segment]) -> dict[str, float]
     total = len(samples)
     if total == 0:
         return {"name_acc": 1.0, "mapped_acc": 1.0}
-    mapping = _greedy_mapping(_frame_matrix(samples))
+    mapping = greedy_mapping(_frame_matrix(samples))
     name_match = sum(1 for n, lb in samples if lb == n)
     mapped_match = sum(1 for n, lb in samples if mapping.get(lb) == n)
     return {
@@ -174,7 +174,7 @@ def split_merge_counts(
     return split, merge
 
 
-def _count_token_run(tokens: list[str], term: list[str]) -> int:
+def count_token_run(tokens: list[str], term: list[str]) -> int:
     # Non-overlapping occurrences of the token run *term* in *tokens*.
     n, i = 0, 0
     while i + len(term) <= len(tokens):
@@ -204,8 +204,8 @@ def glossary_insertions(ref_text: str, hyp_text: str, terms: list[str]) -> int:
         if term_tokens:
             total += max(
                 0,
-                _count_token_run(hyp_tokens, term_tokens)
-                - _count_token_run(ref_tokens, term_tokens),
+                count_token_run(hyp_tokens, term_tokens)
+                - count_token_run(ref_tokens, term_tokens),
             )
     return total
 
@@ -259,7 +259,7 @@ def _owner_turn(t: float, speaker: str, ref: list[Segment]) -> int | None:
         for i, r in enumerate(ref)
         if float(r.get("start", 0.0)) <= t <= float(r.get("end", 0.0))
     ]
-    same = [i for i in hits if _label(ref[i]) == speaker]
+    same = [i for i in hits if speaker_label(ref[i]) == speaker]
     return (same or hits or [None])[0]
 
 
@@ -300,7 +300,7 @@ def flag_quality(
                 units.append((True, bool(h.get("suspect")), _duration(h)))
             continue
         for t, w in zip(_word_times(tokens, spans), tokens, strict=True):
-            i = _owner_turn(t, _label(h), ref)
+            i = _owner_turn(t, speaker_label(h), ref)
             if i is not None:
                 words[i].append(w)
                 flags[i] = flags[i] or bool(h.get("suspect"))
@@ -334,13 +334,18 @@ def score_excerpt(
     title: str,
     title_expect: dict[str, list[str]],
     glossary_terms: list[str],
+    text_reviewed: bool = True,
 ) -> dict[str, Any]:
-    """All accept metrics for one excerpt as one flat dict of stable keys."""
+    """All accept metrics for one excerpt as one flat dict of stable keys.
+
+    An unreviewed reference (*text_reviewed* false) has draft text: its WER is
+    reported as ``text_drift`` and the flag keys are omitted, because they
+    would be scored against words nobody checked (issue #243).
+    """
     acc = speaker_accuracy(ref_segments, hyp_segments)
     split, merge = split_merge_counts(ref_segments, hyp_segments)
-    quality = flag_quality(ref_segments, hyp_segments)
     titles = title_hits(title, title_expect)
-    return {
+    scored: dict[str, Any] = {
         "speaker_name_acc": acc["name_acc"],
         "speaker_mapped_acc": acc["mapped_acc"],
         "split_count": split,
@@ -349,10 +354,15 @@ def score_excerpt(
             _join_text(ref_segments), _join_text(hyp_segments), glossary_terms
         ),
         "loop_seconds": loop_seconds(hyp_segments),
-        "unflagged_error_s": quality["unflagged_error_s"],
-        "flag_precision": quality["flag_precision"],
-        "flag_recall": quality["flag_recall"],
-        "wer": transcript_wer(ref_segments, hyp_segments),
-        "title_must_contain_missing": titles["must_contain_missing"],
-        "title_forbid_hits": titles["forbid_hits"],
     }
+    if text_reviewed:
+        quality = flag_quality(ref_segments, hyp_segments)
+        scored["unflagged_error_s"] = quality["unflagged_error_s"]
+        scored["flag_precision"] = quality["flag_precision"]
+        scored["flag_recall"] = quality["flag_recall"]
+        scored["wer"] = transcript_wer(ref_segments, hyp_segments)
+    else:
+        scored["text_drift"] = transcript_wer(ref_segments, hyp_segments)
+    scored["title_must_contain_missing"] = titles["must_contain_missing"]
+    scored["title_forbid_hits"] = titles["forbid_hits"]
+    return scored

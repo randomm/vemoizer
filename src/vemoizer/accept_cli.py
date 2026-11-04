@@ -29,8 +29,16 @@ from typing import Any
 
 import typer
 
-from vemoizer import accept_baseline, accept_bundle, accept_run, batch_preset
+from vemoizer import (
+    accept_answers,
+    accept_baseline,
+    accept_bundle,
+    accept_run,
+    batch_preset,
+)
+from vemoizer.owner_config import load_owner_inputs
 from vemoizer.presets import replace
+from vemoizer.tracks import configured_owner
 
 DEFAULT_BASELINE = Path("tests/fixtures/accept_baseline.json")
 
@@ -68,8 +76,24 @@ def register_accept(app: typer.Typer) -> None:
             "--update-baseline",
             help="Write the measured numbers as the new baseline.",
         ),
+        answers: Path | None = typer.Option(  # noqa: B008 - typer reads option defaults at definition time
+            None,
+            "--import-answers",
+            help=(
+                "Import the owner's quiz answers (bench-answers.json) as probes "
+                "into the bench. Runs nothing else."
+            ),
+        ),
+        by: str | None = typer.Option(  # noqa: B008 - typer reads option defaults at definition time
+            None,
+            "--by",
+            help="Owner named as the quiz reviewer (default: the configured owner).",
+        ),
     ) -> None:
         """Score the private acceptance bench against the reviewed references."""
+        if answers is not None:
+            _import_answers(bench, answers, by, gated=check or update_baseline)
+            return
         # Deferred: vemoizer.batch pulls the batch/notify stack, and the
         # temp-glossary seam is patched there by name (like run_preset's).
         from vemoizer.batch import _write_temp_glossary
@@ -238,6 +262,47 @@ def _refuse_drafts(drafts: set[str], labels: dict[str, str], *, gated: bool) -> 
         err=True,
     )
     raise typer.Exit(code=2)
+
+
+# ---------------------------------------------------------------------------
+# Quiz answers (issue #243)
+# ---------------------------------------------------------------------------
+
+
+def _import_answers(
+    bench: Path | None, answers: Path, by: str | None, *, gated: bool
+) -> None:
+    """``--import-answers``: write the quiz probes into the bench, then stop.
+
+    Exit 2 on a bad answers file, an unknown excerpt or no owner; nothing is
+    written in any of those cases. The owner is read from the bench's project
+    layer, the same config a run of that project would use.
+    """
+    if gated:
+        typer.echo(
+            "error: --import-answers runs alone; drop --check and --update-baseline",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    bench_dir = _resolve_bench(bench).absolute()
+    with contextlib.chdir(_project_root(bench_dir)):
+        owner = configured_owner(by, *load_owner_inputs())
+    if owner is None:
+        typer.echo(
+            "error: no owner: pass --by NAME or set [meeting] owner in the config",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    try:
+        excerpts, _refs = accept_bundle.load_bundle(bench_dir)
+        counts = accept_answers.import_answers(bench_dir, answers, owner)
+    except (accept_bundle.BundleError, ValueError) as exc:  # AnswersError is one
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    labels = {e.id: f"E{index}" for index, e in enumerate(excerpts, 1)}
+    for excerpt_id in sorted(counts, key=lambda i: int(labels[i][1:])):
+        speaker, term = counts[excerpt_id]
+        typer.echo(f"{labels[excerpt_id]}\tprobes={speaker}\tterm_probes={term}")
 
 
 # ---------------------------------------------------------------------------

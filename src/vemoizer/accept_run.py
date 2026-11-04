@@ -22,7 +22,7 @@ from typing import Any
 
 import typer
 
-from vemoizer import accept_baseline, accept_bundle, accept_metrics
+from vemoizer import accept_baseline, accept_bundle, accept_metrics, accept_probes
 from vemoizer.presets import RunOptions, replace
 from vemoizer.tracks import TrackPaths
 
@@ -111,13 +111,30 @@ def score_run(
     if "error" in result:
         logger.error("excerpt failed: %s", result["error"])
         return None
+    hyp = [dict(para) for para in result.get("paragraphs") or []]
     scored = accept_metrics.score_excerpt(
         [asdict(seg) for seg in reference.segments],
-        [dict(para) for para in result.get("paragraphs") or []],
+        hyp,
         title=str((result.get("notes") or {}).get("title") or ""),
         title_expect=reference.title_expect,
         glossary_terms=terms,
+        text_reviewed=reference.reviewed_by is not None,
     )
+    if reference.probes or reference.term_probes:
+        # The owner's quiz is the ground truth for who spoke and which terms
+        # were said, so it replaces the transcript-based speaker and glossary
+        # keys. A key the quiz has no signal for (None: e.g. no term probes)
+        # keeps the owner-reviewed transcript's value, so a reviewed text is
+        # never silently ungated (PR #244 review); on draft text it stays None.
+        quiz = accept_probes.probe_metrics(
+            hyp,
+            [asdict(p) for p in reference.probes],
+            [asdict(t) for t in reference.term_probes],
+        )
+        text_reviewed = reference.reviewed_by is not None
+        scored.update(
+            {k: v for k, v in quiz.items() if v is not None or not text_reviewed}
+        )
     # Override loop_seconds from the RAW segments: ``compression_ratio`` is a
     # whisper field that only survives on ``segments``, so scoring the
     # paragraphs would report 0.0 for every hallucination wall.
@@ -126,8 +143,9 @@ def score_run(
     )
     # ``sum([])`` is an int, so an unwallmarked / unflagged run would print
     # ``0`` while every other run prints ``0.0000``; seconds are always
-    # seconds, in the report and in the numbers-only baseline alike.
+    # seconds, in the report and in the numbers-only baseline alike. Keys an
+    # unreviewed reference omits are simply absent (never a KeyError).
     for key in accept_baseline.SECOND_KEYS:
-        if scored[key] is not None:
+        if scored.get(key) is not None:
             scored[key] = float(scored[key])
     return scored
