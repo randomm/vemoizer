@@ -288,3 +288,69 @@ class TestGlossaryOverrideBypass:
         terms, corr, _ = merge(pt, pc, ht, hc)
         assert terms == ["Nordea", "@Jukka"]
         assert corr == {"Blacksit": "Flagship"}
+
+
+# ---------------------------------------------------------------------------
+# Project walk never doubles the home layer (issue #249)
+# ---------------------------------------------------------------------------
+
+
+def _fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    home = tmp_path / "home"
+    (home / ".vemoizer").mkdir(parents=True)
+    (home / ".vemoizer" / "glossary.txt").write_text("Nordea\n", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    return home
+
+
+def test_project_walk_stops_at_the_home_glossary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A project dir under ~ without its own glossary has no project layer."""
+    from vemoizer.glossary_layers import _nearest_project_glossary
+
+    home = _fake_home(tmp_path, monkeypatch)
+    project = home / "Documents" / "ERR"
+    project.mkdir(parents=True)
+
+    assert _nearest_project_glossary(project) is None
+
+
+def test_project_walk_still_finds_a_project_glossary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vemoizer.glossary_layers import _nearest_project_glossary
+
+    home = _fake_home(tmp_path, monkeypatch)
+    own = home / "Documents" / "NG" / ".vemoizer" / "glossary.txt"
+    own.parent.mkdir(parents=True)
+    own.write_text("IWS\n", encoding="utf-8")
+
+    assert _nearest_project_glossary(own.parent.parent / "sub") == own
+
+
+def test_load_layers_reads_home_terms_once_under_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _fake_home(tmp_path, monkeypatch)
+    project = home / "Documents" / "ERR"
+    project.mkdir(parents=True)
+    monkeypatch.chdir(project)
+
+    ht, _, pt, _ = load_layers()
+
+    assert ht == ["Nordea"]
+    assert pt == []
+
+
+def test_sidecar_lists_the_home_glossary_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vemoizer.sidecar import glossary_layer_files
+
+    home = _fake_home(tmp_path, monkeypatch)
+    project = home / "Documents" / "ERR"
+    project.mkdir(parents=True)
+    monkeypatch.chdir(project)
+
+    assert glossary_layer_files() == [home / ".vemoizer" / "glossary.txt"]

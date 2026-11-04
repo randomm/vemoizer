@@ -44,9 +44,12 @@ def _nearest_project_glossary(start: Path | None = None) -> Path | None:
 
     Walks from *start* (or CWD) up to the filesystem root.  Returns ``None``
     if no project glossary exists.  Symlink loops are prevented by tracking
-    the real-path of each directory visited.
+    the real-path of each directory visited.  The home glossary is never a
+    project layer: reaching it means there is none (issue #249), otherwise
+    every directory under ``~`` would load the home layer twice.
     """
     current = start or Path(os.path.realpath(os.getcwd()))
+    home = _home_glossary_path().resolve()
     seen: set[str] = set()
     while True:
         real = str(current.resolve())
@@ -55,7 +58,7 @@ def _nearest_project_glossary(start: Path | None = None) -> Path | None:
         seen.add(real)
         candidate = current / ".vemoizer" / "glossary.txt"
         if candidate.is_file():
-            return candidate
+            return None if candidate.resolve() == home else candidate
         parent = current.parent
         if parent == current:  # reached filesystem root
             return None
