@@ -183,6 +183,37 @@ def test_assemble_passes_trusted_labels_to_word_attribution(
     assert seen == {"trusted": frozenset({"Janni"})}
 
 
+def test_assemble_drops_them_segments_inside_echo_spans() -> None:
+    """Issue #238: the them stem re-transcribes the owner; those segments
+    drop before labelling, me-track and out-of-span segments stay."""
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "moi", "track": "them"},
+        {"start": 0.0, "end": 1.0, "text": "moi", "track": "me"},
+        {"start": 2.5, "end": 3.5, "text": "terve", "track": "them"},
+    ]
+    result_a = {"text": TEXT, "words": [], "segments": segments}
+    turns = [(0.0, 1.0, "Janni"), (2.5, 3.5, REMOTE_LABEL)]
+
+    result = _assemble(
+        result_a,
+        None,
+        None,
+        None,
+        turns,
+        spans=[],
+        trusted_labels=frozenset({"Janni"}),
+        echo_spans=[(0.0, 1.0)],
+    )
+
+    assert [(s["track"], s["speaker"]) for s in result["segments"]] == [
+        ("me", "Janni"),
+        ("them", REMOTE_LABEL),
+    ]
+    # The text loses the echo too, or the render/notes fallbacks that read
+    # it would bring the dropped words back (PR #240 review).
+    assert result["text"] == "moi terve"
+
+
 def test_two_track_run_seeds_no_speaker_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

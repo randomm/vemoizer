@@ -17,7 +17,7 @@ from vemoizer.vad import SpeechSegment
 
 SR = 16_000
 MIC, THEM = 1.0, 2.0
-PYANNOTE_TURNS = [(0.0, 1.0, "SPEAKER_00"), (1.0, 2.0, "SPEAKER_01")]
+PYANNOTE_TURNS = [(2.0, 2.5, "SPEAKER_00"), (3.0, 4.0, "SPEAKER_01")]
 TRACKS = TrackPaths(me=Path("mic.wav"), them=Path("them.wav"))
 OWNER_TURN = (0.0, 1.0, "Janni")
 REMOTE_TURN = (2.0, 3.0, REMOTE_LABEL)
@@ -79,6 +79,7 @@ def test_one_to_one_call_never_runs_pyannote(
 
     diarizer.assert_not_called()
     assert stage.turns == [OWNER_TURN, REMOTE_TURN]
+    assert stage.echo_spans == []
 
 
 def test_pyannote_failure_keeps_owner_and_one_remote_label(
@@ -99,8 +100,8 @@ def test_pyannote_remote_turns_replace_the_single_label(
 
     assert stage.turns == [
         (0.0, 1.0, "Janni"),
-        (0.0, 1.0, "SPEAKER_00"),
-        (1.0, 2.0, "SPEAKER_01"),
+        (2.0, 2.5, "SPEAKER_00"),
+        (3.0, 4.0, "SPEAKER_01"),
     ]
     assert REMOTE_LABEL not in {t[2] for t in stage.turns}
 
@@ -166,6 +167,38 @@ def test_pyannote_no_speakers_keeps_remote_speech_remote(
 
     assert stage.turns == [OWNER_TURN, REMOTE_TURN]
     assert stage.warnings == [FAILED_WARNING]
+
+
+def test_owner_echo_label_is_folded_out_of_the_remote_turns(
+    stems, diarizer: MagicMock, mix: np.ndarray
+) -> None:
+    """A remote label spoken only while the owner talks is the owner leaked
+    into the system stem (issue #238): its turns leave the timeline."""
+    diarizer.return_value = [
+        (0.0, 1.0, "SPEAKER_04"),  # fully inside the owner's mic speech 0-1 s
+        (2.0, 3.0, "SPEAKER_00"),  # real remote speech while the mic is silent
+    ]
+
+    stage = _run(mix)
+
+    assert "SPEAKER_04" not in {t[2] for t in stage.turns}
+    assert stage.turns == [(0.0, 1.0, "Janni"), (2.0, 3.0, "SPEAKER_00")]
+    assert stage.echo_spans == [(0.0, 1.0)]
+
+
+def test_genuine_crosstalk_label_survives_the_echo_fold(
+    stems, diarizer: MagicMock, mix: np.ndarray
+) -> None:
+    """A remote label overlapping the owner only briefly is kept (issue #238)."""
+    diarizer.return_value = [
+        (0.0, 5.0, "SPEAKER_04"),  # owner covers 1 of 5 s (0.2 < 0.6)
+        (2.0, 3.0, "SPEAKER_00"),
+    ]
+
+    stage = _run(mix)
+
+    assert "SPEAKER_04" in {t[2] for t in stage.turns}
+    assert stage.echo_spans == []
 
 
 def test_mic_leakage_under_remote_speech_is_not_owner_speech(

@@ -39,6 +39,13 @@ MIC_FLOOR_DBFS = -40.0
 #: the remote audio leaking into the mic, not the owner speaking.
 LEAKAGE_MARGIN_DB = 12.0
 
+#: Fraction of a remote label's total turn time the owner's (ungated) mic
+#: speech must cover before the label is folded as owner echo (issue #238).
+#: A real far-side participant has stretches where the mic is silent; a label
+#: that overlaps the owner almost everywhere is the owner's own voice leaking
+#: into the system stem, not a second participant.
+ECHO_MIN_FRACTION = 0.6
+
 #: Frame length of the owner gate. Short enough that a leakage stretch is cut
 #: at its boundary, long enough that one frame's RMS is stable.
 FRAME_S = 0.1
@@ -156,6 +163,51 @@ def owner_turns(
 def single_remote_turns(segments: Sequence[Mapping[str, Any]]) -> list[Turn]:
     """Remote-track segments as turns of one undifferentiated speaker."""
     return _relabel_merged(segments, REMOTE_LABEL, OWNER_MERGE_GAP_S)
+
+
+def _union_spans(spans: Sequence[Mapping[str, float]]) -> list[tuple[float, float]]:
+    """Merge possibly-overlapping ``{"start", "end"}`` spans into disjoint runs."""
+    runs: list[tuple[float, float]] = []
+    for span in sorted(spans, key=lambda s: (float(s["start"]), float(s["end"]))):
+        start, end = float(span["start"]), float(span["end"])
+        if runs and start <= runs[-1][1]:
+            runs[-1] = (runs[-1][0], max(runs[-1][1], end))
+        else:
+            runs.append((start, end))
+    return runs
+
+
+def echo_labels(
+    remote: Sequence[Turn],
+    mic_speech: Sequence[Mapping[str, float]],
+    *,
+    min_fraction: float = ECHO_MIN_FRACTION,
+) -> frozenset[str]:
+    """Remote labels that are really the owner's voice leaked into the them stem.
+
+    A label is echo when the *union* of the (ungated) mic VAD speech covers at
+    least *min_fraction* of its total turn time; overlapping mic spans are
+    merged first so they cannot double-count. Never marks *every* remote label:
+    a call where all far-side voices overlap the owner is crosstalk-heavy
+    (both sides always talking), not echo, so the empty set comes back.
+    """
+    union = _union_spans(mic_speech)
+    total: dict[str, float] = {}
+    covered: dict[str, float] = {}
+    for start, end, label in remote:
+        total[label] = total.get(label, 0.0) + (end - start)
+        hit = covered.setdefault(label, 0.0)
+        for u_start, u_end in union:
+            hit += max(0.0, min(end, u_end) - max(start, u_start))
+        covered[label] = hit
+    qualifying = {
+        label
+        for label, seconds in total.items()
+        if seconds > 0 and covered[label] / seconds >= min_fraction
+    }
+    if not qualifying or qualifying == set(total):
+        return frozenset()
+    return frozenset(qualifying)
 
 
 def remote_speaker_count(spec: SpeakerCount | None) -> SpeakerCount | None:
