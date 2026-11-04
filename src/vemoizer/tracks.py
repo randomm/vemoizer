@@ -39,12 +39,18 @@ MIC_FLOOR_DBFS = -40.0
 #: the remote audio leaking into the mic, not the owner speaking.
 LEAKAGE_MARGIN_DB = 12.0
 
-#: Fraction of a remote label's total turn time the owner's (ungated) mic
-#: speech must cover before the label is folded as owner echo (issue #238).
-#: A real far-side participant has stretches where the mic is silent; a label
-#: that overlaps the owner almost everywhere is the owner's own voice leaking
-#: into the system stem, not a second participant.
-ECHO_MIN_FRACTION = 0.6
+#: Fraction of a remote label's total turn time the owner's (ungated, padded)
+#: mic speech must cover before the label is folded as owner echo (issues
+#: #238/#245). A real far-side participant mostly talks while the owner is
+#: silent; a label that overlaps the owner most of the time is the owner's own
+#: voice leaking into the system stem. Calibrated on raw pyannote turns of a
+#: real 2 h call: echo 0.55, real participants at most 0.12 (issue #245).
+ECHO_MIN_FRACTION = 0.4
+
+#: Seconds each mic VAD span is widened by before the echo measure: echo on
+#: the system stem lags the owner's own speech by the call's round-trip
+#: latency, and VAD spans are tighter than the diarizer's turns (issue #245).
+ECHO_PAD_S = 0.25
 
 #: Frame length of the owner gate. Short enough that a leakage stretch is cut
 #: at its boundary, long enough that one frame's RMS is stable.
@@ -185,13 +191,22 @@ def echo_labels(
 ) -> frozenset[str]:
     """Remote labels that are really the owner's voice leaked into the them stem.
 
-    A label is echo when the *union* of the (ungated) mic VAD speech covers at
-    least *min_fraction* of its total turn time; overlapping mic spans are
-    merged first so they cannot double-count. Never marks *every* remote label:
+    A label is echo when the *union* of the (ungated) mic VAD speech, each
+    span widened by ``ECHO_PAD_S``, covers at least *min_fraction* of its
+    total turn time; overlapping mic spans are merged first so they cannot
+    double-count. Never marks *every* remote label:
     a call where all far-side voices overlap the owner is crosstalk-heavy
     (both sides always talking), not echo, so the empty set comes back.
     """
-    union = _union_spans(mic_speech)
+    union = _union_spans(
+        [
+            {
+                "start": float(m["start"]) - ECHO_PAD_S,
+                "end": float(m["end"]) + ECHO_PAD_S,
+            }
+            for m in mic_speech
+        ]
+    )
     total: dict[str, float] = {}
     covered: dict[str, float] = {}
     for start, end, label in remote:

@@ -242,11 +242,13 @@ the final text.
   pyannote and labels the remote side `Others`. The owner's label is never
   smoothed into or out of a remote label. An unreadable stem or a length
   mismatch above 2 s warns and labels the mix as usual.
-- **Owner-echo fold (issue #238).** The owner's voice leaks into the system
-  stem on calls, so diarization can mint a far-side label that is really the
-  owner ("Yes.", "Thank you." over the owner's speech). When the union of the
-  ungated mic VAD speech covers at least 60% (`ECHO_MIN_FRACTION`) of a
-  remote label's total turn time, the label is folded as owner echo: its
+- **Owner-echo fold (issues #238/#245).** The owner's voice leaks into the
+  system stem on calls, so diarization can mint a far-side label that is
+  really the owner ("Yes.", "Thank you." over the owner's speech). When the
+  union of the ungated mic VAD speech, each span widened by 0.25 s
+  (`ECHO_PAD_S`, the echo's round-trip lag), covers at least 40%
+  (`ECHO_MIN_FRACTION`) of a remote label's total raw diarization turn time
+  (calibrated on a real 2 h call: echo 0.55, real participants at most 0.12), the label is folded as owner echo: its
   turns leave the timeline, its spans are exposed as `echo_spans`, and
   assembly drops a them-track segment when at least half of it lies in
   those spans and it overlaps them more than any remaining far-side turn (the
