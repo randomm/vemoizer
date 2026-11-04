@@ -229,6 +229,41 @@ def test_decode_boundaries_does_not_destroy_shared_whisper_cache(
     assert calls["cleanup"] == 0  # the shared cache is preserved
 
 
+def test_boundary_decodes_run_without_progress_bars(tmp_path, monkeypatch) -> None:
+    """issue #236: the edge windows are decoded while the run's own stage
+    display is on screen, so no boundary may draw its own mlx-whisper bar."""
+    import vemoizer.grouping as grouping
+    import vemoizer.whisper_transcriber as wt
+
+    seen: list[dict[str, object]] = []
+
+    class FakeWhisper:
+        def __init__(self, language=None):
+            pass
+
+        def transcribe(self, audio, **kwargs):
+            seen.append(kwargs)
+            return {"text": "x"}
+
+        def cleanup(self):
+            pass
+
+    monkeypatch.setattr(wt, "WhisperTranscriber", FakeWhisper)
+    monkeypatch.setattr(grouping, "probe_duration_seconds", lambda p: 60.0)
+    monkeypatch.setattr(
+        grouping,
+        "_decode_edge_window",
+        lambda path, start, end, **kw: np.zeros(16000, dtype=np.float32),
+    )
+    files = [tmp_path / "a.m4a", tmp_path / "b.m4a"]
+    for f in files:
+        f.touch()
+
+    decode_boundaries(files)
+    assert len(seen) == 2
+    assert all(kw.get("show_progress") is False for kw in seen)
+
+
 # ---------------------------------------------------------------------------
 # run_batch — multi-group --out must not silently overwrite (round-1 HIGH)
 # ---------------------------------------------------------------------------

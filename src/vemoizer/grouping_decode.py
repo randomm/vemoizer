@@ -183,7 +183,10 @@ def decode_boundaries(
                 else:
                     if tr is None:
                         raise RuntimeError("boundary transcriber not loaded")
-                    text = tr.transcribe(audio).get("text", "")
+                    # show_progress=False (issue #236): the boundary decodes
+                    # run inside the batch run's own stage display, and two
+                    # short mlx-whisper bars per boundary drowned it out.
+                    text = tr.transcribe(audio, show_progress=False).get("text", "")
                 return str(text).strip(), audio
             except (IngestError, RuntimeError, OSError) as e:
                 # Log the full error for diagnostics; the user-facing path

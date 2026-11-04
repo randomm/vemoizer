@@ -156,11 +156,13 @@ class WhisperTranscriber:
         file-level minutes. When None or the display is disabled (non-TTY),
         the shim is a pass-through and the decode result is identical.
 
-        ``show_progress=False`` (issue #205, the live draft path) silences
-        mlx-whisper's own tqdm bar: under the inverted verbose semantics
-        below, ``verbose=None`` disables the bar (``disable=verbose is not
-        False``) and skips the per-window "Detected language" line too. The
-        post-call pass keeps the default.
+        ``show_progress=False`` (issue #205, the live draft path; issue #236,
+        the meeting pass) silences mlx-whisper's own tqdm bar: under the
+        inverted verbose semantics below, ``verbose=None`` disables the bar
+        (``disable=verbose is not False``) and skips the per-window "Detected
+        language" line too. Every decode that runs under a stage display uses
+        it; the plain default (``True``) is for callers with no display of
+        their own.
         """
         if len(audio) == 0:
             return {
@@ -404,8 +406,17 @@ def decode_meeting(
         transcriber = WhisperTranscriber(
             language=language, initial_prompt=initial_prompt
         )
+        # show_progress=False everywhere below (issue #236): this pass runs
+        # under its own stage display (``✓ decode (124s)``), and the mlx-whisper
+        # tqdm bars it would draw sit right next to it. The main window loop is
+        # driven through the progress shim, which feeds the display from the
+        # frame counter regardless of ``verbose``; the self-heal re-decodes run
+        # AFTER that shim has exited, so their short per-slice bars were the
+        # ones that leaked to the terminal.
         result: dict[str, Any] = dict(
-            transcriber.transcribe(audio, display=display, vad_slices=vad_slices)
+            transcriber.transcribe(
+                audio, display=display, vad_slices=vad_slices, show_progress=False
+            )
         )
         # Hallucination walls (context-fed repetition loops) are repaired
         # by re-decoding only the slices under them with conditioning off;
@@ -416,11 +427,18 @@ def decode_meeting(
             result,
             slices,
             lambda chunk: dict(
-                transcriber.transcribe(chunk, condition_on_previous_text=False)
+                transcriber.transcribe(
+                    chunk,
+                    condition_on_previous_text=False,
+                    show_progress=False,
+                )
             ),
             fallback=lambda chunk: dict(
                 transcriber.transcribe(
-                    chunk, condition_on_previous_text=False, initial_prompt=None
+                    chunk,
+                    condition_on_previous_text=False,
+                    initial_prompt=None,
+                    show_progress=False,
                 )
             ),
         )

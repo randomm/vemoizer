@@ -28,7 +28,6 @@ from vemoizer.capture import (
     SilenceWatchdog,
     SkewLogger,
     TrackWriter,
-    skew_message,
 )
 from vemoizer.cli_support import parse_speakers
 from vemoizer.listen_capture import (
@@ -39,6 +38,7 @@ from vemoizer.listen_capture import (
     preflight,
     pump,
 )
+from vemoizer.listen_console import CallStatus, SkewConsole, clip_notifier, kept_message
 from vemoizer.listen_live import run_session
 from vemoizer.owner_config import RunOwner, resolve_run_owner
 from vemoizer.preset_cli import preset_interrupt_exit
@@ -112,6 +112,7 @@ class ListenRun:
     duration: float | None = None
     yes: bool = False
     quiet: bool = False
+    verbose: bool = False
     config_path: str | None = None
     glossary_path: str | None = None
     repair: bool | None = True
@@ -217,13 +218,8 @@ def build_mix_argv(me: Path | None, them: Path | None, out: Path) -> list[str]:
     return argv
 
 
-def _echo(line: str) -> None:
-    say(line)
-
-
-def kept_message(call_dir: Path) -> str:
-    """The line telling the user the call folder survived."""
-    return f"audio kept: {call_dir.as_posix()}/"
+#: Every ``listen`` line goes through the locked status-line writer.
+_echo = say
 
 
 def _report_problems(problems: Sequence[Problem]) -> bool:
@@ -255,12 +251,21 @@ def _report_problems(problems: Sequence[Problem]) -> bool:
     return fatal
 
 
-def _skew_tick(skew: SkewLogger, mic: TrackState, tap: TrackState, t0: float) -> None:
-    """Echo the measured me/them skew when a logging interval is crossed."""
+def _skew_tick(
+    skew: SkewLogger, console: SkewConsole, mic: TrackState, tap: TrackState, t0: float
+) -> None:
+    """Log the me/them skew on its interval; the console only sees what matters.
+
+    The logger gets every interval (that is where the 110 lines of a 38-minute
+    call belong); the console gets a line only when the skew is abnormal
+    (#236), or every interval when the user asked for it with ``--verbose``.
+    """
     if (me_t := mic.end_t) is None or (them_t := tap.end_t) is None:
         return
-    if (line := skew.observe(me_t - t0, them_t - t0)) is not None:
-        _echo(skew_message(line))
+    me_s, them_s = me_t - t0, them_t - t0
+    if skew.observe(me_s, them_s) is not None:
+        console.interval(them_s - me_s)
+    console.watch(them_s - me_s)
 
 
 def _record(
@@ -272,13 +277,14 @@ def _record(
     tap: TrackState,
     output_name: Callable[[], str],
     skew: SkewLogger,
+    console: SkewConsole,
 ) -> None:
     """Tick until the duration ends; a Ctrl-C is caught by the caller."""
     rewrite = sys.stderr.isatty()
     while True:
         elapsed = clock() - t0
         rec_tick(elapsed, rewrite=rewrite)
-        _skew_tick(skew, mic, tap, t0)
+        _skew_tick(skew, console, mic, tap, t0)
         if tap.check_watchdog():
             _echo(
                 "warning: no sound from the call for 3 min "
@@ -301,14 +307,15 @@ def capture_call(
     tracker: InterruptTracker,
     t0: float,
     live: LiveSession | None,
+    status: CallStatus,
 ) -> tuple[TrackWriter, TrackWriter] | None:
     """Preflight and record; the closed writers, or None when preflight failed.
 
     The first Ctrl-C is caught here: it ends the recording and the tracks are
     finalized normally. A Ctrl-C during finalize propagates to the caller.
     """
-    me_w = TrackWriter(call_dir / ME_NAME, t0)
-    them_w = TrackWriter(call_dir / THEM_NAME, t0)
+    me_w = TrackWriter(call_dir / ME_NAME, t0, on_clip=clip_notifier("mic"))
+    them_w = TrackWriter(call_dir / THEM_NAME, t0, on_clip=clip_notifier("tap"))
     if live is not None:
         me_w.subscribe(live.subscriber("me"))
         them_w.subscribe(live.subscriber("them"))
@@ -323,28 +330,44 @@ def capture_call(
     tap_state = TrackState("tap", SilenceWatchdog(WATCHDOG_S, clock))
     threads = [pump(mic, me_w, mic_state), pump(tap, them_w, tap_state)]
     skew = SkewLogger()
+    console = SkewConsole(verbose=run.verbose)
     failed = False
     try:
         failed = _report_problems(preflight([mic_state, tap_state], clock, sleep, t0))
         if not failed:
             set_interrupt_stage(tracker, "recording")
             _record(
-                clock, sleep, t0, run.duration, mic_state, tap_state, output_name, skew
+                clock,
+                sleep,
+                t0,
+                run.duration,
+                mic_state,
+                tap_state,
+                output_name,
+                skew,
+                console,
             )
     except KeyboardInterrupt:
         pass  # the first Ctrl-C ends the recording
-    _shutdown([mic, tap], threads)
-    _skew_final(skew, mic_state, tap_state, t0)
-    me_w.close()
-    them_w.close()
+    if not failed:
+        # Before anything slow happens: the audio is already on disk, so the
+        # next Ctrl-C costs the transcription and never the call (#236).
+        status.stopped(clock() - t0, call_dir)
+    with status.saving(announce=not failed):
+        _shutdown([mic, tap], threads)
+        _skew_final(skew, console, mic_state, tap_state, t0)
+        me_w.close()
+        them_w.close()
     return None if failed else (me_w, them_w)
 
 
-def _skew_final(skew: SkewLogger, mic: TrackState, tap: TrackState, t0: float) -> None:
+def _skew_final(
+    skew: SkewLogger, console: SkewConsole, mic: TrackState, tap: TrackState, t0: float
+) -> None:
     """Log the skew once more at stop, from the drained tracks."""
     if (me_t := mic.end_t) is None or (them_t := tap.end_t) is None:
         return
-    _echo(skew_message(skew.final(me_t - t0, them_t - t0)))
+    console.final(skew.final(me_t - t0, them_t - t0))
 
 
 def _shutdown(sources: Sequence[Any], threads: Sequence[Any]) -> None:

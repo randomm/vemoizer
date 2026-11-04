@@ -710,11 +710,34 @@ consent reminder prints before any source starts; the owner name is asked
 Ctrl-C stops the recording and finishes the call; a second Ctrl-C during
 mixing or decoding exits 130 and keeps the stems (`audio kept:
 calls/<ts>/`). A silent system side for 3 minutes warns once, naming the
-output device. While recording, each minute and at stop the run prints
-`track skew: them ahead of|behind me by N ms` (measured from the two
-tracks' sample clocks, never corrected), so clock drift over a long call
-is readable without `--verbose`. Missing the `listen` extra exits 2 with
-the install command.
+output device.
+
+**Console contract (issue #236).** Recording is waiting, so the terminal
+stays out of the way; the log file keeps the detail.
+
+- The me/them skew (measured from the two tracks' sample clocks, never
+  corrected) is logged every minute and at stop. The console prints those
+  lines only with `--verbose`; without it a single warning line appears when
+  the skew first crosses 500 ms (both stems are written on one session
+  clock, so that is drift no more), and not again until the skew has
+  recovered below the threshold and crossed it once more.
+- An input over +/-1.0 prints one warning per track, naming the source
+  (microphone / call audio) and the fix (lower the gain), never more.
+  Every `listen` line, that warning included, clears the `● REC` status line
+  first.
+- After Ctrl-C the run answers at once with `■ Recording stopped at
+  HH:MM:SS. The recording is saved in calls/<ts>/`, then one line per slow
+  phase before it starts: `Saving the tracks…`, `Mixing the tracks…`,
+  `Transcribing — this can take several minutes for a long call.`
+  Ctrl-C is ignored while the tracks are saved (seconds), so a second press
+  can never leave the FLAC stems unfinalised; after that it cancels only the
+  transcription. `--quiet` silences the phase lines as it silences the stage display, never
+  the line saying the recording was kept.
+- The post-call `meeting` pass draws no mlx-whisper progress bars: it has
+  its own stage display, and the self-heal/span re-decodes that run outside
+  the progress shim would put a bar beside every stage line.
+
+Missing the `listen` extra exits 2 with the install command.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -728,8 +751,8 @@ the install command.
 | `--repair` / `--no-repair` | on | LLM repair pass over the final paragraphs |
 | `--no-diarize` | off (diarize on) | skip speaker diarization of the remote side |
 | `--yes` | off | never prompt: use the fallback owner name when none is configured |
-| `--quiet` / `-q` | off | suppress the summary lines and the live progress line |
-| `--verbose` / `-v` | off | per-stage progress logging to stderr |
+| `--quiet` / `-q` | off | suppress the summary lines and the live progress line (and the post-Ctrl-C phase lines; never the kept-recording line) |
+| `--verbose` / `-v` | off | per-stage progress logging to stderr, plus the per-minute and final skew lines on the console |
 | `--live` | off | stream a single-decode draft of the call while recording (`calls/<ts>/live.md`); needs the `listen` extra; never the deliverable |
 | `--keep-live` | off | keep `live.md` after the final pass succeeded (by default it is removed on success) |
 
