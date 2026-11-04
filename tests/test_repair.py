@@ -248,3 +248,44 @@ def test_repair_no_budget_passes_no_deadline() -> None:
     client.complete = MagicMock(side_effect=fake_complete)
     repair_paragraphs(client, [_para("eka")], budget=None)
     assert calls == [None]
+
+
+# -- output language (issue #237) ------------------------------------------
+
+
+def _systems(**kwargs) -> list[str]:
+    """Repair one paragraph with a spying client; return the system prompts."""
+    sent: list[str] = []
+
+    def spy(system: str, user: str, **kw) -> str:
+        sent.append(system)
+        return user
+
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=spy)
+    repair_paragraphs(client, [_para("a paragraph"), _para("toinen kappale")], **kwargs)
+    return sent
+
+
+def test_english_language_uses_an_english_repair_prompt() -> None:
+    systems = _systems(language="en")
+    assert systems, "the repair pass made no call"
+    for system in systems:
+        assert "English" in system
+        assert "Korjaa" not in system  # the Finnish prompt did not run
+
+
+def test_english_glossary_note_is_english() -> None:
+    system = _systems(language="en", glossary=["Flagship-hanke"])[0]
+    assert "Flagship-hanke" in system
+    assert "Sanasto" not in system
+
+
+def test_default_and_fi_repair_prompts_are_unchanged() -> None:
+    from vemoizer.repair import _REPAIR_SYSTEM_PROMPT
+
+    assert _systems() == [_REPAIR_SYSTEM_PROMPT] * 2
+    assert _systems(language="fi") == [_REPAIR_SYSTEM_PROMPT] * 2
+    assert "foneettisesti" in _REPAIR_SYSTEM_PROMPT
+    fi_with_glossary = _systems(glossary=["Flagship-hanke"])[0]
+    assert "Sanasto (oikeat kirjoitusasut): Flagship-hanke" in fi_with_glossary

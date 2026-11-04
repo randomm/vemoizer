@@ -333,9 +333,15 @@ pure function of the dict):
   segments of a healed slice are never stamped; issue #219).
 - **Section language** — `format_md(transcript, language=...)` selects
   Finnish (default) or English headings; the value rides on the run
-  dict as `transcript["language"]` (loaded by
-  `llm_config.load_language` from the config layer's top-level `language`
-  key, `"fi"` default).
+  dict as `transcript["language"]`, resolved by
+  `meeting_stage.resolve_output_language`: an explicit top-level config
+  `language` of `"fi"`/`"en"` wins (any other value, such as `"auto"`,
+  counts as unset); otherwise the run's resolved recognition pin selects the
+  output language too, whichever layer set it (`--language fi|en`, a
+  preset, or `[meeting] language`, issue #108), so an English-pinned run
+  gets English headings, notes, title and filename. This holds for every
+  profile, dictation included, even though dictation ignores the pin for
+  recognition. With neither, `"fi"` (issues #75/#237).
 - **`<details>` quality-report block** — the string stored on
   `transcript["quality_report"]` (computed by the CLI/batch layer via
   `report.build_quality_report` BEFORE the destructive
@@ -671,7 +677,7 @@ each prompt, and the sidecar's own `<stem>.md` is rewritten in place.
 | `--no-diarize` | off (diarize on) | skip speaker diarization |
 | `--yes` | off | group mode for 2+ files: run the boundary decodes and accept every continuation proposal without a prompt (mutually exclusive with `--no-group`) |
 | `--no-group` | off | skip split-recording grouping entirely — each file is transcribed standalone (no boundary decode, no concat, no part markers); mutually exclusive with `--yes` |
-| `--language` | `auto` | recognition language for the whisper decode: `auto` (detect per window), `fi`, or `en` (case-insensitive); a `[meeting] language` key in the config file pins the same choice for meeting (and memo) runs (issue #108) |
+| `--language` | `auto` | recognition language for the whisper decode: `auto` (detect per window), `fi`, or `en` (case-insensitive); a `[meeting] language` key in the config file pins the same choice for meeting (and memo) runs (issue #108). An explicit `fi`/`en` also selects the OUTPUT language — headings, notes, title, filename — unless the config's top-level `language` is set (issue #237) |
 | `--preprocess` | off | audio level normalisation: `loudnorm` (two-pass, I=-16 LUFS, TP=-1.5, LRA=11) before decode; opt-in for far-field meeting recordings (issue #135) |
 | `--mic-track` / `--system-track` | off | two-track call: the owner's mic stem and the system-audio stem; give both or neither, with one mixed recording as the positional file; `--speakers 1` exits 2 (issue #171) |
 | `--me NAME` | config, else asked once | the owner's name for a two-track transcript; see Configuration (issue #171) |
@@ -758,7 +764,7 @@ Missing the `listen` extra exits 2 with the install command.
 | `--me NAME` | config, else asked once | the owner's name for the transcript; the prompt runs before recording |
 | `--duration SECONDS` | until Ctrl-C | stop recording after this many seconds |
 | `--speakers` | 2-6 | diarization bounds (`N` or `MIN-MAX`), as `meeting` |
-| `--language` | `auto` | recognition language: `auto`, `fi`, or `en` (invariant 3) |
+| `--language` | `auto` | recognition language: `auto`, `fi`, or `en` (invariant 3); an explicit `fi`/`en` also selects the output language (headings, notes, title, filename) unless the config's top-level `language` is set (issue #237) |
 | `--glossary` | layered merge | explicit glossary file (replaces both `.vemoizer` layers) |
 | `--config` | layered search | explicit LLM config path |
 | `--repair` / `--no-repair` | on | LLM repair pass over the final paragraphs |
@@ -1216,7 +1222,7 @@ connection refused, HTTP error) also fails open per invariant #5.
 | `llm.timeout_seconds` | request timeout; must be set (unset = hang) |
 | `llm.repair_budget_seconds` | wall-clock budget for the whole repair stage (default 600, issue #148); it also cuts off the LLM call in flight via `complete(deadline_s=remaining)` (checked per streamed chunk), not just the gap between calls; on expiry the remaining paragraphs ship un-repaired (fail-open) |
 | `llm.notes_budget_seconds` | wall-clock budget for the whole notes stage (default 600, issue #148); it also cuts off the LLM call in flight via `complete(deadline_s=remaining)` (checked per streamed chunk), not just the gap between calls; on expiry the transcript ships without notes (fail-open) |
-| `language` | section language for the Markdown header and quality report: `"fi"` (default) or `"en"` (top-level key, issue #75) |
+| `language` | section language for the Markdown header and quality report, and the notes/repair prompt language: `"fi"` (default) or `"en"` (top-level key, issues #75/#237); when unset (or any other value), the run's `fi`/`en` recognition pin (`--language`, preset or `[meeting] language`) selects the output language instead |
 | `meeting.language` | recognition-language override for the whisper meeting decode: `"auto"` (default, per-window detection), `"fi"`, or `"en"` pins every window (issue #108) |
 | `people` | top-level list of speaker names for the `names` command (the read path fails open to an empty list for a non-list value; issue #93) |
 

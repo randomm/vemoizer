@@ -330,7 +330,9 @@ def test_glossary_reaches_whisper_and_notes(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(pipeline, "decode_meeting", fake_decode_meeting)
 
-    def fake_notes(client, text, paragraphs=None, glossary=None, budget=None):
+    def fake_notes(
+        client, text, paragraphs=None, glossary=None, budget=None, language=None
+    ):
         seen["notes_glossary"] = glossary
         seen["notes_paragraphs"] = paragraphs
         return None
@@ -526,3 +528,74 @@ def test_diarize_without_display_does_not_crash(tmp_path, monkeypatch) -> None:
         display=None,
     )
     assert result["segments"][0].get("speaker") == "SPEAKER_00"
+
+
+# -- run language reaches the LLM stages (issue #237) ----------------------
+
+
+def test_language_flag_selects_output_language_and_reaches_the_llm_stages(
+    tmp_path, monkeypatch
+) -> None:
+    """``--language en`` (issue #237): the run dict reports "en" and both
+    LLM stages are told to work in English."""
+    _consensus_setup(monkeypatch)
+    _patch_redecode(monkeypatch, "moikka")
+    seen: dict[str, object] = {}
+
+    def fake_notes(client, text, paragraphs=None, glossary=None, budget=None, **kw):
+        seen["notes_language"] = kw.get("language")
+        return {"title": "T", "summary": "S", "key_points": [], "action_items": []}
+
+    def fake_repair(client, paragraphs, glossary=None, **kw):
+        seen["repair_language"] = kw.get("language")
+        return list(paragraphs)
+
+    class _Client:
+        def adjudicate(self, a_text, candidates, context=""):
+            return "moikka"
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(pipeline, "generate_notes", fake_notes)
+    monkeypatch.setattr(pipeline, "repair_paragraphs", fake_repair)
+    monkeypatch.setattr(pipeline, "LLMClient", lambda cfg: _Client())
+    cfg = _llm_config(tmp_path)  # no top-level language key
+    result = transcribe_file(
+        "/nonexistent.m4a", config_path=str(cfg), repair=True, language="en"
+    )
+    assert result["language"] == "en"
+    assert seen == {"notes_language": "en", "repair_language": "en"}
+
+
+def test_default_run_keeps_finnish_output_language_for_the_llm_stages(
+    tmp_path, monkeypatch
+) -> None:
+    _consensus_setup(monkeypatch)
+    _patch_redecode(monkeypatch, "moikka")
+    seen: dict[str, object] = {}
+
+    def fake_notes(client, text, paragraphs=None, glossary=None, budget=None, **kw):
+        seen["notes_language"] = kw.get("language")
+        return None
+
+    def fake_repair(client, paragraphs, glossary=None, **kw):
+        seen["repair_language"] = kw.get("language")
+        return list(paragraphs)
+
+    class _Client:
+        def adjudicate(self, a_text, candidates, context=""):
+            return "moikka"
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(pipeline, "generate_notes", fake_notes)
+    monkeypatch.setattr(pipeline, "repair_paragraphs", fake_repair)
+    monkeypatch.setattr(pipeline, "LLMClient", lambda cfg: _Client())
+    cfg = _llm_config(tmp_path)
+    result = transcribe_file(
+        "/nonexistent.m4a", config_path=str(cfg), repair=True, language="fi"
+    )
+    assert result["language"] == "fi"
+    assert seen == {"notes_language": "fi", "repair_language": "fi"}

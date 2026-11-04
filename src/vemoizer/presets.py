@@ -83,9 +83,11 @@ class RunOptions:
     corrections: dict[str, str]
     # Run-level recognition-language override for the meeting whisper decode
     # (issue #108): ``"auto"`` = per-window detection (the default),
-    # ``"fi"``/``"en"`` pin every decode window. Distinct from the top-level
-    # config ``language`` key, which only picks the Markdown heading
-    # language (``_normalize_language``) — never recognition.
+    # ``"fi"``/``"en"`` pin every decode window. An explicit ``"fi"``/``"en"``
+    # also selects the OUTPUT language — headings, notes, title, filename
+    # (issue #237, ``meeting_stage.resolve_output_language``) — unless the
+    # top-level config ``language`` key is set, which alone decides the
+    # Markdown heading language (``_normalize_language``) — never recognition.
     language: str
     # Opt-in audio preprocessing (issue #135): ``"loudnorm"`` runs the
     # two-pass loudnorm normalization at ingest (fail-open on any

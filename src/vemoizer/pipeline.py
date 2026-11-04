@@ -32,12 +32,15 @@ from .diarization import SpeakerCount, speaker_for_span
 from .glossary import glossary_prompt, load_corrections, load_glossary
 from .ingest import IngestError, ingest_audio
 from .llm import LLMClient, LLMConfig
-from .llm_config import _parse_section_language, load_default_config
+from .llm_config import load_default_config
 from .llm_tail import apply_llm_tail
-from .meeting_stage import resolve_meeting_language, run_profile_decodes
+from .meeting_stage import (
+    resolve_meeting_language,
+    resolve_output_language,
+    run_profile_decodes,
+)
 from .notes import generate_notes  # noqa: F401
 from .parakeet_transcriber import ParakeetTranscriber
-from .presets import _normalize_language
 from .progress import ProgressDisplay, StageProgress, format_duration
 from .readability import paragraphs, splice_verdicts, tidy_paragraphs
 from .redecode import WhisperReDecodeTranscriber
@@ -289,14 +292,17 @@ def transcribe_file(
             meeting decode (issue #108): one of ``"fi"`` / ``"en"`` pins
             every decode window; ``None`` (the default) or ``"auto"``
             leaves per-window detection on. Ignored by the dictation
-            profile.
+            profile. An explicit ``"fi"`` / ``"en"`` also selects the run's
+            OUTPUT language — headings, notes, title, filename — unless the
+            config's top-level ``language`` key is set (issue #237).
 
     Returns:
         ``{"text": str, "segments": list[dict]}`` — the full transcript
         (decode A preferred) plus one segment per disputed span, each with
         an optional ``speaker`` key when diarization labelled it. M6 also
         returns ``duration_s`` (decoded-audio seconds, never ffprobe) and
-        ``language`` (``"fi"`` / ``"en"`` from the config layer).
+        ``language`` (``"fi"`` / ``"en"``: the config layer's top-level
+        ``language``, else the run's ``language`` pin, else ``"fi"``).
     """
     if profile not in PROFILES:
         known = ", ".join(PROFILES)
@@ -350,9 +356,11 @@ def transcribe_file(
     meeting_language = resolve_meeting_language(language, config_raw)
     # M6 (issue #75): duration (decoded-audio, never ffprobe) and section
     # language ride on the run dict — format_md / the report read them.
+    # Issue #237: the section language also follows the --language pin, so
+    # an English run gets English headings, notes and filename.
     result: dict[str, Any] = {
         "duration_s": len(audio) / SAMPLE_RATE,
-        "language": _normalize_language(_parse_section_language(config_raw)),
+        "language": resolve_output_language(config_raw, meeting_language),
     }
     logger.info(
         "LLM adjudication: %s", "configured" if llm_config is not None else "disabled"
