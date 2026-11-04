@@ -8,6 +8,10 @@ adjudication entirely (invariant #2 allows skip-by-flag, issue #71); the
 dictation profile — and a failed meeting decode, which is the fallback —
 gets the Parakeet (A) + Canary (B) consensus decodes.
 
+The module also holds the two run-level language resolutions (the decode's
+recognition pin and the output language, issues #108/#237): pure config
+reads that belong next to the stage they govern.
+
 The decode seams (``decode_meeting``, the ``track_decode`` module,
 ``glossary_prompt``, ``decode_all`` and the transcriber classes) are injected
 by the caller from the pipeline namespace so test monkeypatching of
@@ -25,7 +29,8 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 
-from .llm_config import _parse_meeting_language
+from .llm_config import _parse_meeting_language, _parse_section_language
+from .presets import _normalize_language
 
 if TYPE_CHECKING:
     from .progress import ProgressDisplay
@@ -67,6 +72,27 @@ def resolve_meeting_language(
     )
     configured = _parse_meeting_language(meeting_section)
     return None if configured == "auto" else configured
+
+
+def resolve_output_language(
+    config_raw: dict[str, Any] | None, meeting_language: str | None
+) -> str:
+    """The run's OUTPUT language: headings, notes, title and filename (issue #237).
+
+    The companion of :func:`resolve_meeting_language`, which pins only what
+    the recognizer hears. An explicit top-level config ``language`` of
+    ``"fi"`` / ``"en"`` still wins (issue #75); any other value (``"auto"``)
+    counts as unset. Otherwise the run's resolved recognition pin selects the
+    output language too, whichever layer set it (CLI ``--language``, preset,
+    or ``[meeting] language``): an English-pinned call must not come back
+    with Finnish notes. With neither, ``"fi"``, as before.
+    """
+    explicit = config_raw.get("language") if isinstance(config_raw, dict) else None
+    if isinstance(explicit, str) and explicit.strip().lower() in ("fi", "en"):
+        return _parse_section_language(config_raw)
+    if meeting_language is not None:
+        return _normalize_language(meeting_language)
+    return "fi"
 
 
 def run_profile_decodes(

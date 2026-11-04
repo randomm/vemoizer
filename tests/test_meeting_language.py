@@ -217,7 +217,9 @@ def _run_real_pipeline(monkeypatch, tmp_path: Path, extra_args: list[str] | None
     # the pipeline module's namespace, so a fake generate_notes (and the
     # client constructor) means zero network and a faster, deterministic
     # run — the LLM tail is not under test here.
-    def fake_notes(client, text, paragraphs=None, glossary=None, budget=None):
+    def fake_notes(
+        client, text, paragraphs=None, glossary=None, budget=None, language=None
+    ):
         return {"title": "Test", "summary": "s", "key_points": [], "action_items": []}
 
     class _Client:
@@ -298,3 +300,58 @@ def test_config_unknown_meeting_key_warns_not_fails(tmp_path, monkeypatch) -> No
     kw = _run_real_pipeline(monkeypatch, tmp_path, None)
     # The run still succeeds and the valid key still pins.
     assert kw["language"] == "fi"
+
+
+# -- output language = recognition pin unless the config says otherwise ---
+#
+# Issue #237: ``listen/meeting --language en`` pinned only recognition, so a
+# two-hour English call came back with a Finnish title, Finnish notes and
+# Finnish headings. The run's resolved pin now also selects the OUTPUT
+# language (headings, notes, title, filename) — except when the config's
+# top-level ``language`` is set explicitly, which still wins (issue #75).
+
+
+@pytest.mark.parametrize(
+    ("config_raw", "pin", "expected"),
+    [
+        # an explicit config top-level language wins over the pin (both ways)
+        ({"language": "en"}, "fi", "en"),
+        ({"language": "fi"}, "en", "fi"),
+        ({"language": "EN"}, "fi", "en"),
+        # no config language: the run's recognition pin decides
+        ({}, "en", "en"),
+        (None, "en", "en"),
+        ({"language": 42}, "en", "en"),
+        ({}, "fi", "fi"),
+        ({"meeting": {"language": "en"}}, "en", "en"),
+        # no config language and no pin: Finnish, as before
+        ({}, None, "fi"),
+        (None, None, "fi"),
+        ({"language": 42}, None, "fi"),
+        # PR #241 review: top-level "auto" is not an explicit output choice
+        ({"language": "auto"}, "en", "en"),
+        # the config-only [meeting] pin selects the output language too
+        ({"meeting": {"language": "en"}}, "en", "en"),
+    ],
+    ids=[
+        "config-en-beats-pin-fi",
+        "config-fi-beats-pin-en",
+        "config-en-case-insensitive",
+        "pin-en-no-config-language",
+        "pin-en-raw-none",
+        "pin-en-non-string-config-language",
+        "pin-fi-no-config-language",
+        "meeting-section-is-not-top-level-language",
+        "no-pin-no-config-language-defaults-fi",
+        "raw-none-no-pin",
+        "non-string-language-no-pin",
+        "top-level-auto-is-unset",
+        "config-meeting-pin-en-selects-output",
+    ],
+)
+def test_resolve_output_language_branches(
+    config_raw: dict | None, pin: str | None, expected: str
+) -> None:
+    from vemoizer.meeting_stage import resolve_output_language
+
+    assert resolve_output_language(config_raw, pin) == expected

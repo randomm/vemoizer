@@ -472,3 +472,74 @@ def test_notes_no_budget_deadline_s_is_none() -> None:
     notes = generate_notes(client, "lyhyt transkripti", budget=None)
     assert notes is not None
     assert calls == [None]
+
+
+# -- output language (issue #237) -----------------------------------------
+#
+# ``--language en`` pinned only recognition, so English calls got Finnish
+# titles and headings: the prompt hardcoded "The speech is Finnish … with
+# correct Finnish orthography". The stage now takes the run's output
+# language; "fi" is the default and must stay byte-identical.
+
+
+def _systems(*, text: str = "teksti tässä", **kwargs) -> list[str]:
+    """Run generate_notes with a spying client; return the system prompts."""
+    sent: list[str] = []
+
+    def spy(system: str, user: str, max_tokens: int = 2048, **kw) -> str:
+        sent.append(system)
+        return _notes_json()
+
+    client = MagicMock()
+    client.complete = MagicMock(side_effect=spy)
+    generate_notes(client, text, **kwargs)
+    return sent
+
+
+_LONG_TEXT = ("sana " * 15_000).strip()  # ~75K chars -> map-reduce
+
+
+def test_english_language_asks_for_english_notes() -> None:
+    """language="en": the prompt names English and drops the Finnish rule."""
+    (system,) = _systems(language="en")
+    assert "The speech is English" in system
+    assert "Write the notes in English." in system
+    assert "Finnish orthography" not in system
+    assert "The speech is Finnish" not in system
+
+
+def test_english_language_is_case_insensitive() -> None:
+    (system,) = _systems(language="EN")
+    assert "The speech is English" in system
+
+
+def test_english_map_prompt_names_english() -> None:
+    systems = _systems(text=_LONG_TEXT, language="en")
+    map_prompts = [s for s in systems if s.startswith("Summarize")]
+    assert map_prompts, "the map-reduce path did not run"
+    assert all("The speech is English" in s for s in map_prompts)
+    assert all("The speech is Finnish" not in s for s in map_prompts)
+
+
+def test_finnish_prompts_are_unchanged() -> None:
+    """The default (and explicit "fi") prompts are the pre-#237 constants."""
+    from vemoizer.notes import _MAP_SYSTEM_PROMPT, _NOTES_SYSTEM_PROMPT
+
+    assert _systems() == [_NOTES_SYSTEM_PROMPT]
+    assert _systems(language="fi") == [_NOTES_SYSTEM_PROMPT]
+    assert (
+        "The speech is Finnish with English technical terms mixed in"
+        in _NOTES_SYSTEM_PROMPT
+    )
+    assert "with correct Finnish orthography" in _NOTES_SYSTEM_PROMPT
+    map_prompts = [s for s in _systems(text=_LONG_TEXT) if s.startswith("Summarize")]
+    assert map_prompts[0] == _MAP_SYSTEM_PROMPT
+    assert "The speech is Finnish with English terms mixed in" in _MAP_SYSTEM_PROMPT
+
+
+def test_english_notes_keep_the_glossary_and_json_rules() -> None:
+    """Only the language sentences differ; the rules are shared."""
+    (system,) = _systems(language="en", glossary=["Flagship-hanke"])
+    assert "Flagship-hanke" in system
+    assert "ACTION ITEM RULES" in system
+    assert '"title": str' in system

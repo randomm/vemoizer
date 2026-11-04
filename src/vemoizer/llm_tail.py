@@ -40,13 +40,15 @@ def _run_repair(
     llm_client_cls=None,
     display: ProgressDisplay | None = None,
     tracker: InterruptTracker | None = None,
+    language: str = "fi",
 ) -> None:
     """LLM repair pass over the final paragraphs (fixes phonetic ASR garble;
     guarded against invention inside ``repair_paragraphs``).
 
     A wall-clock budget (``repair_budget_seconds``) bounds the whole loop:
     on expiry the stage fails open — the remaining paragraphs ship
-    un-repaired and one warning is logged (invariant #5).
+    un-repaired and one warning is logged (invariant #5). *language* is the
+    run's output language, which picks the prompt language (issue #237).
     """
     fn = repair_paragraphs_fn or repair_paragraphs
     client_cls = llm_client_cls or LLMClient
@@ -74,6 +76,7 @@ def _run_repair(
             glossary=glossary or None,
             budget=budget,
             progress_cb=_report if display is not None else None,
+            language=language,
         )
     finally:
         repair_client.close()
@@ -90,12 +93,14 @@ def _run_notes(
     llm_client_cls=None,
     display: ProgressDisplay | None = None,
     tracker: InterruptTracker | None = None,
+    language: str = "fi",
 ) -> None:
     """Generate the Markdown summary; a failure warns, never aborts.
 
     A wall-clock budget (``notes_budget_seconds``) bounds the call set:
     on expiry the stage fails open — the transcript ships without notes
-    and one warning is logged (invariant #5).
+    and one warning is logged (invariant #5). *language* is the run's
+    output language, which picks the prompt language (issue #237).
     """
     fn = generate_notes_fn or generate_notes
     client_cls = llm_client_cls or LLMClient
@@ -115,6 +120,7 @@ def _run_notes(
             paragraphs=result.get("paragraphs"),
             glossary=glossary or None,
             budget=budget,
+            language=language,
         )
     finally:
         client.close()
@@ -165,11 +171,18 @@ def apply_llm_tail(
     The ``*_fn`` / ``llm_client_cls`` parameters let the caller (pipeline)
     pass its own namespace references so that test monkeypatching of the
     pipeline namespace propagates through to the tail stages.
+
+    Both stages work in the run's OUTPUT language, ``result["language"]``
+    (issue #237): an English run is prompted for English notes and repairs
+    English speech, instead of being told its speech is Finnish.
     """
     # LLM-only glossary terms arrive ``@``-prefixed (issue #82); strip it
     # here, at the LLM boundary — the recognizer never sees them.
     if glossary is not None:
         glossary = [t[1:].lstrip() if t.startswith("@") else t for t in glossary]
+    # The run's output language (issue #237): headings, notes, title and
+    # repair all work in it, so an English run stops getting Finnish notes.
+    language = str(result.get("language") or "fi")
     if corrections and result.get("paragraphs"):
         # Deterministic known-garble replacement, BEFORE the repair pass may
         # rewrite the paragraphs (and even when no LLM is configured).
@@ -183,6 +196,7 @@ def apply_llm_tail(
             llm_client_cls,
             display,
             tracker,
+            language,
         )
     if llm_config is not None and result.get("text"):
         _run_notes(
@@ -194,4 +208,5 @@ def apply_llm_tail(
             llm_client_cls,
             display,
             tracker,
+            language,
         )
