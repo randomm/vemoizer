@@ -178,6 +178,9 @@ def test_transcribe_span_calls_whisper_with_pinned_path_and_word_timestamps(
     # on the whole file; the slice is Finnish prose).
     assert kwargs["language"] == "fi"
     assert kwargs["task"] == "transcribe"
+    # issue #236: dozens of seconds-long span re-decodes must not draw a
+    # tqdm bar next to the run's own stage display (verbose=False ENABLES it).
+    assert kwargs["verbose"] is None
 
 
 def test_transcribe_span_shifts_word_timestamps_to_recording_timeline(

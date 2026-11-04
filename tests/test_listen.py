@@ -28,6 +28,7 @@ from vemoizer.capture import Chunk, SkewLogger
 from vemoizer.cli import app
 from vemoizer.listen import ListenRun, run_listen
 from vemoizer.listen_capture import TrackState
+from vemoizer.listen_console import SkewConsole
 from vemoizer.owner_config import RunOwner
 from vemoizer.preset_interrupt import begin_interrupt_tracking
 from vemoizer.tracks import fallback_owner
@@ -459,13 +460,14 @@ def test_cli_maps_every_flag_into_the_run(cli_run: dict[str, Any], home: Path) -
         "--speakers", "3",
         "--yes",
         "--quiet",
+        "--verbose",
     ]  # fmt: skip
     result = runner.invoke(app, args)
     assert result.exit_code == 0, result.output
     run = cli_run["run"]
     assert (run.mic, run.me, run.duration) == ("USB Mic", "Janni", 90.0)
     assert (run.no_diarize, run.repair, run.language) == (True, False, "FI")
-    assert (run.speakers, run.yes, run.quiet) == ("3", True, True)
+    assert (run.speakers, run.yes, run.quiet, run.verbose) == ("3", True, True, True)
 
 
 def test_cli_exit_code_is_the_run_code(cli_run: dict[str, Any], home: Path) -> None:
@@ -492,26 +494,40 @@ def test_bad_speakers_exit_2_before_any_folder_or_prompt(
     assert preset_calls == []
 
 
-def test_skew_is_echoed_at_stop_when_both_tracks_have_audio(
+# --- the console stays quiet while the call runs (issue #236) ---------------
+
+
+def test_a_normal_skew_never_reaches_the_console(
+    home: Path, stub_mix: None, preset_calls, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """110 skew lines in 38 minutes is spam: the log file already has them."""
+    mic, tap = [Chunk(tone(2.5), 0.0)], [Chunk(tone(2.5), 0.2)]
+    code = _run(FakeClock(), fake_hardware(mic, tap), me="Janni", duration=1.0)
+    assert code == 0
+    assert "track skew" not in capsys.readouterr().err
+
+
+def test_verbose_echoes_the_final_skew_line(
     home: Path, stub_mix: None, preset_calls, capsys: pytest.CaptureFixture[str]
 ) -> None:
     mic, tap = [Chunk(tone(2.5), 0.0)], [Chunk(tone(2.5), 0.2)]
-    code = _run(FakeClock(), fake_hardware(mic, tap), me="Janni", duration=1.0)
+    code = _run(
+        FakeClock(), fake_hardware(mic, tap), me="Janni", duration=1.0, verbose=True
+    )
     assert code == 0
     assert "track skew: them ahead of me by 200 ms" in capsys.readouterr().err
 
 
-def test_skew_tick_echoes_once_per_interval_and_stays_quiet_between(
-    capsys: pytest.CaptureFixture[str],
+def test_an_abnormal_skew_gets_exactly_one_line_without_verbose(
+    home: Path, stub_mix: None, preset_calls, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    mic, tap = TrackState("mic"), TrackState("tap")
-    mic.observe(Chunk(tone(61.0), 0.0))
-    tap.observe(Chunk(tone(61.0), 0.3))
-    skew = SkewLogger()
-    listen._skew_tick(skew, mic, tap, t0=0.0)
-    assert "them ahead of me by 300 ms" in capsys.readouterr().err
-    listen._skew_tick(skew, mic, tap, t0=0.0)
-    assert capsys.readouterr().err == ""
+    """A drifting call is worth interrupting the console for — once."""
+    mic, tap = [Chunk(tone(2.5), 0.0)], [Chunk(tone(2.5), 1.2)]
+    code = _run(FakeClock(), fake_hardware(mic, tap), me="Janni", duration=200.0)
+    err = capsys.readouterr().err
+    assert code == 0
+    assert err.count("track skew") == 1
+    assert "1200 ms" in err
 
 
 def test_skew_tick_is_silent_until_both_tracks_have_audio(
@@ -519,8 +535,112 @@ def test_skew_tick_is_silent_until_both_tracks_have_audio(
 ) -> None:
     mic, tap = TrackState("mic"), TrackState("tap")
     tap.observe(Chunk(tone(61.0), 0.0))
-    listen._skew_tick(SkewLogger(), mic, tap, t0=0.0)
+    listen._skew_tick(SkewLogger(), SkewConsole(verbose=True), mic, tap, t0=0.0)
     assert capsys.readouterr().err == ""
+
+
+def test_skew_tick_echoes_the_interval_line_only_with_verbose(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mic, tap = TrackState("mic"), TrackState("tap")
+    mic.observe(Chunk(tone(61.0), 0.0))
+    tap.observe(Chunk(tone(61.0), 0.3))
+    listen._skew_tick(SkewLogger(), SkewConsole(), mic, tap, t0=0.0)
+    assert capsys.readouterr().err == ""
+    listen._skew_tick(SkewLogger(), SkewConsole(verbose=True), mic, tap, t0=0.0)
+    assert "them ahead of me by 300 ms" in capsys.readouterr().err
+
+
+def test_a_clipping_mic_is_reported_once_per_track(
+    home: Path, stub_mix: None, preset_calls, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Hot input clips irreversibly; the owner hears it once per track."""
+    hot = 2.0
+    mic = [_chunk(tone(2.5, hot)), _chunk(tone(2.5, hot))]
+    tap = [_chunk(tone(2.5, hot)), _chunk(tone(2.5, hot))]
+    code = _run(FakeClock(), fake_hardware(mic, tap), me="Janni", duration=1.0)
+    err = capsys.readouterr().err
+    assert code == 0
+    assert err.count("microphone is too loud") == 1
+    assert err.count("call audio is too loud") == 1
+    assert "gain" in err
+
+
+# --- what the owner sees after Ctrl-C (issue #236) --------------------------
+
+
+def _phase_lines(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> list[str]:
+    """Snapshot stderr at the start of each slow phase; the mix and the preset
+    are stubbed, so the snapshots are the only thing the phases can be."""
+    parts: list[str] = []
+
+    def fake_mix(argv: list[str]) -> None:
+        parts.append(capsys.readouterr().err)
+        Path(argv[-1]).write_bytes(b"mix")
+
+    monkeypatch.setattr(listen, "_run_mix", fake_mix)
+    import vemoizer.batch as batch
+
+    def fake_run_preset(files, **kwargs):
+        parts.append(capsys.readouterr().err)
+        return 0
+
+    monkeypatch.setattr(batch, "run_preset", fake_run_preset)
+    return parts
+
+
+def test_ctrl_c_is_answered_at_once_and_every_phase_announces_itself(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    parts = _phase_lines(monkeypatch, capsys)
+    clock = FakeClock()
+    code = _run(
+        clock, _healthy_hw(), sleep=_stop_at(clock, 3.0), me="Janni", duration=None
+    )
+    call_dir = _only_call_dir(home)
+    parts.append(capsys.readouterr().err)
+    err = "".join(parts)
+    assert code == 0
+    assert (
+        f"■ Recording stopped at 00:00:03. The recording is saved in "
+        f"{Path('calls') / call_dir.name}."
+    ) in err
+    assert "Pressing Ctrl-C again cancels the transcription" in err
+    assert (
+        err.index("Recording stopped")
+        < err.index("Saving the tracks…")
+        < err.index("Mixing the tracks…")
+        < err.index("Transcribing —")
+    )
+    # The first line is on screen while the mix is still running, so a second
+    # Ctrl-C is a decision the owner makes knowing the audio is already saved.
+    assert "Recording stopped" in parts[0]
+    assert "Mixing the tracks…" in parts[0]
+    assert "Transcribing —" in parts[1]
+
+
+def test_quiet_keeps_the_saved_recording_line_and_drops_the_phase_lines(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    parts = _phase_lines(monkeypatch, capsys)
+    clock = FakeClock()
+    code = _run(
+        clock,
+        _healthy_hw(),
+        sleep=_stop_at(clock, 3.0),
+        me="Janni",
+        duration=None,
+        quiet=True,
+    )
+    parts.append(capsys.readouterr().err)
+    err = "".join(parts)
+    assert code == 0
+    assert "Recording stopped" in err
+    for phase in ("Saving the tracks", "Mixing the tracks", "Transcribing —"):
+        assert phase not in err
 
 
 # --- live draft lines on stderr (issue #205) --------------------------------
