@@ -1,0 +1,93 @@
+{
+ "aggregate": {
+  "glossary_insertions": 0,
+  "loop_seconds": 4.8799999999999955,
+  "merge_count": 1,
+  "speaker_mapped_acc": 0.9305555555555555,
+  "speaker_name_acc": 0.0,
+  "split_count": 1,
+  "text_drift": 0.1994147200367765,
+  "title_forbid_hits": 0,
+  "title_must_contain_missing": 0
+ },
+ "excerpts": {
+  "E1": {
+   "glossary_insertions": 0,
+   "loop_seconds": 0.0,
+   "merge_count": 0,
+   "speaker_mapped_acc": 1.0,
+   "speaker_name_acc": 0.0,
+   "split_count": 0,
+   "text_drift": 0.11728395061728394,
+   "title_forbid_hits": 0,
+   "title_must_contain_missing": 0
+  },
+  "E2": {
+   "glossary_insertions": null,
+   "loop_seconds": 0.0,
+   "merge_count": 0,
+   "speaker_mapped_acc": 1.0,
+   "speaker_name_acc": 0.0,
+   "split_count": 0,
+   "text_drift": 0.2701492537313433,
+   "title_forbid_hits": 0,
+   "title_must_contain_missing": 0
+  },
+  "E3": {
+   "glossary_insertions": null,
+   "loop_seconds": 4.8799999999999955,
+   "merge_count": 1,
+   "speaker_mapped_acc": 0.8333333333333334,
+   "speaker_name_acc": 0.0,
+   "split_count": 0,
+   "text_drift": 0.3648293963254593,
+   "title_forbid_hits": 0,
+   "title_must_contain_missing": 0
+  },
+  "E4": {
+   "glossary_insertions": null,
+   "loop_seconds": 0.0,
+   "merge_count": 0,
+   "speaker_mapped_acc": 1.0,
+   "speaker_name_acc": 0.0,
+   "split_count": 0,
+   "text_drift": 0.2125748502994012,
+   "title_forbid_hits": 0,
+   "title_must_contain_missing": 0
+  },
+  "E5": {
+   "glossary_insertions": null,
+   "loop_seconds": 0.0,
+   "merge_count": 0,
+   "speaker_mapped_acc": 0.75,
+   "speaker_name_acc": 0.0,
+   "split_count": 1,
+   "text_drift": 0.08099173553719008,
+   "title_forbid_hits": 0,
+   "title_must_contain_missing": 0
+  },
+  "E6": {
+   "glossary_insertions": null,
+   "loop_seconds": 0.0,
+   "merge_count": 0,
+   "speaker_mapped_acc": 1.0,
+   "speaker_name_acc": 0.0,
+   "split_count": 0,
+   "text_drift": 0.15065913370998116,
+   "title_forbid_hits": 0,
+   "title_must_contain_missing": 0
+  }
+ },
+ "fingerprint": "0db92fc0d94b",
+ "tolerance": {
+  "glossary_insertions": 0.0,
+  "loop_seconds": 45.0,
+  "merge_count": 0.0,
+  "speaker_mapped_acc": 0.03,
+  "speaker_name_acc": 0.03,
+  "split_count": 0.0,
+  "text_drift": 0.03,
+  "title_forbid_hits": 0.0,
+  "title_must_contain_missing": 0.0
+ }
+}

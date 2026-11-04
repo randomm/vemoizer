@@ -1138,14 +1138,27 @@ against it with each key's direction: `speaker_name_acc`,
 `speaker_mapped_acc`, `flag_precision` and `flag_recall` are higher-is-better,
 everything else lower-is-better. Each key has its own tolerance; the defaults
 in `accept_baseline.py` are 0.03 for rates, 5.0 s for second-valued keys and 0
-for counts until #230 calibrates them over repeated runs. A fingerprint
+for counts, and the baseline file's `tolerance` block overrides them.
+
+**Calibration (#230).** Tolerances come from repeated runs of the unchanged
+pipeline on the bench, and the baseline file's `tolerance` block records them.
+`loop_seconds` is the noisy key: whisper's short loops are nondeterministic,
+so its slack is wide. The run-by-run spread is in #230. A real
+hallucination wall still clears that slack. Speaker, count and title keys keep
+their defaults, because they repeated exactly. Re-measure the spread before
+tightening any tolerance.
+
+While the bench text is unreviewed (quiz probes only), the gate covers
+speakers (from the probes), glossary insertions, loops and titles. WER and flag
+quality are reported as `text_drift` or not at all, and are not gated. A fingerprint
 mismatch is bench drift (exit 2, before any decode), as is a missing baseline,
 a draft reference, or any regression; otherwise `accept check passed` is
 printed and the exit is 0. The gate also FAILS CLOSED: a baseline missing the
 `aggregate` block, or missing an excerpt or a metric key the current run
 measured, is a `BaselineDrift` error (exit 2 naming the block, key and scope),
-never a silent skip that prints a pass. `tests/fixtures/accept_baseline.json`
-is recorded by #230 in its own chore PR.
+never a silent skip that prints a pass. The first `tests/fixtures/accept_baseline.json` was recorded by #230.
+`vemoizer accept --check` is a merge gate for PRs that touch decode,
+diarization, repair, notes or render (AGENTS.md).
 
 **Drafts.** A reference with neither `reviewed_by` (the text) nor
 `probes_reviewed_by` (the quiz) is a draft. `--check` and `--update-baseline`

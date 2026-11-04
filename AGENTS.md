@@ -4,7 +4,7 @@ Instructions for AI coding agents (pi, Claude Code, etc.) working in this repo.
 Human-oriented workflow guidance lives in `CONTRIBUTING.md`; this file defines
 quality standards, workflows, and project constraints for agent work.
 
-Last updated: 2026-09-02
+Last updated: 2026-11-04
 
 **Maintenance note:** If you add or swap an ASR backend, change the audio
 contract, or alter the consensus pipeline, update "Project Invariants" below
@@ -130,6 +130,22 @@ speech corpus and compares against `tests/fixtures/wer_baseline.json`
 (exit 2 on regression or corpus drift). Improvements are recorded with
 `--update-baseline` in a separate PR, never mixed into a feature PR, since a
 feature PR squashes to a single commit.
+
+If you changed decode, diarization, repair, notes or render, additionally run
+the acceptance gate on the owner's real-meeting bench and paste its output
+into the PR body:
+
+```bash
+uv run vemoizer accept --bench ~/Documents/NG/.vemoizer/bench --check
+```
+
+It runs the real `meeting` pipeline (LLM stages included) on the private
+excerpts, prints numbers and anonymised ids only, and compares against
+`tests/fixtures/accept_baseline.json` (exit 2 on regression, bench drift or a
+draft reference). The bench lives only on the owner's Mac, so CI cannot run
+it; the pasted output is the evidence. Baseline moves follow the WER rule: a
+separate PR. The run-to-run noise behind the tolerances is in
+`docs/pipeline-spec.md`.
 
 Do NOT:
 - ❌ Use `--no-verify` to skip hooks
