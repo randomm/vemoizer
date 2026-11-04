@@ -171,6 +171,10 @@ def render_markdown(
     """
     from vemoizer.output.markdown import format_md
 
+    # The run wrote its headings in the sidecar's output language (#237);
+    # a re-render must keep them (#247). Old sidecars fall back to "fi".
+    language = sidecar.get("language")
     return format_md(
-        _render_dict(sidecar, corrections=corrections, speaker_names=speaker_names)
+        _render_dict(sidecar, corrections=corrections, speaker_names=speaker_names),
+        language=language if isinstance(language, str) else "fi",
     )
