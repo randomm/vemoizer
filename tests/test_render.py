@@ -376,3 +376,26 @@ def test_render_sidecar_with_string_entry_in_paragraphs_does_not_crash() -> None
     # The valid dict entries still render with corrections applied.
     assert "Flagship-hankkeesta" in md
     assert "EBITDA selvitetään" in md
+
+
+# ---------------------------------------------------------------------------
+# Section language (issue #247)
+# ---------------------------------------------------------------------------
+
+
+def test_render_keeps_english_headings_of_an_english_sidecar() -> None:
+    """An ``en`` sidecar re-renders with the same headings the run wrote."""
+    sidecar = _sidecar(language="en")
+
+    out = render_markdown(sidecar, corrections={}, speaker_names={})
+
+    assert out == format_md(_result(language="en"), language="en")
+    assert "## Summary" in out
+    assert "## Tiivistelmä" not in out
+
+
+def test_render_defaults_to_finnish_without_a_language_key() -> None:
+    """Old sidecars (no or non-string ``language``) keep the ``fi`` headings."""
+    for sidecar in (_sidecar(), _sidecar(language=None)):
+        out = render_markdown(sidecar, corrections={}, speaker_names={})
+        assert "## Tiivistelmä" in out
