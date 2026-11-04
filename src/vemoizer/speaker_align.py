@@ -20,6 +20,7 @@ Fail-open: no words or no turns leaves segments untouched.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from .diarization import speaker_for_span
@@ -176,6 +177,37 @@ def label_segments_by_track(
         )
         if speaker is not None:
             segment["speaker"] = speaker
+
+
+def drop_echo_segments(
+    segments: list[dict[str, Any]],
+    echo_spans: Sequence[tuple[float, float]],
+    remote_turns: Sequence[Turn] = (),
+) -> list[dict[str, Any]]:
+    """Drop ``them``-track segments that are the owner's echo (issue #238).
+
+    The system stem re-transcribed speech the mic track already holds, so
+    these segments go before labelling: a label whose segments all drop can
+    never surface as a SPEAKER_N in the names flow. A segment is echo only
+    when at least half of it lies in echo spans AND it overlaps them more
+    than any remaining far-side turn in *remote_turns*, so a real far-side
+    utterance that crosses an echo turn survives. ``me``-track and
+    untracked segments are never dropped.
+    """
+    if not echo_spans:
+        return list(segments)
+    kept: list[dict[str, Any]] = []
+    for segment in segments:
+        start, end = float(segment["start"]), float(segment["end"])
+        if segment.get("track") == "them":
+            echo = sum(_overlap(start, end, a, b) for a, b in echo_spans)
+            other = max(
+                (_overlap(start, end, a, b) for a, b, _ in remote_turns), default=0.0
+            )
+            if echo > 0.0 and echo * 2 >= end - start and echo > other:
+                continue
+        kept.append(segment)
+    return kept
 
 
 def _ends_question(word: dict[str, Any]) -> bool:

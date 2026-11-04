@@ -45,6 +45,7 @@ from .repair import repair_paragraphs  # noqa: F401
 from .spans import Span, span_context, words_in_span
 from .speaker_align import (
     assign_track_labels,
+    drop_echo_segments,
     label_segments_by_track,
     split_segments_at_speaker_changes,
 )
@@ -125,6 +126,7 @@ def _assemble(
     speaker_segments: list[tuple[float, float, str]] | None = None,
     spans: list[Span] | None = None,
     trusted_labels: frozenset[str] = frozenset(),
+    echo_spans: list[tuple[float, float]] | None = None,
 ) -> dict[str, Any]:
     """Combine the stage outputs into the final ``{"text", "segments"}``.
 
@@ -207,6 +209,19 @@ def _assemble(
         # Speakers attach to EVERY segment, not only the adjudicated ones:
         # the whisper-only meeting path has zero verdicts, and diarization
         # that ran must never be thrown away (issue #71 QA regression).
+        # Them-track segments inside an owner-echo span are the mic track's
+        # speech re-transcribed by the system stem: drop before labelling so
+        # the echo label can never surface (issue #238).
+        remote = [t for t in speaker_segments if t[2] not in trusted_labels]
+        kept = drop_echo_segments(segments, echo_spans or [], remote)
+        if len(kept) != len(segments):
+            # The text must lose the echo too, or the render/notes fallbacks
+            # that read it would bring the dropped words back.
+            text = " ".join(t for s in kept if (t := str(s.get("text", "")).strip()))
+            logger.info(
+                "two-track: dropped %d owner-echo segment(s)", len(segments) - len(kept)
+            )
+        segments = kept
         label_segments_by_track(segments, speaker_segments, trusted_labels)
     result: dict[str, Any] = {"text": text, "segments": segments}
     # Per-window language distribution (issue #147, display only): decode A's
@@ -398,7 +413,14 @@ def transcribe_file(
         return result
     logger.info("assemble: adjudicating spans")
     assembled = _assemble(
-        result_a, result_b, redecoded, llm_config, speaker.turns, spans, speaker.trusted
+        result_a,
+        result_b,
+        redecoded,
+        llm_config,
+        speaker.turns,
+        spans,
+        speaker.trusted,
+        speaker.echo_spans,
     )
     result.update(assembled)
     for warning in speaker.warnings:

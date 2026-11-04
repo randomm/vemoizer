@@ -14,6 +14,7 @@ from __future__ import annotations
 from vemoizer.speaker_align import (
     assign_track_labels,
     assign_word_speakers,
+    drop_echo_segments,
     label_segments_by_track,
     split_segments_at_speaker_changes,
     turns_for_track,
@@ -342,3 +343,44 @@ def test_empty_trusted_set_keeps_untrusted_smoothing() -> None:
     ]
     turns = [(0.0, 1.2, "O"), (1.2, 1.7, "R"), (1.7, 3.0, "O")]
     assert assign_word_speakers(words, turns, trusted=frozenset()) == ["O"] * 5
+
+
+def test_drop_echo_segments_drops_them_midpoints_keeps_me() -> None:
+    segments = [
+        {"start": 0.0, "end": 1.0, "track": "them"},  # mid 0.5 in echo -> drop
+        {"start": 0.0, "end": 1.0, "track": "me"},  # same span, mic -> keep
+        {"start": 5.0, "end": 6.0, "track": "them"},  # mid outside -> keep
+        {"start": 0.0, "end": 1.0},  # untracked (single-file run) -> keep
+    ]
+
+    kept = drop_echo_segments(segments, [(0.0, 1.0)])
+
+    assert kept == [segments[1], segments[2], segments[3]]
+
+
+def test_drop_echo_segments_no_spans_is_a_noop() -> None:
+    segments = [{"start": 0.0, "end": 1.0, "track": "them"}]
+
+    assert drop_echo_segments(segments, []) == segments
+
+
+def test_drop_echo_keeps_far_side_speech_that_crosses_an_echo_turn() -> None:
+    """PR #240 review: a real far-side utterance overlapping an echo turn
+    survives when a remaining remote turn covers it more than the echo."""
+    segment = {"start": 0.0, "end": 2.0, "track": "them"}
+    remote = [(0.0, 2.0, "SPEAKER_01")]
+
+    assert drop_echo_segments([segment], [(0.5, 1.5)], remote) == [segment]
+
+
+def test_drop_echo_needs_half_the_segment_inside_echo() -> None:
+    segment = {"start": 0.0, "end": 4.0, "track": "them"}
+
+    assert drop_echo_segments([segment], [(0.0, 1.0)]) == [segment]
+
+
+def test_drop_echo_drops_when_echo_outweighs_the_remote_turn() -> None:
+    segment = {"start": 0.0, "end": 2.0, "track": "them"}
+    remote = [(1.6, 3.0, "SPEAKER_01")]
+
+    assert drop_echo_segments([segment], [(0.0, 1.6)], remote) == []

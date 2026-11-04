@@ -14,6 +14,7 @@ from vemoizer.tracks import (
     TrackPaths,
     check_stem_lengths,
     configured_owner,
+    echo_labels,
     ingest_stems,
     level_dbfs,
     merge_track_turns,
@@ -281,3 +282,55 @@ def test_owner_speech_split_by_a_leakage_stretch_is_two_runs() -> None:
     )
     kept = owner_speech_segments([_seg(0.0, 3.0)], mic, them)
     assert kept == [_seg(0.0, 1.0), _seg(2.0, 3.0)]
+
+
+def test_echo_label_is_detected_and_folded() -> None:
+    remote = [
+        (10.0, 12.0, "SPEAKER_04"),
+        (20.0, 21.0, "SPEAKER_04"),
+        (40.0, 45.0, "SPEAKER_00"),
+    ]
+    mic_speech = [_seg(10.0, 21.0), _seg(48.0, 50.0)]
+
+    assert echo_labels(remote, mic_speech) == frozenset({"SPEAKER_04"})
+
+
+def test_crosstalk_label_with_low_overlap_is_kept() -> None:
+    remote = [
+        (0.0, 10.0, "SPEAKER_04"),  # owner talks over 2 of 10 s (0.2 < 0.6)
+        (30.0, 40.0, "SPEAKER_00"),
+    ]
+    mic_speech = [_seg(4.0, 6.0)]
+
+    assert echo_labels(remote, mic_speech) == frozenset()
+
+
+def test_all_labels_qualifying_is_crosstalk_not_echo() -> None:
+    remote = [(0.0, 2.0, "SPEAKER_00"), (0.0, 2.0, "SPEAKER_01")]
+    mic_speech = [_seg(0.0, 2.0)]
+
+    assert echo_labels(remote, mic_speech) == frozenset()
+
+
+def test_single_remote_label_never_folds_alone() -> None:
+    assert echo_labels([(0.0, 2.0, "SPEAKER_00")], [_seg(0.0, 2.0)]) == frozenset()
+
+
+def test_overlapping_mic_spans_do_not_double_count_coverage() -> None:
+    # Union of the mic spans is 5.9 s of the 10 s label (0.59 < 0.6), but
+    # summing the spans' overlaps would report 11.7/10 and fold it wrongly.
+    remote = [(0.0, 10.0, "SPEAKER_04"), (30.0, 35.0, "SPEAKER_00")]
+    mic_speech = [_seg(0.0, 5.9), _seg(0.0, 5.8)]
+
+    assert echo_labels(remote, mic_speech) == frozenset()
+
+
+def test_adjacent_mic_spans_union_to_full_coverage() -> None:
+    remote = [(0.0, 10.0, "SPEAKER_04"), (30.0, 35.0, "SPEAKER_00")]
+    mic_speech = [_seg(0.0, 3.0), _seg(2.0, 6.0)]
+
+    assert echo_labels(remote, mic_speech) == frozenset({"SPEAKER_04"})
+
+
+def test_empty_remote_turns_have_no_echo_labels() -> None:
+    assert echo_labels([], [_seg(0.0, 2.0)]) == frozenset()

@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -27,6 +27,7 @@ from .progress import ProgressDisplay, format_duration
 from .tracks import (
     DEFAULT_OWNER,
     TrackPaths,
+    echo_labels,
     ingest_stems,
     merge_track_turns,
     owner_speech_segments,
@@ -58,12 +59,16 @@ class SpeakerStage:
     when it ran but found no speakers; the two are distinct to callers.
     ``trusted`` names the labels whose attribution is never smoothed away
     (the owner's mic track); it is empty outside two-track calls.
+    ``echo_spans`` are the remote turns folded as owner echo (issue #238):
+    their labels were removed from ``turns``, and consumers drop them-track
+    content inside these spans as duplicate speech.
     """
 
     turns: list[tuple[float, float, str]] | None
     ran: bool
     warnings: list[str]
     trusted: frozenset[str] = frozenset()
+    echo_spans: list[tuple[float, float]] = field(default_factory=list)
 
 
 def run_speaker_stage(
@@ -132,7 +137,8 @@ def _run_two_track(
     try:
         mic, them = ingest_stems(tracks, len(audio), ingest_fn=ingest_audio)
         vad_model = load_vad_model()
-        mic_speech = owner_speech_segments(_speech_seconds(mic, vad_model), mic, them)
+        mic_vad = _speech_seconds(mic, vad_model)
+        mic_speech = owner_speech_segments(mic_vad, mic, them)
         them_speech = _speech_seconds(them, vad_model)
         remote_spec = remote_speaker_count(speakers) if diarize else 1
     except Exception as e:  # noqa: BLE001 - fail-open stage boundary
@@ -147,6 +153,7 @@ def _run_two_track(
         return replace(plain, warnings=[*plain.warnings, STEM_WARNING])
 
     warnings: list[str] = []
+    echo_spans: list[tuple[float, float]] = []
     if remote_spec == 1:
         remote = single_remote_turns(them_speech)
     else:
@@ -159,12 +166,26 @@ def _run_two_track(
         else:
             remote = remote_turns
             warnings.append(ATTRIBUTION)
+            # The UNGATED mic VAD is the echo reference: the owner gate cuts
+            # exactly the frames where the them stem is loud, which is the
+            # leak case itself.
+            echo = echo_labels(remote, mic_vad)
+            if echo:
+                echo_turns = [t for t in remote if t[2] in echo]
+                echo_spans = [(t[0], t[1]) for t in echo_turns]
+                remote = [t for t in remote if t[2] not in echo]
+                logger.info(
+                    "two-track: folded %d remote label(s) as owner echo (%.0f s)",
+                    len(echo),
+                    sum(end - start for start, end in echo_spans),
+                )
     turns = merge_track_turns(owner_turns(mic_speech, owner), remote)
     return SpeakerStage(
         turns=turns,
         ran=True,
         warnings=warnings,
         trusted=frozenset({owner}),
+        echo_spans=echo_spans,
     )
 
 
