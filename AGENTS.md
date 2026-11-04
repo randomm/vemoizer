@@ -261,6 +261,7 @@ Before creating documentation, ask: "Will this be true in 200 PRs?"
 | Acceptance bench report | `uv run vemoizer accept` |
 | Acceptance bench gate | `uv run vemoizer accept --check` |
 | Update accept baseline | `uv run vemoizer accept --update-baseline` |
+| Import owner quiz answers | `uv run vemoizer accept --import-answers bench-answers.json --by NAME` |
 | Pre-download models | `uv run vemoizer models pull` |
 
 Every `vemoizer` subcommand row above is the target CLI surface, not a

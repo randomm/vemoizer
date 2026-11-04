@@ -511,3 +511,54 @@ def test_score_excerpt_2026_11_03_ibc_kontti_regression() -> None:
     clean = score_excerpt(**clean_inputs)
     assert clean["glossary_insertions"] == 0
     assert clean["title_forbid_hits"] == 0
+
+
+# --- unreviewed text (issue #243) -------------------------------------------
+
+_NO_TITLE = {"must_contain": [], "forbid": []}
+
+
+def test_score_excerpt_unreviewed_text_reports_drift_not_wer() -> None:
+    ref = [ref_seg(0, 10, "Eero", "a b c")]
+    hyp = [hyp_seg(0, 10, "Eero", "a b x")]
+    scored = score_excerpt(
+        ref,
+        hyp,
+        title="",
+        title_expect=_NO_TITLE,
+        glossary_terms=[],
+        text_reviewed=False,
+    )
+    assert "wer" not in scored
+    assert scored["text_drift"] == pytest.approx(transcript_wer(ref, hyp))
+    assert scored["text_drift"] > 0.0
+
+
+def test_score_excerpt_unreviewed_text_omits_flag_keys() -> None:
+    ref = [ref_seg(0, 10, "Eero", "a b c")]
+    hyp = [hyp_seg(0, 10, "Eero", "a b c", suspect=True)]
+    scored = score_excerpt(
+        ref,
+        hyp,
+        title="",
+        title_expect=_NO_TITLE,
+        glossary_terms=[],
+        text_reviewed=False,
+    )
+    for key in ("unflagged_error_s", "flag_precision", "flag_recall"):
+        assert key not in scored
+    # Keys that do not depend on the draft text stay put.
+    assert "loop_seconds" in scored
+    assert "speaker_name_acc" in scored
+
+
+def test_score_excerpt_reviewed_text_keeps_wer_and_flag_keys() -> None:
+    ref = [ref_seg(0, 10, "Eero", "a b c")]
+    hyp = [hyp_seg(0, 10, "Eero", "a b c")]
+    scored = score_excerpt(
+        ref, hyp, title="", title_expect=_NO_TITLE, glossary_terms=[]
+    )
+    assert scored["wer"] == pytest.approx(0.0)
+    assert "text_drift" not in scored
+    for key in ("unflagged_error_s", "flag_precision", "flag_recall"):
+        assert key in scored

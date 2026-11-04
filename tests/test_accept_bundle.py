@@ -566,3 +566,129 @@ def test_real_ffmpeg_cut_is_16k_mono(tmp_path: Path) -> None:
     assert sr == SAMPLE_RATE  # audio contract: 16 kHz
     assert data.ndim == 1  # mono
     assert len(data) / sr == pytest.approx(1.0, abs=0.05)
+
+
+# --- probes (issue #243) ----------------------------------------------------
+
+
+def _with_probes(bench: Path, excerpt_id: str = "ex1", **fields: Any) -> None:
+    ref_path = bench / "reference" / f"{excerpt_id}.json"
+    obj = json.loads(ref_path.read_text(encoding="utf-8"))
+    obj.update(fields)
+    ref_path.write_text(json.dumps(obj), encoding="utf-8")
+
+
+_SPEAKER_PROBE = {"id": "ex1/s1", "start": 0.1, "end": 0.6, "answer": "Anna"}
+_TERM_PROBE = {
+    "id": "ex1/t1",
+    "start": 0.2,
+    "end": 0.9,
+    "options": ["IWS", "IBS"],
+    "answer": "IBS",
+}
+
+
+def test_load_reads_probes_and_probe_review_fields(
+    tmp_path: Path, fake_cut: list[Any]
+) -> None:
+    _, bench = _freeze_mix(tmp_path, fake_cut)
+    _with_probes(
+        bench,
+        probes=[_SPEAKER_PROBE, {**_SPEAKER_PROBE, "id": "ex1/s2", "answer": "other"}],
+        term_probes=[_TERM_PROBE],
+        probes_reviewed_by="Janni",
+        probes_reviewed_on="2026-11-04",
+    )
+    _, refs = load_bundle(bench)
+    ref = refs["ex1"]
+    assert [p.answer for p in ref.probes] == ["Anna", "other"]
+    assert ref.probes[0].start == pytest.approx(0.1)
+    assert ref.term_probes[0].options == ("IWS", "IBS")
+    assert ref.term_probes[0].answer == "IBS"
+    assert ref.probes_reviewed_by == "Janni"
+    assert ref.probes_reviewed_on == "2026-11-04"
+    # Probes alone do not review the text.
+    assert ref.reviewed_by is None
+
+
+def test_references_without_probes_load_with_empty_probe_fields(
+    tmp_path: Path, fake_cut: list[Any]
+) -> None:
+    _, bench = _freeze_mix(tmp_path, fake_cut)
+    _, refs = load_bundle(bench)
+    ref = refs["ex1"]
+    assert ref.probes == ()
+    assert ref.term_probes == ()
+    assert ref.probes_reviewed_by is None
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("probes", [{**_SPEAKER_PROBE, "start": 0.6, "end": 0.6}]),
+        ("probes", [{**_SPEAKER_PROBE, "answer": ""}]),
+        ("probes", [{**_SPEAKER_PROBE, "answer": None}]),
+        ("probes", [{"id": "ex1/s1", "start": 0.1, "end": 0.6}]),
+        ("probes", "not-a-list"),
+        ("term_probes", [{**_TERM_PROBE, "answer": "IXX"}]),
+        ("term_probes", [{**_TERM_PROBE, "options": []}]),
+        ("term_probes", [{**_TERM_PROBE, "options": [1, 2]}]),
+        ("probes_reviewed_by", 7),
+        ("probes_reviewed_on", ["2026-11-04"]),
+    ],
+)
+def test_loader_rejects_malformed_probes(
+    tmp_path: Path, fake_cut: list[Any], field: str, bad: Any
+) -> None:
+    _, bench = _freeze_mix(tmp_path, fake_cut)
+    _with_probes(bench, **{field: bad})
+    with pytest.raises(ValueError, match=field):
+        load_bundle(bench)
+
+
+def test_probe_reviewed_counts_as_reviewed(tmp_path: Path, fake_cut: list[Any]) -> None:
+    _, bench = _freeze_mix(tmp_path, fake_cut)
+    _with_probes(bench, probes_reviewed_by="Janni", probes_reviewed_on="2026-11-04")
+    _, refs = load_bundle(bench)
+    assert unreviewed(refs) == []
+
+
+def test_refreeze_refuses_probe_reviewed_reference(
+    tmp_path: Path, fake_cut: list[Any]
+) -> None:
+    _, bench = _freeze_mix(tmp_path, fake_cut)
+    _with_probes(bench, probes=[_SPEAKER_PROBE], probes_reviewed_by="Janni")
+    with pytest.raises(ValueError, match="reviewed"):
+        _freeze_mix(tmp_path, fake_cut)
+
+
+def test_pre_probe_reference_file_without_probe_keys_still_loads(
+    tmp_path: Path, fake_cut: list[Any]
+) -> None:
+    # A reference written before #243 has none of the probe keys at all.
+    _, bench = _freeze_mix(tmp_path, fake_cut)
+    ref_path = bench / "reference" / "ex1.json"
+    obj = json.loads(ref_path.read_text(encoding="utf-8"))
+    for key in ("probes", "term_probes", "probes_reviewed_by", "probes_reviewed_on"):
+        obj.pop(key, None)
+    ref_path.write_text(json.dumps(obj), encoding="utf-8")
+    _, refs = load_bundle(bench)
+    assert refs["ex1"].probes == ()
+    assert refs["ex1"].probes_reviewed_by is None
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("probes", ["not-an-object"]),
+        ("term_probes", ["not-an-object"]),
+        ("term_probes", [{**_TERM_PROBE, "options": "IWS"}]),
+    ],
+)
+def test_loader_rejects_probe_shape_errors(
+    tmp_path: Path, fake_cut: list[Any], field: str, bad: Any
+) -> None:
+    _, bench = _freeze_mix(tmp_path, fake_cut)
+    _with_probes(bench, **{field: bad})
+    with pytest.raises(ValueError, match=field):
+        load_bundle(bench)

@@ -52,8 +52,15 @@ def test_preview_run_marks_drafts_and_prints_every_metric(
     assert len(lines) == 2
     assert lines[0].startswith("E1\t(draft)")
     assert lines[1].startswith("E2\t(draft)")
-    for key in _metric_keys():
+    # Draft text is drift only: no WER and no flag keys (issue #243).
+    unreviewed_keys = [
+        key
+        for key in _metric_keys()
+        if key not in ("wer", "unflagged_error_s", "flag_precision", "flag_recall")
+    ]
+    for key in [*unreviewed_keys, "text_drift"]:
         assert f"{key}=" in res.output
+    assert "wer=" not in res.output
     # Scoring sees no terms through load_glossary(None) any more (that was
     # the #229 bug: it returned [] and zeroed glossary_insertions); the
     # terms come from the layered options instead.
@@ -221,6 +228,7 @@ def test_aggregate_means_and_sums(
             {"start": 0.0, "end": 3.0, "text": "a " * 10, "compression_ratio": 3.0}
         ],
     )
+    _mark_reviewed(bench, MIX_ID, TRACK_ID)  # wer is reported for reviewed text
 
     res = _invoke(tmp_path, bench=bench)
 
@@ -457,3 +465,96 @@ def test_bench_outside_a_project_layer_exits_2(
     res = _invoke(tmp_path, bench=wrongly_named / "notbench")
     assert res.exit_code == 2
     assert ".vemoizer/bench" in res.stderr
+
+
+# --- --import-answers (issue #243) ------------------------------------------
+
+
+def _answers_file(tmp_path: Path) -> Path:
+    obj = {
+        "version": 1,
+        "answered_on": "2026-11-04",
+        "questions": [
+            {
+                "id": f"{MIX_ID}/s1",
+                "excerpt": MIX_ID,
+                "kind": "speaker",
+                "start": 0.1,
+                "end": 0.6,
+                "options": ["Anna", "Ben"],
+            }
+        ],
+        "answers": {f"{MIX_ID}/s1": "Someone else"},
+    }
+    path = tmp_path / "bench-answers.json"
+    path.write_text(json.dumps(obj), encoding="utf-8")
+    return path
+
+
+def _ref_obj(bench: Path, excerpt_id: str) -> dict[str, Any]:
+    path = bench / "reference" / f"{excerpt_id}.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_import_answers_writes_probes_and_skips_the_bench_run(
+    bench: Path, tmp_path: Path, fake_pipeline: Any
+) -> None:
+    path = _answers_file(tmp_path)
+    res = _invoke(tmp_path, "--import-answers", str(path), "--by", "Janni", bench=bench)
+    assert res.exit_code == 0, res.output
+    assert "E1\tprobes=1\tterm_probes=0" in res.output
+    assert fake_pipeline.calls == []  # the bench never ran
+    ref = _ref_obj(bench, MIX_ID)
+    assert ref["probes"][0]["answer"] == "other"
+    assert ref["probes_reviewed_by"] == "Janni"
+
+
+def test_import_answers_owner_comes_from_the_project_config(
+    bench: Path, tmp_path: Path
+) -> None:
+    project = bench.parent.parent
+    (project / ".vemoizer" / "config.toml").write_text(
+        '[meeting]\nowner = "Maija"\n', encoding="utf-8"
+    )
+    res = _invoke(
+        tmp_path, "--import-answers", str(_answers_file(tmp_path)), bench=bench
+    )
+    assert res.exit_code == 0, res.output
+    assert _ref_obj(bench, MIX_ID)["probes_reviewed_by"] == "Maija"
+
+
+def test_import_answers_without_an_owner_exits_2(bench: Path, tmp_path: Path) -> None:
+    res = _invoke(
+        tmp_path, "--import-answers", str(_answers_file(tmp_path)), bench=bench
+    )
+    assert res.exit_code == 2
+    assert "no owner" in res.output
+    assert _ref_obj(bench, MIX_ID)["probes"] == []
+
+
+def test_import_answers_unknown_excerpt_exits_2_and_writes_nothing(
+    bench: Path, tmp_path: Path
+) -> None:
+    path = _answers_file(tmp_path)
+    obj = json.loads(path.read_text(encoding="utf-8"))
+    obj["questions"][0]["excerpt"] = "no-such-excerpt"
+    path.write_text(json.dumps(obj), encoding="utf-8")
+    before = (bench / "reference" / f"{MIX_ID}.json").read_bytes()
+    res = _invoke(tmp_path, "--import-answers", str(path), "--by", "Janni", bench=bench)
+    assert res.exit_code == 2
+    assert "unknown excerpt" in res.output
+    assert (bench / "reference" / f"{MIX_ID}.json").read_bytes() == before
+
+
+def test_import_answers_refuses_the_gate_flags(bench: Path, tmp_path: Path) -> None:
+    res = _invoke(
+        tmp_path,
+        "--import-answers",
+        str(_answers_file(tmp_path)),
+        "--by",
+        "Janni",
+        "--check",
+        bench=bench,
+    )
+    assert res.exit_code == 2
+    assert "runs alone" in res.output

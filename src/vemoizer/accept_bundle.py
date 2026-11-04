@@ -22,6 +22,8 @@ from .audio_contract import SAMPLE_RATE
 MANIFEST_VERSION = 1  # the manifest schema version we read and write
 ZERO_LENGTH_SPAN_S = 0.1  # span given to a zero-length sidecar word
 UNCLEAR = "unclear"  # speaker placeholder until the owner names the segment
+OTHER = "other"  # probe answer: a speaker outside the list ("Someone else")
+OVERLAP = "overlap"  # probe answer: two people at once ("Two at once")
 
 # The two legal audio layouts: a single mix, or the two-track call stems.
 _KIND_SLOTS: dict[str, tuple[str, ...]] = {"mix": ("mix",), "two-track": ("me", "them")}
@@ -56,15 +58,36 @@ class RefSegment:  # times are relative to the excerpt start
 
 
 @dataclass(frozen=True)
+class Probe:  # one owner-answered speaker question: who speaks in [start, end)
+    id: str
+    start: float
+    end: float
+    answer: str  # a person name, or OTHER / OVERLAP / UNCLEAR
+
+
+@dataclass(frozen=True)
+class TermProbe:  # one owner-answered "which term was said?" question
+    id: str
+    start: float
+    end: float
+    options: tuple[str, ...]
+    answer: str  # one of the options, or OTHER / UNCLEAR
+
+
+@dataclass(frozen=True)
 class Reference:  # the reviewed ground truth for one excerpt
     id: str
     segments: tuple[RefSegment, ...]
     title_expect: dict[str, list[str]]  # keys must_contain / forbid
-    reviewed_by: str | None
+    reviewed_by: str | None  # set when the TEXT (segments) was reviewed
     reviewed_on: str | None  # "YYYY-MM-DD"
+    probes: tuple[Probe, ...] = ()
+    term_probes: tuple[TermProbe, ...] = ()
+    probes_reviewed_by: str | None = None  # set when the quiz was answered
+    probes_reviewed_on: str | None = None  # "YYYY-MM-DD"
 
 
-def _load_json(path: Path) -> Any:
+def load_json(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -75,7 +98,7 @@ def _sha256_file(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def _atomic_write_json(path: Path, obj: Any) -> None:
+def atomic_write_json(path: Path, obj: Any) -> None:
     # tmp + os.replace: a half-written manifest would read as corruption.
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
@@ -145,7 +168,7 @@ def _manifest_entries(bench: Path, *, required: bool) -> list[Excerpt]:
         if required:
             raise BundleError(f"bench manifest not found: {path}")
         return []
-    m = _load_json(path)
+    m = load_json(path)
     if not isinstance(m, dict) or m.get("version", 1) != MANIFEST_VERSION:
         raise ValueError(f"unsupported manifest version in {path}")
     entries = m.get("excerpts", [])
@@ -193,7 +216,7 @@ def load_bundle(bench_dir: Path) -> tuple[list[Excerpt], dict[str, Reference]]:
         ref_path = bench / "reference" / f"{excerpt.id}.json"
         if not ref_path.is_file():
             raise ValueError(f"excerpt {excerpt.id!r} has no reference file {ref_path}")
-        references[excerpt.id] = _reference_from_json(_load_json(ref_path), excerpt.id)
+        references[excerpt.id] = reference_from_json(load_json(ref_path), excerpt.id)
     return excerpts, references
 
 
@@ -227,11 +250,16 @@ def _excerpt_from_manifest(entry: Any) -> Excerpt:
     return Excerpt(exc_id, kind, dict(audio), sha_map, (w0, w1), src, *tail)
 
 
-def _reference_from_json(obj: Any, expected_id: str) -> Reference:
+def reference_from_json(obj: Any, expected_id: str) -> Reference:
     what = f"reference {expected_id!r}"
     if not isinstance(obj, dict) or _require_str(obj, "id", what) != expected_id:
         raise ValueError(f"{what}: must be an object whose id matches the excerpt")
-    for key in ("reviewed_by", "reviewed_on"):
+    for key in (
+        "reviewed_by",
+        "reviewed_on",
+        "probes_reviewed_by",
+        "probes_reviewed_on",
+    ):
         _require_str(obj, key, what, or_none=True)
     raw = obj.get("segments")
     if not isinstance(raw, list):
@@ -255,12 +283,81 @@ def _reference_from_json(obj: Any, expected_id: str) -> Reference:
             raise ValueError(f"{what}: segment edge must be a bool when present")
         segs.append(RefSegment(s0, e0, spk, txt, edge))
     who, when = obj.get("reviewed_by"), obj.get("reviewed_on")
-    return Reference(expected_id, tuple(segs), title, who, when)
+    return Reference(
+        expected_id,
+        tuple(segs),
+        title,
+        who,
+        when,
+        probes=probes_from_json(obj.get("probes"), what),
+        term_probes=term_probes_from_json(obj.get("term_probes"), what),
+        probes_reviewed_by=obj.get("probes_reviewed_by"),
+        probes_reviewed_on=obj.get("probes_reviewed_on"),
+    )
+
+
+def _answer_str(d: dict[str, Any], what: str) -> str:
+    answer = _require_str(d, "answer", what)
+    if not answer.strip():
+        raise ValueError(f"{what}: answer must not be empty")
+    return answer
+
+
+def probes_from_json(raw: Any, what: str) -> tuple[Probe, ...]:
+    """The speaker probes of one reference; absent means none (issue #243)."""
+    if raw is None:
+        return ()
+    where = f"{what} probes"
+    if not isinstance(raw, list):
+        raise ValueError(f"{where}: must be a list")
+    probes = []
+    for d in raw:
+        if not isinstance(d, dict):
+            raise ValueError(f"{where}: probe must be an object: {d!r}")
+        s0, e0 = _require_span(where, "start/end", d.get("start"), d.get("end"))
+        pid = _require_str(d, "id", where)
+        probes.append(Probe(pid, s0, e0, _answer_str(d, where)))
+    return tuple(probes)
+
+
+def term_probes_from_json(raw: Any, what: str) -> tuple[TermProbe, ...]:
+    """The term probes of one reference; absent means none (issue #243)."""
+    if raw is None:
+        return ()
+    where = f"{what} term_probes"
+    if not isinstance(raw, list):
+        raise ValueError(f"{where}: must be a list")
+    probes = []
+    for d in raw:
+        if not isinstance(d, dict):
+            raise ValueError(f"{where}: probe must be an object: {d!r}")
+        s0, e0 = _require_span(where, "start/end", d.get("start"), d.get("end"))
+        pid = _require_str(d, "id", where)
+        options = d.get("options")
+        if (
+            not isinstance(options, list)
+            or not options
+            or not all(isinstance(o, str) and o.strip() for o in options)
+        ):
+            raise ValueError(f"{where}: options must be a non-empty list of strings")
+        answer = _answer_str(d, where)
+        if answer not in (*options, OTHER, UNCLEAR):
+            raise ValueError(f"{where}: answer {answer!r} is not an option")
+        probes.append(TermProbe(pid, s0, e0, tuple(options), answer))
+    return tuple(probes)
 
 
 def unreviewed(references: dict[str, Reference]) -> list[str]:
-    """Ids whose reference has no reviewer; the CLI blocks --check on these."""
-    return [rid for rid, ref in references.items() if ref.reviewed_by is None]
+    """Ids with neither the text nor the quiz reviewed; --check refuses these.
+
+    A reference whose quiz was answered (``probes_reviewed_by``) is reviewed
+    for speaker and term metrics, even while its draft text is not (#243).
+    """
+    return [
+        rid
+        for rid, ref in references.items()
+        if ref.reviewed_by is None and ref.probes_reviewed_by is None
+    ]
 
 
 def freeze_excerpt(
@@ -286,9 +383,14 @@ def freeze_excerpt(
     start, end = _require_span("freeze", "window", window[0], window[1])
     bench = Path(bench_dir)
     ref_path = bench / "reference" / f"{excerpt_id}.json"
-    if ref_path.exists() and _load_json(ref_path).get("reviewed_by"):
-        raise ValueError(f"reference {excerpt_id!r} is reviewed; refusing to overwrite")
-    sidecar = _load_json(Path(sidecar_path))
+    if ref_path.exists():
+        existing = load_json(ref_path)
+        if existing.get("reviewed_by") or existing.get("probes_reviewed_by"):
+            # A re-freeze rewrites the draft and would drop the owner's answers.
+            raise ValueError(
+                f"reference {excerpt_id!r} is reviewed; refusing to overwrite"
+            )
+    sidecar = load_json(Path(sidecar_path))
     if not isinstance(sidecar, dict) or not isinstance(sidecar.get("segments"), list):
         raise ValueError(f"sidecar {sidecar_path} must carry a 'segments' list")
     # Draft before touching the bench: a malformed sidecar must fail with zero writes.
@@ -322,10 +424,10 @@ def freeze_excerpt(
         "glossary_sha256": _sha256_file(glossary_path) if glossary_path else None,
         "owner": owner,
     }
-    _atomic_write_json(ref_path, draft)
+    atomic_write_json(ref_path, draft)
     by_id[excerpt_id] = entry
     out = {"version": MANIFEST_VERSION, "excerpts": list(by_id.values())}
-    _atomic_write_json(bench / "manifest.json", out)
+    atomic_write_json(bench / "manifest.json", out)
     # Re-read through the loader so freeze only ever returns valid entries.
     return _excerpt_from_manifest(entry)
 

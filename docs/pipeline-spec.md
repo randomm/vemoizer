@@ -1079,6 +1079,8 @@ body.
 | `--baseline PATH` | `tests/fixtures/accept_baseline.json` | Numbers-only baseline read/written by the gate flags. Printed back exactly as passed (absolute, not resolve(), is used for IO only), so the report carries no absolute paths. |
 | `--check` | off | Gate against the baseline; exit 2 on any regression. |
 | `--update-baseline` | off | Write the measured numbers as the new baseline (keeps an existing `tolerance` block). Refused (exit 2, nothing written, an existing baseline untouched) when any excerpt failed. |
+| `--import-answers PATH` | off | Import the owner's quiz answers (`bench-answers.json`) as probes into each `reference/<id>.json`, print `E<n>\tprobes=N\tterm_probes=M` per excerpt, and exit 0 without running the bench. Runs alone: with `--check` or `--update-baseline` it exits 2. Exit 2, nothing written, on an unknown excerpt id, an answer that is not an option, or an unreadable file. |
+| `--by NAME` | the configured `[meeting] owner` | The owner recorded as `probes_reviewed_by` for `--import-answers`. Resolved from the bench's project layer like a run's config. No owner: exit 2. |
 
 **What is run.** The whole per-excerpt run happens with the cwd at the bench's
 PROJECT ROOT (`bench.parent.parent`, validated as above, restored afterwards
@@ -1143,11 +1145,63 @@ measured, is a `BaselineDrift` error (exit 2 naming the block, key and scope),
 never a silent skip that prints a pass. `tests/fixtures/accept_baseline.json`
 is recorded by #230 in its own chore PR.
 
-**Drafts.** A reference with no `reviewed_by` is a draft. `--check` and
-`--update-baseline` refuse to run on a bench containing drafts (exit 2, listing
-the anonymised ids), because an unreviewed answer must never become the gate.
-Without either flag the run happens anyway and those rows are marked `(draft)`
-— the owner previews the numbers before spending the listening time.
+**Drafts.** A reference with neither `reviewed_by` (the text) nor
+`probes_reviewed_by` (the quiz) is a draft. `--check` and `--update-baseline`
+refuse to run on a bench containing drafts (exit 2, listing the anonymised
+ids), because an unreviewed answer must never become the gate. Without either
+flag the run happens anyway and those rows are marked `(draft)` — the owner
+previews the numbers before spending the listening time.
+
+**Owner quiz probes (issue #243).** Reviewing whole transcripts took too long,
+so the owner answers a 10-minute quiz instead: about 40 "who is speaking?"
+questions on 3-5 s clips, plus a few "which term was said?" questions. The
+quiz page (a local tool in the bench folder, never in git) downloads
+`bench-answers.json`, which `--import-answers` writes into the references. A
+reference then carries sparse ground truth at probe windows:
+
+- `probes`: `[{"id", "start", "end", "answer"}]`. `answer` is a person name or
+  `other` (Someone else), `overlap` (Two at once) or `unclear` (Can't tell).
+- `term_probes`: `[{"id", "start", "end", "options", "answer"}]`. `answer` is
+  one of the options, `other` (Something else) or `unclear` (Can't tell).
+- `probes_reviewed_by` / `probes_reviewed_on`: the reviewer and `answered_on`
+  of the quiz. An excerpt with no answered question stays unreviewed.
+- Times are excerpt-relative seconds, as in the reference `segments`.
+
+`load_bundle` validates these fields with the same errors as the segments.
+Re-importing replaces the probes. Unanswered questions are skipped. An
+unknown excerpt id, or an answer that is not an option, exits 2 and writes
+nothing. Every key of a reference without probes is optional, so older
+references load unchanged.
+
+The probe metrics (`accept_probes.py`) are pure functions. For each scored
+probe the hypothesis speaker is the label of the paragraph with the largest
+overlap in the window (no overlap is a wrong name), mapped to a name with the
+same greedy label-to-name mapping as the transcript metrics. Names compare
+case-insensitively on the first word. `other`, `overlap` and `unclear` are
+unscored.
+
+- `speaker_name_acc`, `speaker_mapped_acc`: share of scored probes with the
+  right name (raw label, and after the mapping); `None` with no scored probe.
+- `split_count`: over names, distinct hypothesis labels minus one.
+- `merge_count`: over hypothesis labels, distinct answer names minus one.
+- `glossary_insertions`: per term probe, the options other than the answer
+  that the hypothesis said inside the window, after masking the answer
+  itself (so "kontti" inside a heard "IBC-kontti" is not counted). Words are
+  timed by spreading them evenly over their segment, with a 1 s pad. `None`
+  without term probes; then a reference with owner-reviewed text keeps the
+  transcript-based count, so it stays gated.
+
+When a reference has probes, these five keys replace the transcript-based
+speaker and glossary keys. **Gated:** the speaker keys, split/merge and
+glossary insertions (direction as above); for reviewed text also `wer` and the
+flag keys. **Reported only:** `text_drift`.
+
+**Unreviewed text.** When `reviewed_by` is null the segments are draft text,
+so the WER key is reported as `text_drift` (the same WER, never gated) and the
+flag keys (`unflagged_error_s`, `flag_precision`, `flag_recall`) are omitted.
+`text_drift` is averaged into the aggregate like the rates. The gate ignores
+`text_drift` and never reports it as a missing key, so a bench of quiz-only
+references gates on the speaker and term probes alone.
 
 ## Configuration
 

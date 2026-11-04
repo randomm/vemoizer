@@ -34,8 +34,9 @@ from _accept_helpers import fake_pipeline as fake_pipeline
 from _accept_helpers import isolated_home as isolated_home
 
 import vemoizer.pipeline as pipeline_module
+from vemoizer import accept_bundle, batch_output, batch_preset
 from vemoizer import batch as batch_module
-from vemoizer import batch_output, batch_preset
+from vemoizer.accept_run import score_run
 from vemoizer.loops import loop_seconds
 from vemoizer.presets import MEETING_SPEAKERS, RunOptions, replace
 from vemoizer.tracks import TrackPaths
@@ -331,3 +332,113 @@ def test_keyboard_interrupt_is_not_a_failed_row(
 
     assert res.exit_code == 130  # click's Abort path, not a measured run
     assert "FAILED" not in res.stdout and "aggregate" not in res.stdout
+
+
+# --- score_run: probes and unreviewed text (issue #243) ---------------------
+
+
+def _score_ref(
+    *,
+    text_reviewed: bool,
+    probes: tuple[accept_bundle.Probe, ...] = (),
+    term_probes: tuple[accept_bundle.TermProbe, ...] = (),
+    probes_reviewed: bool = False,
+) -> accept_bundle.Reference:
+    segs = (accept_bundle.RefSegment(0.0, 2.0, "Anna", "alpha beta", False),)
+    return accept_bundle.Reference(
+        "ex1",
+        segs,
+        {"must_contain": [], "forbid": []},
+        "Janni" if text_reviewed else None,
+        "2026-02-02" if text_reviewed else None,
+        probes=probes,
+        term_probes=term_probes,
+        probes_reviewed_by="Janni" if probes_reviewed else None,
+        probes_reviewed_on="2026-11-04" if probes_reviewed else None,
+    )
+
+
+def _score_result(speaker: str = "Anna", text: str = "alpha beta") -> dict[str, Any]:
+    para = {"start": 0.0, "end": 2.0, "text": text, "speaker": speaker}
+    return {"paragraphs": [para], "segments": [dict(para)], "notes": {"title": ""}}
+
+
+def test_score_run_unreviewed_text_reports_drift_and_no_flag_keys() -> None:
+    scored = score_run(_score_result(), _score_ref(text_reviewed=False), [])
+    assert scored is not None
+    assert "wer" not in scored
+    assert "text_drift" in scored
+    for key in ("unflagged_error_s", "flag_precision", "flag_recall"):
+        assert key not in scored
+    assert scored["loop_seconds"] == pytest.approx(0.0)
+
+
+def test_score_run_reviewed_text_keeps_wer_and_flag_keys() -> None:
+    scored = score_run(_score_result(), _score_ref(text_reviewed=True), [])
+    assert scored is not None
+    assert scored["wer"] == pytest.approx(0.0)
+    assert "text_drift" not in scored
+    assert "flag_precision" in scored
+
+
+def test_score_run_probes_replace_the_speaker_keys() -> None:
+    # The transcript says Anna, the owner's quiz says Ben: the probe wins.
+    probes = (accept_bundle.Probe("ex1/s1", 0.0, 2.0, "Ben"),)
+    scored = score_run(
+        _score_result(speaker="Anna"),
+        _score_ref(text_reviewed=True, probes=probes, probes_reviewed=True),
+        [],
+    )
+    assert scored is not None
+    assert scored["speaker_name_acc"] == pytest.approx(0.0)
+    assert scored["speaker_mapped_acc"] == pytest.approx(1.0)
+    assert scored["split_count"] == 0
+
+
+def test_score_run_term_probes_drive_glossary_insertions() -> None:
+    term = accept_bundle.TermProbe("ex1/t1", 0.0, 2.0, ("IWS", "IBS"), "IBS")
+    scored = score_run(
+        _score_result(text="alpha IWS"),
+        _score_ref(text_reviewed=False, term_probes=(term,), probes_reviewed=True),
+        [],  # the transcript-side term list is not what counts here
+    )
+    assert scored is not None
+    assert scored["glossary_insertions"] == 1
+
+
+def test_score_run_probe_only_reference_reports_drift_and_probe_keys() -> None:
+    probes = (accept_bundle.Probe("ex1/s1", 0.0, 2.0, "Anna"),)
+    scored = score_run(
+        _score_result(speaker="Anna"),
+        _score_ref(text_reviewed=False, probes=probes, probes_reviewed=True),
+        [],
+    )
+    assert scored is not None
+    assert scored["speaker_name_acc"] == pytest.approx(1.0)
+    assert "text_drift" in scored
+    assert "wer" not in scored
+    # No term probes: glossary has no quiz signal, so it is not a number.
+    assert scored["glossary_insertions"] is None
+
+
+def test_score_run_reviewed_text_keeps_glossary_without_term_probes() -> None:
+    """PR #244 review: speaker probes alone must not ungate the reviewed
+    transcript's glossary count."""
+    probes = (accept_bundle.Probe("ex1/s1", 0.0, 2.0, "Anna"),)
+    scored = score_run(
+        _score_result(text="alpha kontti kontti"),
+        _score_ref(text_reviewed=True, probes=probes, probes_reviewed=True),
+        ["kontti"],
+    )
+    assert scored is not None
+    assert scored["glossary_insertions"] == 2
+    assert scored["speaker_name_acc"] == pytest.approx(1.0)
+
+
+def test_score_run_without_probes_keeps_transcript_speaker_keys() -> None:
+    scored = score_run(
+        _score_result(speaker="Anna"), _score_ref(text_reviewed=True), []
+    )
+    assert scored is not None
+    assert scored["speaker_name_acc"] == pytest.approx(1.0)
+    assert scored["glossary_insertions"] == 0

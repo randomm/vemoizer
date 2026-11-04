@@ -30,7 +30,12 @@ HIGHER_IS_BETTER = frozenset(
 )
 
 #: Keys averaged (not summed) into the aggregate row: shares, not quantities.
-RATE_KEYS = HIGHER_IS_BETTER | {"wer"}
+RATE_KEYS = HIGHER_IS_BETTER | {"wer", "text_drift"}
+
+#: Reported in the row and the aggregate, never gated. ``text_drift`` is the
+#: WER of an unreviewed (draft) text: the owner has not checked those words,
+#: so a move in it is information, not a regression (#243).
+REPORT_ONLY_KEYS = frozenset({"text_drift"})
 
 #: Keys measured in SECONDS, so their tolerance is a wall-clock slack.
 SECOND_KEYS = frozenset({"loop_seconds", "unflagged_error_s"})
@@ -214,6 +219,8 @@ def compare(
                 "drifted; re-measure with --update-baseline in a dedicated commit"
             )
         for key, value in measured[scope].items():
+            if key in REPORT_ONLY_KEYS:
+                continue
             if key not in row:
                 raise BaselineDrift(
                     f"baseline has no {key} for {scope} — re-measure with "
