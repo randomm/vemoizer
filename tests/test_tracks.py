@@ -297,7 +297,7 @@ def test_echo_label_is_detected_and_folded() -> None:
 
 def test_crosstalk_label_with_low_overlap_is_kept() -> None:
     remote = [
-        (0.0, 10.0, "SPEAKER_04"),  # owner talks over 2 of 10 s (0.2 < 0.6)
+        (0.0, 10.0, "SPEAKER_04"),  # owner over 2 s (+pad: 2.5 of 10, < 0.4)
         (30.0, 40.0, "SPEAKER_00"),
     ]
     mic_speech = [_seg(4.0, 6.0)]
@@ -317,12 +317,28 @@ def test_single_remote_label_never_folds_alone() -> None:
 
 
 def test_overlapping_mic_spans_do_not_double_count_coverage() -> None:
-    # Union of the mic spans is 5.9 s of the 10 s label (0.59 < 0.6), but
-    # summing the spans' overlaps would report 11.7/10 and fold it wrongly.
+    # Padded union is 3.65 s of the 10 s label (0.365 < 0.4), but summing the
+    # spans' overlaps would report 7.2/10 and fold it wrongly.
     remote = [(0.0, 10.0, "SPEAKER_04"), (30.0, 35.0, "SPEAKER_00")]
-    mic_speech = [_seg(0.0, 5.9), _seg(0.0, 5.8)]
+    mic_speech = [_seg(0.0, 3.4), _seg(0.0, 3.3)]
 
     assert echo_labels(remote, mic_speech) == frozenset()
+
+
+def test_echo_lagging_the_mic_is_credited_by_the_pad() -> None:
+    """Issue #245: echo arrives after the owner's own speech. Ten 1 s echo
+    turns, each starting 0.2 s into a 0.6 s mic span: unpadded coverage is
+    0.4 of each turn, padded (0.25 s) it is 0.65, so a 0.5 bar is cleared
+    only thanks to the pad."""
+    remote = [(i * 3 + 0.2, i * 3 + 1.2, "SPEAKER_04") for i in range(10)]
+    remote.append((100.0, 120.0, "SPEAKER_00"))
+    mic_speech = [_seg(i * 3.0, i * 3.0 + 0.6) for i in range(10)]
+
+    assert echo_labels(remote, mic_speech) == frozenset({"SPEAKER_04"})
+    assert echo_labels(remote, mic_speech, min_fraction=0.5) == frozenset(
+        {"SPEAKER_04"}
+    )
+    assert echo_labels(remote, mic_speech, min_fraction=0.7) == frozenset()
 
 
 def test_adjacent_mic_spans_union_to_full_coverage() -> None:
