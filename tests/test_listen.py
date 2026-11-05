@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 import typer
 from _cli_helpers import isolate_home
-from _listen_helpers import FakeClock, fake_hardware, tone, zeros
+from _listen_helpers import FakeClock, FakeSource, fake_hardware, tone, zeros
 from typer.testing import CliRunner
 
 import vemoizer.listen as listen
@@ -505,7 +505,7 @@ def test_a_normal_skew_never_reaches_the_console(
     mic, tap = [Chunk(tone(2.5), 0.0)], [Chunk(tone(2.5), 0.2)]
     code = _run(FakeClock(), fake_hardware(mic, tap), me="Janni", duration=1.0)
     assert code == 0
-    assert "track skew" not in capsys.readouterr().err
+    assert "ms apart" not in capsys.readouterr().err
 
 
 def test_verbose_echoes_the_final_skew_line(
@@ -527,8 +527,9 @@ def test_an_abnormal_skew_gets_exactly_one_line_without_verbose(
     code = _run(FakeClock(), fake_hardware(mic, tap), me="Janni", duration=200.0)
     err = capsys.readouterr().err
     assert code == 0
-    assert err.count("track skew") == 1
-    assert "1200 ms" in err
+    assert err.count("ms apart") == 1
+    assert "1200 ms apart" in err
+    assert "nothing to do" in err
 
 
 def test_skew_tick_is_silent_until_both_tracks_have_audio(
@@ -565,6 +566,54 @@ def test_a_clipping_mic_is_reported_once_per_track(
     assert err.count("microphone is too loud") == 1
     assert err.count("call audio is too loud") == 1
     assert "gain" in err
+
+
+def test_the_call_app_volume_is_the_fix_for_a_hot_tap(
+    home: Path, stub_mix: None, preset_calls, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The call audio is whatever the call app plays; the system volume is not
+    the knob, so the line names the call app."""
+    hot = 2.0
+    mic = [_chunk(tone(2.5, hot))]
+    tap = [_chunk(tone(2.5, hot))]
+    code = _run(FakeClock(), fake_hardware(mic, tap), me="Janni", duration=1.0)
+    err = capsys.readouterr().err
+    assert code == 0
+    assert "lower the volume in the call app (Teams, Meet, …)" in err
+
+
+def test_an_output_device_change_is_reported_while_recording(
+    home: Path, stub_mix: None, preset_calls, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The tap follows the default output device: when the call moves to the
+    speakers the mic hears the other side, so the owner hears it mid-call."""
+    chunks = [_chunk(tone(2.5))]
+    taps: list[FakeSource] = []
+
+    def hardware(_mic_name: str | None) -> tuple[FakeSource, FakeSource]:
+        mic, tap = FakeSource(chunks), FakeSource(chunks)
+        mic.start()
+        tap.start()
+        taps.append(tap)
+        return mic, tap
+
+    clock = FakeClock()
+
+    def sleep(seconds: float) -> None:
+        clock.sleep(seconds)
+        if clock.t >= 3.0:
+            notice = taps[0].on_output_change
+            assert notice is not None, "capture_call must wire the tap notice"
+            notice("AirPods Pro")
+
+    code = _run(clock, hardware, sleep=sleep, me="Janni", duration=3.0)
+    err = capsys.readouterr().err
+    assert code == 0
+    assert err.count("now plays through") == 1
+    assert (
+        "[00:00:03] the call audio now plays through AirPods Pro; if the call "
+        "is still on, use headphones or your mic will pick up the other side"
+    ) in err
 
 
 # --- what the owner sees after Ctrl-C (issue #236) --------------------------
@@ -614,13 +663,13 @@ def test_ctrl_c_is_answered_at_once_and_every_phase_announces_itself(
         err.index("Recording stopped")
         < err.index("Saving the tracks…")
         < err.index("Mixing the tracks…")
-        < err.index("Transcribing —")
+        < err.index("Transcribing ")
     )
     # The first line is on screen while the mix is still running, so a second
     # Ctrl-C is a decision the owner makes knowing the audio is already saved.
     assert "Recording stopped" in parts[0]
     assert "Mixing the tracks…" in parts[0]
-    assert "Transcribing —" in parts[1]
+    assert "Transcribing " in parts[1]
 
 
 def test_quiet_keeps_the_saved_recording_line_and_drops_the_phase_lines(
@@ -640,7 +689,7 @@ def test_quiet_keeps_the_saved_recording_line_and_drops_the_phase_lines(
     err = "".join(parts)
     assert code == 0
     assert "Recording stopped" in err
-    for phase in ("Saving the tracks", "Mixing the tracks", "Transcribing —"):
+    for phase in ("Saving the tracks", "Mixing the tracks", "Transcribing "):
         assert phase not in err
 
 

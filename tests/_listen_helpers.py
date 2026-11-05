@@ -46,6 +46,10 @@ class FakeSource:
 
     failed = False
 
+    #: The seam ``capture_call`` wires for a default-output change (#255); a
+    #: test fires it the way catap's worker thread would.
+    on_output_change: Callable[[str], None] | None = None
+
     def __init__(self, chunks: Sequence[Chunk] = ()) -> None:
         self._chunks = list(chunks)
         self._q: queue.SimpleQueue[Chunk | None] = queue.SimpleQueue()

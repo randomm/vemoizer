@@ -750,22 +750,38 @@ calls/<ts>/`). A silent system side for 3 minutes warns once, naming the
 output device.
 
 **Console contract (issue #236).** Recording is waiting, so the terminal
-stays out of the way; the log file keeps the detail.
+stays out of the way; the log file keeps the detail. A raw log line never
+reaches the terminal: the recording-time notices below are what the owner
+hears, each printed once per event, on its own line, and each prefixed with
+the `● REC` clock in `HH:MM:SS` (`[00:05:07] warning: …`) so it can be read
+against the recording and found in the log by the same second.
 
 - The me/them skew (measured from the two tracks' sample clocks, never
   corrected) is logged every minute and at stop. The console prints those
-  lines only with `--verbose`; without it a single warning line appears when
-  the skew first crosses 500 ms (both stems are written on one session
-  clock, so that is drift no more), and not again until the skew has
-  recovered below the threshold and crossed it once more.
+  lines only with `--verbose`; without it a single line appears when the
+  skew first crosses 500 ms (both stems are written on one session clock,
+  so that is drift no more), and not again until the skew has
+  recovered below the threshold and crossed it once more. It states the
+  consequence and that there is nothing to do — the mix sums the stems
+  sample by sample — `note: the two tracks are 541 ms apart (often after an
+  audio device change); speaker turns may be slightly out of order from
+  here on — nothing to do`.
 - An input over +/-1.0 prints one warning per track, naming the source
-  (microphone / call audio) and the fix (lower the gain), never more.
-  Every `listen` line, that warning included, clears the `● REC` status line
-  first.
+  (microphone / call audio) and the fix — `warning: the microphone is too
+  loud and the audio is clipping; lower the input gain`, and `warning: the
+  call audio is too loud and it is clipping; lower the volume in the call
+  app (Teams, Meet, …)` — never more. The system tap follows the default
+  output device, so when that device moves during a call the owner hears
+  `the call audio now plays through <device>; if the call is still on, use
+  headphones or your mic will pick up the other side`, once per change. The
+  raw `input exceeds +/-1.0` and `default output changed to …` lines go to
+  the call's log only. Every `listen` line, those notices included, clears
+  the `● REC` status line first.
 - After Ctrl-C the run answers at once with `■ Recording stopped at
   HH:MM:SS. The recording is saved in calls/<ts>/`, then one line per slow
   phase before it starts: `Saving the tracks…`, `Mixing the tracks…`,
-  `Transcribing — this can take several minutes for a long call.`
+  `Transcribing 1 h 38 min of audio — this takes a while.` (the recorded
+  length, no ETA).
   Ctrl-C is ignored while the tracks are saved (seconds), so a second press
   can never leave the FLAC stems unfinalised; after that it cancels only the
   transcription. `--quiet` silences the phase lines as it silences the stage display, never

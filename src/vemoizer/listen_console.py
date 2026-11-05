@@ -39,8 +39,17 @@ ABNORMAL_SKEW_S = 0.5
 _CLIP_NOTICES = {
     "mic": "warning: the microphone is too loud and the audio is clipping; "
     "lower the input gain",
-    "tap": "warning: the call audio is too loud and it is clipping; lower its volume",
+    "tap": "warning: the call audio is too loud and it is clipping; lower the "
+    "volume in the call app (Teams, Meet, …)",
 }
+
+#: What to tell the user when the default output device moves under a live
+#: call (#255): the tap now carries whatever the speakers play, so the mic
+#: will hear the other side unless the call is put on headphones.
+_OUTPUT_CHANGE = (
+    "the call audio now plays through {name}; if the call is still on, use "
+    "headphones or your mic will pick up the other side"
+)
 
 
 def clip_notice(track: str) -> str:
@@ -48,20 +57,82 @@ def clip_notice(track: str) -> str:
     return _CLIP_NOTICES[track]
 
 
+def drift_notice(skew: float) -> str:
+    """The console wording for an abnormal skew: the consequence, and no action.
+
+    The skew is never corrected — the mix sums the two stems sample by sample
+    — and it carries forward until a discontinuity re-anchors the stem, so the
+    line says what it costs (turn order from here on) and that there is
+    nothing to do, rather than the log's "the tracks are drifting".
+    """
+    return (
+        f"note: the two tracks are {abs(skew) * 1000:.0f} ms apart (often after "
+        "an audio device change); speaker turns may be slightly out of order "
+        "from here on — nothing to do"
+    )
+
+
 def kept_message(call_dir: Path) -> str:
     """The line telling the user the call folder survived."""
     return f"audio kept: {call_dir.as_posix()}/"
 
 
-def clip_notifier(track: str) -> Callable[[], None]:
-    """The callback :class:`~vemoizer.capture.TrackWriter` calls once per recording.
+def duration_phrase(duration_s: float) -> str:
+    """How long the recorded audio is, in whole minutes: ``1 h 38 min``."""
+    minutes = max(1, int(duration_s) // 60)
+    if minutes >= 60:
+        hours, rem = divmod(minutes, 60)
+        if rem == 0:
+            return f"{hours} h"
+        return f"{hours} h {rem} min"
+    return f"{minutes} min"
 
-    It goes through the same echo as every other ``listen`` line, which ends
-    the ``● REC`` status line first; the writer runs it on its pump thread,
-    where ``say`` is lock-protected.
+
+def timed(line: str, elapsed: Callable[[], float] | None) -> str:
+    """Stamp a recording-time notice with the REC elapsed time (issue #255).
+
+    The owner reads a notice against the ``● REC`` clock, so the prefix is the
+    same ``HH:MM:SS`` the status line uses; a notice that cannot know the time
+    (no *elapsed* provider) is printed bare.
     """
-    line = clip_notice(track)
-    return lambda: say(line)
+    return line if elapsed is None else f"[{hms(elapsed())}] {line}"
+
+
+class Notices:
+    """The recording-time console notices, stamped with the REC clock (#255).
+
+    One per event, each on its own line, each through :func:`status_line.say`
+    so nothing is glued onto the half-drawn ``● REC`` status. The writers run
+    them on their own threads (a pump thread, catap's worker thread), where
+    ``say`` is lock-protected; the logger still carries the raw detail.
+    """
+
+    def __init__(
+        self,
+        clock: Callable[[], float],
+        t0: float,
+        *,
+        echo: Callable[[str], None] = say,
+    ) -> None:
+        self._clock = clock
+        self._t0 = t0
+        self._echo = echo
+
+    def elapsed(self) -> float:
+        """Seconds since recording started: the clock the REC line runs on."""
+        return self._clock() - self._t0
+
+    def _say(self, line: str) -> None:
+        self._echo(timed(line, self.elapsed))
+
+    def clip(self, track: str) -> Callable[[], None]:
+        """The callback ``capture.TrackWriter`` calls once per recording."""
+        line = clip_notice(track)
+        return lambda: self._say(line)
+
+    def output_change(self) -> Callable[[str], None]:
+        """The callback the system tap calls once per default-output change."""
+        return lambda name: self._say(_OUTPUT_CHANGE.format(name=name))
 
 
 class SkewConsole:
@@ -80,10 +151,12 @@ class SkewConsole:
         verbose: bool = False,
         threshold_s: float = ABNORMAL_SKEW_S,
         echo: Callable[[str], None] = say,
+        elapsed: Callable[[], float] | None = None,
     ) -> None:
         self._verbose = verbose
         self._threshold = threshold_s
         self._echo = echo
+        self._elapsed = elapsed
         self._above = False
 
     def interval(self, skew: float) -> None:
@@ -97,10 +170,7 @@ class SkewConsole:
             return  # the interval line already prints the skew as it drifts
         above = abs(skew) >= self._threshold
         if above and not self._above:
-            self._echo(
-                f"warning: {skew_message(skew)} "
-                f"(past {self._threshold * 1000:.0f} ms; the tracks are drifting)"
-            )
+            self._echo(timed(drift_notice(skew), self._elapsed))
         self._above = above
 
     def final(self, skew: float) -> None:
@@ -148,8 +218,11 @@ class CallStatus:
     def mixing(self) -> None:
         self._phase("Mixing the tracks…")
 
-    def transcribing(self) -> None:
-        self._phase("Transcribing — this can take several minutes for a long call.")
+    def transcribing(self, duration_s: float) -> None:
+        """Named by the audio length: 40 s and 100 min are not the same wait."""
+        self._phase(
+            f"Transcribing {duration_phrase(duration_s)} of audio — this takes a while."
+        )
 
     def _phase(self, line: str) -> None:
         if not self._quiet:
