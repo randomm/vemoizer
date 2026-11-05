@@ -503,17 +503,17 @@ existing NFC helpers:
   appends ` (2)`, ` (3)`, … before the suffix until a free name is
   found. Never overwrites an existing file.
 
-### 17. Speaker clips (issue #90)
+### 17. Speaker clips (issues #90, #253)
 
-`src/vemoizer/speaker_clips.py` selects short audio windows from a
-rendered sidecar's `paragraphs` and decodes them from the `source` parts
-for preview playback. It is a pure selector plus audio helpers; nothing
-it does changes the pipeline output.
+`src/vemoizer/speaker_clip_select.py` selects short audio windows from a
+rendered sidecar's `paragraphs`/`segments`; `src/vemoizer/speaker_clips.py`
+(extract, play, temp dir) is the audio half and re-exports the selector.
+Nothing either does changes the pipeline output.
 
 **Selection rules** (`select_clips(paragraphs, segments, *, per_speaker=3,
 min_s=3.0, max_s=5.0, total_duration=None) -> dict[label, list[ClipWindow]]`
 — `total_duration` overrides the audio-end used to clamp windows; it
-defaults to the end of the last paragraph):
+defaults to the end of the last paragraph or segment):
 `ClipWindow` is a hashable 3-tuple subclass of `tuple` with named fields
 `start_s`, `end_s`, `quote`; the same value is the key of the
 dict returned by `extract_clips`:
@@ -521,17 +521,33 @@ dict returned by `extract_clips`:
 - A *turn* is one labelled, non-suspect paragraph — labelled iff its
   `speaker` is a non-empty string (missing key, `None`, or `""` are all
   unlabelled and excluded).
-- A turn of duration D is a candidate iff D ≥ 2 s and its
+- A turn of duration D is a candidate iff `MIN_TURN_S` (2 s) ≤ D and its
   whitespace-collapsed, casefolded text is **not** a member of
   `BACKCHANNELS ∪ BACKCHANNEL_PHRASES` (no word-count condition — a
   backchannel word inside a longer sentence is a normal turn).
-- The window is the middle `min(max_s, D)` seconds of the turn, centered
-  on the turn midpoint and clamped to the audio duration. `min_s` is a
-  display annotation, not a disqualification threshold.
+- **Segment-anchored primary candidate:** a sidecar `segment` is clean iff
+  `MIN_TURN_S` ≤ D ≤ `MAX_TURN_S` (8 s) and it overlaps no segment of any
+  other label (an unlabelled segment counts as another label). The window
+  **is** that segment, `start` to `end`, and the quote is the segment's own
+  text — so every quoted word is inside the clip. The quote is still
+  whitespace-collapsed and bounded to 120 chars + `…`; a truncated quote is
+  a prefix of what is heard.
+- **Paragraph fallback** (a third with no clean segment, or a sidecar with
+  no segments): the window starts at the label's own paragraph start and
+  lasts `min(max_s, D)` seconds, clamped to the audio duration; the quote is
+  only the leading share of the paragraph text that the window plays
+  (`window / D`, cut at a word boundary, `…` for the dropped tail, at least
+  one word). A fallback window overlapping another label's speech is
+  rejected — another label's `segment` when the sidecar has segments,
+  otherwise another label's `paragraph`. A third left with no acceptable
+  window yields no clip.
+- `min_s` is a display annotation, not a disqualification threshold.
 - Picks for one speaker spread across the beginning, middle and end of
-  the meeting: the longest candidate from each third in order
-  (beginning → middle → end); when a third is empty, the longest remaining
-  candidate regardless of third. Fewer than `per_speaker` clean turns
+  the meeting: the longest candidate (ranked by its **turn duration**, ties
+  to the earlier start) from each third in order (beginning → middle → end);
+  when a third is empty, the longest remaining candidate regardless of
+  third. Candidates are de-duplicated by **time overlap**: no two chosen
+  windows of one label overlap. Fewer than `per_speaker` clean turns
   yields fewer clips, without error. The result is sorted by `start_s`.
 
 Extraction (`extract_clips(source, windows, tmp_dir)`) maps each window

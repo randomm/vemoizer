@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
+from vemoizer.speaker_clip_select import MAX_TURN_S
 from vemoizer.speaker_clips import (
     ClipWindow,
     clip_session,
@@ -42,6 +43,15 @@ def _para(
     if suspect is not None:
         p["suspect"] = suspect
     return p
+
+
+def _seg(
+    start: float,
+    end: float,
+    text: str = "segment own words here",
+    speaker: str | None = "A",
+) -> dict:
+    return {"start": start, "end": end, "text": text, "speaker": speaker}
 
 
 def _make_wav(path: Path, seconds: float) -> Path:
@@ -107,7 +117,7 @@ class TestSelectClipsExclusions:
     def test_clean_turn_preferred_over_suspect(self):
         paras = [
             _para(0, 10, text="epäselvä osuus tässä", suspect="garble"),
-            _para(20, 30, text="selkeä puhe tässä lauseessa"),
+            _para(20, 25, text="selkeä puhe tässä lauseessa"),
         ]
         (clip,) = select_clips(paras, [])["A"]
         assert clip.quote == "selkeä puhe tässä lauseessa"
@@ -127,7 +137,7 @@ class TestSelectClipsExclusions:
     def test_clean_turn_preferred_over_backchannel(self):
         paras = [
             _para(0, 5, text="joo"),
-            _para(10, 20, text="tämä on oikea puheenvuoro tässä"),
+            _para(10, 15, text="tämä on oikea puheenvuoro tässä"),
         ]
         (clip,) = select_clips(paras, [])["A"]
         assert clip.quote == "tämä on oikea puheenvuoro tässä"
@@ -153,10 +163,12 @@ class TestSelectClipsExclusions:
 
 
 class TestSelectClipsWindow:
-    def test_window_is_middle_five_seconds_for_long_turn(self):
+    def test_window_starts_at_paragraph_start(self):
+        # No segments -> paragraph fallback: the window starts at the turn
+        # start, not its midpoint (issue #253).
         clips = select_clips([_para(10, 40)], [])["A"]  # 30 s turn
-        assert clips[0].start_s == pytest.approx(22.5)
-        assert clips[0].end_s == pytest.approx(27.5)
+        assert clips[0].start_s == pytest.approx(10.0)
+        assert clips[0].end_s == pytest.approx(15.0)
 
     def test_window_shrinks_for_short_turns(self):
         # 4 s turn -> 4 s window (whole turn).
@@ -177,6 +189,16 @@ class TestSelectClipsWindow:
         assert len(clips[0].quote) <= 121
         assert clips[0].quote.endswith("…")
 
+    def test_quote_is_paragraph_start_text_for_long_turn(self):
+        # The quote starts where the clip starts: the first words heard are
+        # the first words printed (issue #253).
+        words = [f"w{i}" for i in range(40)]
+        text = " ".join(words)
+        w = select_clips([_para(10.0, 40.0, text=text)], [])["A"][0]
+        assert (w.start_s, w.end_s) == (pytest.approx(10.0), pytest.approx(15.0))
+        assert w.quote.startswith("w0 ")
+        assert text.startswith(w.quote.rstrip("…"))
+
     def test_short_quote_whitespace_collapsed(self):
         clips = select_clips([_para(0, 5, text="  hello   world  ")], [])["A"]
         assert clips[0].quote == "hello world"
@@ -192,23 +214,67 @@ class TestSelectClipsSpread:
         paras = [_para(0, 20), _para(30, 50), _para(70, 90)]
         clips = select_clips(paras, [])["A"]
         assert [w.start_s for w in clips] == [
-            pytest.approx(7.5),
-            pytest.approx(37.5),
-            pytest.approx(77.5),
+            pytest.approx(0.0),
+            pytest.approx(30.0),
+            pytest.approx(70.0),
         ]
 
     def test_longest_candidate_wins_within_third(self):
-        # Two turns in first third of 14 s audio: both picked.
-        clips = select_clips([_para(0, 8), _para(2, 14)], [])["A"]
-        assert len(clips) == 2
-        ws = {(round(w.start_s, 1), round(w.end_s, 1)) for w in clips}
-        assert (1.5, 6.5) in ws and (5.5, 10.5) in ws
+        # Three turns in the first third of 40 s of audio. Ranked by the
+        # turn's own duration, so the 7 s one wins: under the old window-span
+        # ranking the 6 s and 7 s turns both spanned max_s and the earliest
+        # (the 6 s one at 4 s) silently won.
+        paras = [_para(0.0, 40.0)]
+        segs = [
+            _seg(0.0, 3.0, "three second turn"),
+            _seg(4.0, 10.0, "six second turn here"),
+            _seg(11.0, 18.0, "seven second turn wins the third"),
+        ]
+        (w,) = select_clips(paras, segs, per_speaker=1)["A"]
+        assert (w.start_s, w.end_s) == (pytest.approx(11.0), pytest.approx(18.0))
+        assert w.quote == "seven second turn wins the third"
+
+    def test_longest_paragraph_candidate_wins_within_third(self):
+        # Same ranking rule on the paragraph fallback (no segments at all).
+        paras = [
+            _para(0.0, 6.0, text="six second turn here"),
+            _para(9.0, 20.0, text="eleven second turn wins the third"),
+        ]
+        (w,) = select_clips(paras, None, per_speaker=1, total_duration=40.0)["A"]
+        assert (w.start_s, w.end_s) == (pytest.approx(9.0), pytest.approx(14.0))
+        assert w.quote.startswith("eleven second")
+
+    def test_two_disjoint_candidates_in_one_third_are_both_picked(self):
+        # Only overlapping candidates are deduped; two disjoint turns of the
+        # same third are both kept (spread rule tops up from the third).
+        clips = select_clips([_para(0, 8), _para(10, 14)], [], total_duration=40.0)["A"]
+        assert {(round(w.start_s, 1), round(w.end_s, 1)) for w in clips} == {
+            (0.0, 5.0),
+            (10.0, 14.0),
+        }
+
+    def test_no_two_windows_of_a_label_overlap(self):
+        # De-dup is by TIME OVERLAP, not equal start: these two turns share
+        # no start but their windows do overlap, so only one is chosen.
+        paras = [
+            _para(0.0, 10.0, text="first turn words here today"),
+            _para(3.0, 7.0, text="second overlapping turn words"),
+        ]
+        clips = select_clips(paras, [])["A"]
+        for i, a in enumerate(clips):
+            for b in clips[i + 1 :]:
+                assert not (a.start_s < b.end_s and b.start_s < a.end_s)
+        assert len(clips) == 1
+        assert clips[0].start_s == pytest.approx(0.0)
 
     def test_empty_third_falls_back_to_longest_remaining(self):
         paras = [_para(0, 4), _para(5, 15), _para(16, 21)]
         clips = select_clips(paras, [])["A"]
-        assert len(clips) == 3
-        assert any(w.start_s == pytest.approx(7.5) for w in clips)
+        assert [w.start_s for w in clips] == [
+            pytest.approx(0.0),
+            pytest.approx(5.0),
+            pytest.approx(16.0),
+        ]
 
     def test_fewer_than_three_returns_fewer(self):
         clips = select_clips([_para(0, 5), _para(10, 12)], [])["A"]
@@ -223,6 +289,192 @@ class TestSelectClipsSpread:
         r = select_clips(paras, [])
         assert r["A"][0].end_s <= 10.0
         assert r["B"][0].start_s >= 10.5
+
+
+# ---------------------------------------------------------------------------
+# select_clips — segment-anchored windows and quote purity (issue #253)
+# ---------------------------------------------------------------------------
+
+
+class TestSelectClipsSegments:
+    def test_window_and_quote_come_from_own_segment(self):
+        paras = [_para(0.0, 90.0, text="FULL PARAGRAPH spans everything")]
+        segs = [
+            _seg(20.0, 26.0, "toinen puheenvuoro tässä"),
+            _seg(21.0, 22.9, "lyhyt pätkä"),  # < 2 s -> never a candidate
+        ]
+        clips = select_clips(paras, segs)["A"]
+        w = next(c for c in clips if c.start_s == pytest.approx(20.0))
+        assert w.end_s == pytest.approx(26.0)  # the WHOLE segment, not max_s
+        assert w.quote == "toinen puheenvuoro tässä"
+        assert "lyhyt" not in w.quote
+
+    def test_window_is_the_whole_clean_segment(self):
+        # The window is the segment start-to-end, so a longer clean segment
+        # plays (and quotes) more words instead of being cut at max_s.
+        paras = [_para(0.0, 90.0, text="P0")]
+        segs = [_seg(10.0, 17.0, "seitsen sekunnin puhesuora tältä puhujalta")]
+        w = next(c for c in select_clips(paras, segs)["A"] if c.start_s == 10.0)
+        assert (w.start_s, w.end_s) == (pytest.approx(10.0), pytest.approx(17.0))
+        assert w.quote == "seitsen sekunnin puhesuora tältä puhujalta"
+
+    def test_segment_at_max_turn_s_is_still_a_candidate(self):
+        paras = [_para(0.0, 90.0, text="P0")]
+        segs = [_seg(0.0, MAX_TURN_S, "exact max turn segment words here")]
+        w = select_clips(paras, segs)["A"][0]
+        assert (w.start_s, w.end_s) == (pytest.approx(0.0), pytest.approx(MAX_TURN_S))
+
+    def test_segment_over_max_turn_s_is_never_quoted(self):
+        # A 48 s turn must not become a 5 s clip with a 121-char quote: the
+        # over-long segment is dropped and the paragraph fallback is used.
+        long_seg_text = " ".join(f"s{i}" for i in range(200))
+        paras = [_para(0.0, 48.0, text="own paragraph spoken words")]
+        segs = [_seg(0.0, 48.0, long_seg_text)]
+        clips = select_clips(paras, segs)["A"]
+        assert clips
+        for w in clips:
+            assert "s0 s1 s2" not in w.quote
+            assert w.end_s - w.start_s <= MAX_TURN_S
+        assert any(w.quote.startswith("own") for w in clips)
+
+    def test_long_segment_quote_starts_at_window_start(self):
+        # A clean (<= MAX_TURN_S) segment with more text than the quote can
+        # carry: the quote stays a prefix of what the clip plays.
+        text = " ".join(f"s{i}" for i in range(80))
+        paras = [_para(0.0, 90.0, text="P0")]
+        segs = [_seg(0.0, MAX_TURN_S - 0.5, text)]
+        clips = select_clips(paras, segs)["A"]
+        w = next(
+            c
+            for c in clips
+            if c.start_s == pytest.approx(0.0) and c.quote.startswith("s0 ")
+        )
+        assert w.end_s == pytest.approx(MAX_TURN_S - 0.5)
+        assert len(w.quote) <= 121 and w.quote.endswith("…")
+        assert text.startswith(w.quote.rstrip("…"))
+
+    def test_no_clean_segment_falls_back_to_paragraph_start(self):
+        paras = [_para(0.0, 12.0, text="own paragraph words here now")]
+        segs = [
+            _seg(5.0, 6.5, "lyhyt"),  # too short
+            _seg(10.0, 15.0, "overlapped"),  # overlaps the B segment below
+            _seg(12.0, 13.0, "bleeding in", speaker="B"),
+        ]
+        clips = select_clips(paras, segs)
+        (w,) = clips["A"]
+        assert w.start_s == pytest.approx(0.0)  # paragraph START, not midpoint
+        assert w.end_s == pytest.approx(5.0)  # min(max_s, duration)
+        # Only the played 5/12 of the text is quoted, cut at a word boundary.
+        assert w.quote == "own paragraph…"
+        for foreign in ("lyhyt", "overlapped", "bleeding in"):
+            assert foreign not in w.quote
+
+    def test_fallback_quote_is_only_the_played_share(self):
+        # 20 words over 20 s, the window plays the first 5 s -> 5 words.
+        text = " ".join(f"w{i}" for i in range(20))
+        (w,) = select_clips([_para(0.0, 20.0, text=text)], [])["A"]
+        assert (w.start_s, w.end_s) == (pytest.approx(0.0), pytest.approx(5.0))
+        assert w.quote == "w0 w1 w2 w3 w4…"
+        assert "w19" not in w.quote
+
+    def test_fallback_quote_keeps_at_least_one_word(self):
+        (w,) = select_clips([_para(0.0, 120.0, text="ensin toinen kolmas")], [])["A"]
+        assert w.quote == "ensin…"
+
+    def test_fallback_rejects_window_overlapping_other_label_segment(self):
+        # The paragraph fallback is guarded by the segments too: the early
+        # turn's window bleeds into B's segment, so that third stays empty.
+        paras = [
+            _para(0.0, 10.0, text="alpha early words"),
+            _para(20.0, 25.0, text="alpha late words"),
+        ]
+        segs = [_seg(3.0, 6.0, "bravo bleed", speaker="B")]
+        clips = select_clips(paras, segs)["A"]
+        assert [w.start_s for w in clips] == [pytest.approx(20.0)]
+
+    def test_fallback_rejects_paragraph_window_overlapping_other_paragraph(self):
+        # An old sidecar has no segments at all, so other labels' PARAGRAPHS
+        # are the guard.
+        paras = [
+            _para(0.0, 10.0, text="alpha early words"),
+            _para(3.0, 6.0, text="bravo bleed", speaker="B"),
+            _para(20.0, 25.0, text="alpha late words"),
+        ]
+        clips = select_clips(paras, None)
+        assert [w.start_s for w in clips["A"]] == [pytest.approx(20.0)]
+
+    def test_one_clean_segment_per_third_in_order(self):
+        paras = [_para(0.0, 90.0, text="P0")]
+        segs = [
+            _seg(60.0, 66.0, "late words"),
+            _seg(0.0, 6.0, "early words"),
+            _seg(31.0, 38.0, "mid words"),
+        ]
+        clips = select_clips(paras, segs)["A"]
+        assert [w.start_s for w in clips] == [
+            pytest.approx(0.0),
+            pytest.approx(31.0),
+            pytest.approx(60.0),
+        ]
+        assert [w.quote for w in clips] == ["early words", "mid words", "late words"]
+
+    def test_quote_never_contains_other_labels_text(self):
+        paras = [
+            _para(0.0, 30.0, text="alpha own speech"),
+            _para(31.0, 60.0, text="bravo own speech", speaker="B"),
+        ]
+        segs = [
+            _seg(0.0, 7.0, "alpha segment words"),
+            _seg(31.0, 38.0, "bravo segment words", speaker="B"),
+            _seg(36.0, 38.0, "ALPHA BLEED", speaker="A"),
+            _seg(12.0, 14.0, "bravo early words", speaker="B"),
+        ]
+        clips = select_clips(paras, segs)
+        foreign = {
+            "A": [s["text"] for s in segs if s["speaker"] == "B"]
+            + [p["text"] for p in paras if p["speaker"] == "B"],
+            "B": [s["text"] for s in segs if s["speaker"] == "A"]
+            + [p["text"] for p in paras if p["speaker"] == "A"],
+        }
+        assert clips  # sanity: something was selected
+        for label, ws in clips.items():
+            for w in ws:
+                assert w.quote  # every clip has a quote
+                for text in foreign[label]:
+                    assert text not in w.quote
+        # The A segment at 36-38 s is the label's OWN text but overlaps B's
+        # segment, so it is foreign to the clip and must never be quoted.
+        assert all("ALPHA BLEED" not in w.quote for w in clips["A"])
+
+    def test_unlabelled_segment_contaminates_candidate(self):
+        # The unlabelled 4-6 s segment poisons both the own-segment candidate
+        # (0-6 s overlaps it) and the paragraph window (0-5 s overlaps it),
+        # so the first third yields no clip at all — and its words are never
+        # quoted (issue #253).
+        paras = [
+            _para(0.0, 20.0, text="own paragraph"),
+            _para(50.0, 60.0, text="second region words"),
+        ]
+        segs = [
+            _seg(0.0, 6.0, "own segment"),
+            {"start": 4.0, "end": 6.0, "text": "mystery voice"},
+        ]
+        clips = select_clips(paras, segs)["A"]
+        assert [w.start_s for w in clips] == [pytest.approx(50.0)]
+        for w in clips:
+            assert not (w.start_s < 6.0 and w.end_s > 4.0)
+            assert "mystery voice" not in w.quote
+
+    def test_old_sidecar_without_segments_uses_paragraph_fallback(self):
+        # segments=None (old sidecars carry no segments key at all).
+        paras = [_para(0.0, 10.0, text="vanha teksti"), _para(12.0, 20.0)]
+        clips = select_clips(paras, None)
+        assert [w.start_s for w in clips["A"]] == [
+            pytest.approx(0.0),
+            pytest.approx(12.0),
+        ]
+        # 5 of the 10 s played -> the leading half of the two words.
+        assert clips["A"][0].quote == "vanha…"
 
 
 # ---------------------------------------------------------------------------
