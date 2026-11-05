@@ -253,6 +253,9 @@ class CatapSystemSource:
         self._session: Any = None
         self._watch: Any = None
         self._failed = False
+        #: Set by ``listen`` to the console notice for a default-output change
+        #: (#255); called with the new device name on catap's worker thread.
+        self.on_output_change: Callable[[str], None] | None = None
 
     @property
     def failed(self) -> bool:
@@ -293,7 +296,10 @@ class CatapSystemSource:
         self._buffers.put((buf, self._clock()))
 
     def _on_output_change(self, _event: Any) -> None:
-        log.warning("default output changed to %s", _default_output_name(self._catap))
+        name = _default_output_name(self._catap)
+        log.warning("default output changed to %s", name)
+        if self.on_output_change is not None:
+            self.on_output_change(name)
 
     def _run(self, soxr: Any) -> None:
         conv = TapConverter(soxr)

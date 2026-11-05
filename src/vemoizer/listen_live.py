@@ -182,5 +182,5 @@ def _record_mix_decode(
     mixed = mix_call(call_dir, me_w, them_w, start_epoch)
     if isinstance(mixed, int):
         return mixed
-    status.transcribing()
+    status.transcribing(max(me_w.position_s, them_w.position_s))
     return decode_call(run, call_dir, owner, mixed, speakers, tracker)

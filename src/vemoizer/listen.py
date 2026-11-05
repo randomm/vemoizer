@@ -38,7 +38,7 @@ from vemoizer.listen_capture import (
     preflight,
     pump,
 )
-from vemoizer.listen_console import CallStatus, SkewConsole, clip_notifier, kept_message
+from vemoizer.listen_console import CallStatus, Notices, SkewConsole, kept_message
 from vemoizer.listen_live import run_session
 from vemoizer.owner_config import RunOwner, resolve_run_owner
 from vemoizer.preset_cli import preset_interrupt_exit
@@ -314,8 +314,9 @@ def capture_call(
     The first Ctrl-C is caught here: it ends the recording and the tracks are
     finalized normally. A Ctrl-C during finalize propagates to the caller.
     """
-    me_w = TrackWriter(call_dir / ME_NAME, t0, on_clip=clip_notifier("mic"))
-    them_w = TrackWriter(call_dir / THEM_NAME, t0, on_clip=clip_notifier("tap"))
+    notices = Notices(clock, t0)
+    me_w = TrackWriter(call_dir / ME_NAME, t0, on_clip=notices.clip("mic"))
+    them_w = TrackWriter(call_dir / THEM_NAME, t0, on_clip=notices.clip("tap"))
     if live is not None:
         me_w.subscribe(live.subscriber("me"))
         them_w.subscribe(live.subscriber("them"))
@@ -328,9 +329,10 @@ def capture_call(
         return None
     mic_state = TrackState("mic")
     tap_state = TrackState("tap", SilenceWatchdog(WATCHDOG_S, clock))
+    tap.on_output_change = notices.output_change()
     threads = [pump(mic, me_w, mic_state), pump(tap, them_w, tap_state)]
     skew = SkewLogger()
-    console = SkewConsole(verbose=run.verbose)
+    console = SkewConsole(verbose=run.verbose, elapsed=notices.elapsed)
     failed = False
     try:
         failed = _report_problems(preflight([mic_state, tap_state], clock, sleep, t0))

@@ -322,6 +322,26 @@ def test_default_output_change_warns_once(monkeypatch, caplog) -> None:
     drain_after_stop(src)
 
 
+def test_default_output_change_notifies_the_console_once_per_event(
+    monkeypatch, caplog
+) -> None:
+    """The log line is the record; the console line (#255) is what the owner
+    needs mid-call: the tap now follows the speakers, so the mic hears them."""
+    fake = FakeCatap(monkeypatch, devices=[device("Speakers", default_out=True)])
+    src = CatapSystemSource(clock=Clock(), poll_s=0.01)
+    heard: list[str] = []
+    src.on_output_change = heard.append
+    src.start()
+    with caplog.at_level(logging.WARNING, logger="vemoizer.capture_sources"):
+        fake.watchers[0](None)
+    assert heard == ["Speakers"]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == ["default output changed to Speakers"]
+    fake.watchers[0](None)
+    assert heard == ["Speakers", "Speakers"]
+    drain_after_stop(src)
+
+
 def test_output_device_is_playback_default_not_alert_device(
     monkeypatch, caplog
 ) -> None:
