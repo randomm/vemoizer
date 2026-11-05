@@ -289,6 +289,28 @@ def test_file_log_reentrant_same_stem_is_noop(tmp_path, monkeypatch):
     assert other.exists()
 
 
+def test_adopting_span_is_the_only_log_while_it_is_open(tmp_path):
+    """``adopt_nested=True`` (one ``listen`` call, one log, issue #254): every
+    span opened inside writes to the adopting file and opens nothing of its
+    own; after the adopting span closes, a new span gets its own file again."""
+    log_dir = logs_dir(tmp_path)
+    logger = logging.getLogger("vemoizer.adopt")
+    with run_log.file_log("call-folder", base_dir=tmp_path, adopt_nested=True):
+        logger.info("before the stage")
+        with run_log.file_log("call", base_dir=tmp_path):
+            logger.info("inside the stage")
+        logger.info("after the stage")
+        assert not (log_dir / "call.log").exists()
+    text = (log_dir / "call-folder.log").read_text(encoding="utf-8")
+    assert "before the stage" in text
+    assert "inside the stage" in text
+    assert "after the stage" in text
+    # Adoption ends with the span: the next span is an ordinary per-file one.
+    with run_log.file_log("call", base_dir=tmp_path):
+        logger.info("next run")
+    assert "next run" in (log_dir / "call.log").read_text(encoding="utf-8")
+
+
 def test_fail_open_does_not_rename_later_span_file(tmp_path):
     """A span that FAILS OPEN (log cannot be created, base_dir is a regular
     file) must not permanently claim the sanitised name in the collision
