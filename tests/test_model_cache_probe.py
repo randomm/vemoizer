@@ -254,25 +254,50 @@ def test_resolve_model_path_partial_snapshot_keeps_bars(tmp_path: Path) -> None:
     assert snap_mock.call_count == 1
 
 
-def test_resolve_model_path_complete_snapshot_silences(tmp_path: Path) -> None:
-    from huggingface_hub import utils as hf_utils
+def test_local_snapshot_path_returns_dir_when_complete(tmp_path: Path) -> None:
+    """Issue #252: the helper hands out the exact snapshot directory the
+    probe validated (``_storage_folder/<rev>/snapshots/<sha>``), so
+    ``resolve_model_path`` can skip ``snapshot_download`` entirely on a
+    warm cache (the hub call would still make HTTP requests)."""
+    snap = _complete_snapshot(tmp_path)
+    assert model_cache.local_snapshot_path(REPO_ID, PINNED_REVISION, tmp_path) == snap
+    # The path is the probe's own snapshot dir — same construction.
+    assert (
+        model_cache.local_snapshot_path(REPO_ID, PINNED_REVISION, tmp_path)
+        == model_cache._storage_folder(REPO_ID, tmp_path)
+        / "snapshots"
+        / PINNED_REVISION
+    )
 
+
+def test_local_snapshot_path_none_for_partial_snapshot(tmp_path: Path) -> None:
+    """A partial snapshot (snapshot dir with only config.json) is not
+    provably complete: the helper returns ``None`` so the caller runs the
+    real download instead of serving a broken directory."""
+    snap = _snapshot_dir(tmp_path, PINNED_REVISION)
+    (snap / "config.json").write_text("{}")
+    assert model_cache.local_snapshot_path(REPO_ID, PINNED_REVISION, tmp_path) is None
+
+
+def test_local_snapshot_path_none_for_cold_cache(tmp_path: Path) -> None:
+    """No snapshot dir at all: ``None`` (cold path)."""
+    assert model_cache.local_snapshot_path(REPO_ID, PINNED_REVISION, tmp_path) is None
+
+
+def test_resolve_model_path_complete_snapshot_bypasses_download(tmp_path: Path) -> None:
+    """Issue #252 end-to-end on the real seam: a complete snapshot is
+    served straight from disk and the fake ``snapshot_download`` is NEVER
+    called — huggingface_hub still makes HTTP requests (header building)
+    even when everything is cached."""
     from vemoizer.models import resolve_model_path
 
-    _complete_snapshot(tmp_path)
-    seen: list[bool] = []
+    snap = _complete_snapshot(tmp_path)
 
-    def fake_snapshot(repo_id, **kwargs):
-        seen.append(hf_utils.are_progress_bars_disabled())
-        return str(_folder(tmp_path) / "snapshots" / PINNED_REVISION)
+    with patch("huggingface_hub.snapshot_download") as snap_mock:
+        path = resolve_model_path(REPO_ID, PINNED_REVISION, cache_dir=str(tmp_path))
 
-    with patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot):
-        resolve_model_path(REPO_ID, PINNED_REVISION, cache_dir=str(tmp_path))
-
-    # Complete snapshot: the (faked) local fetch ran inside the silencing
-    # switch. The probe itself does not call snapshot_download anymore.
-    assert seen == [True]
-    assert not hf_utils.are_progress_bars_disabled()
+    assert path == str(snap)
+    snap_mock.assert_not_called()
 
 
 def test_offline_mode_error_surfaces_same_message_as_main(tmp_path: Path) -> None:

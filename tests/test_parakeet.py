@@ -70,8 +70,12 @@ def make_mock_alignment(text="hello world", sentences=None):
     return aligned
 
 
-def _make_complete_cache(tmp_path: Path, repo_id: str, revision: str) -> None:
-    """Lay out a complete HF cache for *repo_id*@*revision* in *tmp_path*."""
+def _make_complete_cache(tmp_path: Path, repo_id: str, revision: str) -> Path:
+    """Lay out a complete HF cache for *repo_id*@*revision* in *tmp_path*.
+
+    Returns the snapshot directory (the path a warm cache is served from,
+    issue #252).
+    """
     from huggingface_hub.file_download import repo_folder_name
 
     from vemoizer import model_cache
@@ -83,6 +87,7 @@ def _make_complete_cache(tmp_path: Path, repo_id: str, revision: str) -> None:
         weight = snap / pattern.replace("*", "weights")
         weight.parent.mkdir(parents=True, exist_ok=True)
         weight.write_bytes(b"0" * 16)
+    return snap
 
 
 def make_mock_model(generate_result=None):
@@ -256,37 +261,33 @@ class TestParakeetTranscriber:
             t.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32))
         assert t.model is None
 
-    def test_warm_cache_load_silences_progress_bars(self, tmp_path, monkeypatch):
-        """A locally-complete snapshot is resolved silently on the decode A
-        load path (issue #147): no HF progress bars on a warm-cache run."""
-        from huggingface_hub import utils as hf_utils
-
+    def test_warm_cache_load_skips_hub_call_entirely(self, tmp_path, monkeypatch):
+        """Issue #252 (invariant #1): a locally-complete snapshot is served
+        straight from disk on the decode A load path — huggingface_hub is
+        never called, so a warm-cache run makes no HTTP requests (the hub
+        call would still hit the network while building headers)."""
         from vemoizer import model_cache
 
         model_cache.clear_memo()  # isolate from prior tests that may have memoized
 
         t = ParakeetTranscriber()
-        _make_complete_cache(tmp_path, MODEL_ID, MODEL_REVISION)
+        snap_dir = _make_complete_cache(tmp_path, MODEL_ID, MODEL_REVISION)
         # Point the probe at the tmp cache (the transcriber calls
         # resolve_model_path with cache_dir=None, which reads
         # huggingface_hub.constants.HF_HUB_CACHE at call time).
         import huggingface_hub.constants as _hf_constants
 
         monkeypatch.setattr(_hf_constants, "HF_HUB_CACHE", str(tmp_path))
-        seen: list[bool] = []
-
-        def fake_snapshot(repo_id, **kwargs):
-            seen.append(hf_utils.are_progress_bars_disabled())
-            return "mock-path"
 
         with (
-            patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot),
-            patch("parakeet_mlx.from_pretrained", return_value=make_mock_model()),
+            patch("huggingface_hub.snapshot_download") as snap,
+            patch("parakeet_mlx.from_pretrained", return_value=make_mock_model()) as fp,
         ):
             t.transcribe(np.zeros(0, dtype=np.float32))
-            assert not hf_utils.are_progress_bars_disabled()  # no leaked disable
-        # The probe no longer calls snapshot_download: exactly one silent call.
-        assert seen == [True]
+
+        snap.assert_not_called()
+        # The model loads from the probe-validated snapshot dir itself.
+        fp.assert_called_once_with(str(snap_dir))
 
     def test_transcribe_no_language_for_real_aligned_result_shape(self):
         """The real parakeet-mlx AlignedResult has no ``language`` attribute.

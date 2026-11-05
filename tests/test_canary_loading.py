@@ -333,11 +333,11 @@ def test_load_is_idempotent_under_concurrency() -> None:
         assert mock_dl.call_count == 1
 
 
-def test_warm_cache_load_silences_progress_bars(tmp_path: Path, monkeypatch) -> None:
-    """A locally-complete snapshot is resolved silently on the decode B load
-    path (issue #147): no HF progress bars on a warm-cache run."""
-    from huggingface_hub import utils as hf_utils
-
+def test_warm_cache_load_skips_hub_call_entirely(tmp_path: Path, monkeypatch) -> None:
+    """Issue #252 (invariant #1): a locally-complete snapshot is served
+    straight from disk on the decode B load path — huggingface_hub is
+    never called, so a warm-cache run makes no HTTP requests (the hub
+    call would still hit the network while building headers)."""
     from vemoizer import model_cache
 
     model_cache.clear_memo()  # isolate from prior tests
@@ -358,22 +358,17 @@ def test_warm_cache_load_silences_progress_bars(tmp_path: Path, monkeypatch) -> 
 
     monkeypatch.setattr(_hf_constants, "HF_HUB_CACHE", str(tmp_path))
 
-    seen: list[bool] = []
-
-    def fake_snapshot(repo_id, **kwargs):
-        seen.append(hf_utils.are_progress_bars_disabled())
-        return "/tmp/fake"
-
     with (
-        patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot),
+        patch("huggingface_hub.snapshot_download") as mock_dl,
         patch("vemoizer.canary_transcriber.load_canary_weights") as mock_load,
     ):
         mock_load.return_value = FakeModel()
         inst = CanaryTranscriber()
         inst.transcribe(np.zeros(16_000, dtype=np.float32))
-        assert not hf_utils.are_progress_bars_disabled()  # no leaked disable
-    # The probe no longer calls snapshot_download: exactly one silent call.
-    assert seen == [True]
+
+    mock_dl.assert_not_called()
+    # Weights load from the probe-validated snapshot dir itself.
+    mock_load.assert_called_once_with(str(snap))
 
 
 def test_direct_safetensors_load_not_via_mlx_audio() -> None:

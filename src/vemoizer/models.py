@@ -16,8 +16,9 @@ registry via :func:`get_model`, so no repo/SHA pair lives in two places.
 HF repo, pinned SHA) in pipeline order. ``pull_model`` / ``pull_all``
 download a single model or all five and return local snapshot paths;
 ``pull_models`` is the CLI-facing variant that captures per-model failures
-instead of aborting. Warm-cache downloads are silenced (no HF progress
-bars, issue #147); a real download keeps its progress bar.
+instead of aborting. A warm cache is served straight from disk with no hub
+call at all (issue #252, invariant #1); a real download keeps its progress
+bar.
 """
 
 from __future__ import annotations
@@ -227,58 +228,50 @@ def _dir_size(path: Path) -> int:
 def resolve_model_path(
     repo_id: str, revision: str, cache_dir: str | None = None, **extra: Any
 ) -> str:
-    """Resolve a revision-pinned snapshot to its local path (issue #147).
+    """Resolve a revision-pinned snapshot to its local path (issues #147, #252).
 
     The single seam through which every model in this project reaches
-    ``huggingface_hub.snapshot_download``: the ``models pull`` command
-    (via :func:`pull_model` / :func:`pull_models`) and the pipeline loaders
-    (decode A/B, re-decode, diarization) all call this, so the warm-cache
-    silencing lives in exactly one place.
+    ``huggingface_hub``: the ``models pull`` command (via :func:`pull_model`
+    / :func:`pull_models`) and the pipeline loaders (decode A/B, re-decode,
+    diarization) all call this, so the warm-cache shortcut lives in exactly
+    one place.
 
-    When the pinned snapshot is already fully cached the download is
-    silenced through the library's own ``disable_progress_bars`` switch
-    (no "Fetching" / "Download complete" / "Reconstruction" bars); a real
-    download keeps its progress bar so a multi-GB silent fetch does not
-    look like a hang. ``*extra`` carries loader-specific kwargs (e.g.
-    ``token`` for the gated diarization repo) and is forwarded to both the
-    probe and the real call (``cache_dir`` is a named param and is also
-    forwarded to both).
+    When the pinned snapshot is already fully cached, the local snapshot
+    directory is returned directly from the filesystem probe
+    (:func:`vemoizer.model_cache.local_snapshot_path`) and
+    ``huggingface_hub`` is never called: ``snapshot_download`` is not a
+    pure local operation even on a warm cache — it still makes HTTP
+    requests while building request headers (issue #252, project
+    invariant #1). Only a real (cold-cache) download goes through
+    ``snapshot_download``, with its progress bar so a multi-GB fetch does
+    not look like a hang. ``*extra`` carries loader-specific kwargs (e.g.
+    ``token`` for the gated diarization repo) and ``cache_dir`` is
+    forwarded to the download.
 
     Returns the local snapshot path as a ``str``. Errors propagate
     unchanged (offline mode, gated repos, …).
     """
-    from huggingface_hub import snapshot_download
+    from .model_cache import local_snapshot_path
 
-    from .model_cache import snapshot_locally_complete
+    local = local_snapshot_path(repo_id, revision, cache_dir)
+    if local is not None:
+        # Warm cache: the probe already proved this snapshot complete, so
+        # the directory is handed out directly — no hub call, no network
+        # (issue #252).
+        return str(local)
+
+    from huggingface_hub import snapshot_download
 
     all_kwargs: dict[str, Any] = {"revision": revision, **extra}
     if cache_dir is not None:
         all_kwargs["cache_dir"] = cache_dir
-
-    if snapshot_locally_complete(repo_id, revision, cache_dir):
-        # Warm cache: no network call, and no "Fetching" / "Download
-        # complete" / "Reconstruction" progress bars (issue #147).
-        try:
-            from huggingface_hub.utils import disable_progress_bars
-        except ImportError:
-            # In tests that install a fake ``huggingface_hub`` module object
-            # in ``sys.modules`` without a real ``utils`` submodule, fall
-            # back to a no-op context manager so the warm-cache path still
-            # works.
-            import contextlib
-
-            def disable_progress_bars() -> Any:
-                return contextlib.nullcontext()
-
-        with disable_progress_bars():
-            return str(snapshot_download(repo_id, **all_kwargs))
     return str(snapshot_download(repo_id, **all_kwargs))
 
 
 def pull_model(name: str, cache_dir: str | None = None) -> str:
     """Download (revision-pinned) the *name* model and return the local path.
 
-    Warm-cache downloads are silenced (no HF progress bars, issue #147);
+    A warm cache is served straight from disk (no hub call, issue #252);
     a real download keeps its progress bar.
     """
     entry = get_model(name)
@@ -306,10 +299,9 @@ def pull_models(
     Returns one :class:`PulledModel` per model, in order. A per-model
     failure (404, gated, offline, …) is captured on that entry rather than
     aborting the run: the remaining models still get pulled, and the caller
-    reports the failure. ``snapshot_download`` is a no-op when the pinned
-    snapshot is already cached, so a warm cache completes quickly with no
-    network traffic. Warm-cache downloads are quiet (no "Fetching" /
-    "Download" / "Reconstruction" progress bars, issue #147); a real
+    reports the failure. A locally-complete snapshot is served straight from
+    the cache directory with no ``snapshot_download`` call at all (issue
+    #252), so a warm cache completes quickly with no network traffic; a real
     download keeps its progress bar.
     """
     assert_all_revisions_pinned(models)
