@@ -186,14 +186,15 @@ def test_load_pipeline_lazy_imports_pyannote(monkeypatch):
     assert real[0].kwargs.get("token") == "hf_test_token"
 
 
-def test_load_pipeline_warm_cache_silences_progress_bars(monkeypatch):
-    """The diarization loader resolves its weights through the shared models
-    seam (issue #147): a locally-complete snapshot is fetched silently, and
-    the gated-repo ``token`` is forwarded to the real download — the
-    local-only probe never carries it."""
+def test_load_pipeline_warm_cache_skips_hub_call(monkeypatch):
+    """Issue #252 (invariant #1): the diarization loader resolves its
+    weights through the shared models seam — a locally-complete snapshot
+    is served straight from disk and ``huggingface_hub`` is never called
+    (the hub call would still hit the network while building headers),
+    so the gated-repo ``token`` never accompanies a warm "download"."""
     from unittest.mock import patch
 
-    from huggingface_hub import utils as hf_utils
+    from vemoizer import model_cache
 
     fake_pipeline_obj = mock.Mock()
     fake_pipeline_cls = mock.Mock()
@@ -201,31 +202,22 @@ def test_load_pipeline_warm_cache_silences_progress_bars(monkeypatch):
     _install_fake_modules(monkeypatch, fake_pipeline_cls)
     monkeypatch.setenv("HF_TOKEN", "hf_test_token")
 
-    seen: list[bool] = []
-    token_calls: list[str | None] = []
-
-    def fake_snapshot(repo_id, **kwargs):
-        if not kwargs.get("local_files_only"):
-            token_calls.append(kwargs.get("token"))
-        seen.append(hf_utils.are_progress_bars_disabled())
-        return "/fake/hf-cache/snapshot"
-
     with (
-        patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot) as snap,
+        patch("huggingface_hub.snapshot_download") as snap,
         patch("vemoizer.model_cache.snapshot_locally_complete", return_value=True),
     ):
         pipeline = _load_pipeline("cpu")
 
     assert pipeline is fake_pipeline_obj
-    assert not hf_utils.are_progress_bars_disabled()  # no leaked disable
-    # One call, inside the silencing switch (warm cache).
-    assert seen == [True]
-    # The token reached exactly the one real download call (the local-only
-    # probe does not carry it).
-    assert snap.call_count == 1
-    assert token_calls == ["hf_test_token"]
-    # Pipeline loads from the local snapshot path, never the bare repo ID.
-    fake_pipeline_cls.from_pretrained.assert_called_once_with("/fake/hf-cache/snapshot")
+    # Warm cache: the hub call never runs at all — no network, no bars.
+    snap.assert_not_called()
+    # Pipeline loads from the probe's own snapshot dir, never the bare repo ID.
+    expected = (
+        model_cache._storage_folder(DIARIZATION_REPO_ID, None)
+        / "snapshots"
+        / DIARIZATION_REVISION
+    )
+    fake_pipeline_cls.from_pretrained.assert_called_once_with(str(expected))
 
 
 def test_load_pipeline_raises_on_none(monkeypatch):

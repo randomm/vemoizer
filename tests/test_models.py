@@ -56,8 +56,12 @@ def _entry(name: str) -> ModelEntry:
     return MODEL_REGISTRY[name]
 
 
-def _make_complete_cache(tmp_path: Path, repo_id: str, revision: str) -> None:
-    """Lay out a complete HF cache for *repo_id*@*revision* in *tmp_path*."""
+def _make_complete_cache(tmp_path: Path, repo_id: str, revision: str) -> Path:
+    """Lay out a complete HF cache for *repo_id*@*revision* in *tmp_path*.
+
+    Returns the snapshot directory (the path a warm cache must be served
+    from without any hub call, issue #252).
+    """
     from huggingface_hub.file_download import repo_folder_name
 
     from vemoizer import model_cache
@@ -69,6 +73,7 @@ def _make_complete_cache(tmp_path: Path, repo_id: str, revision: str) -> None:
         weight = snap / pattern.replace("*", "weights")
         weight.parent.mkdir(parents=True, exist_ok=True)
         weight.write_bytes(b"0" * 16)
+    return snap
 
 
 # ---------------------------------------------------------------------------
@@ -156,10 +161,12 @@ def test_pull_model_calls_snapshot_download_with_pinned_revision(
     name: str, tmp_path
 ) -> None:
     repo_id, revision = EXPECTED[name]
-    _make_complete_cache(tmp_path, repo_id, revision)
+    # Cold cache (empty tmp_path): the pull must reach the pinned download.
+    # A warm cache is served from disk with no hub call at all (issue #252).
     with patch("huggingface_hub.snapshot_download", return_value="/tmp/snap") as snap:
         result = pull_model(name, cache_dir=str(tmp_path))
     # The (single) real call uses the pinned revision.
+    assert snap.call_count == 1
     for call in snap.call_args_list:
         _, kwargs = call
         assert kwargs.get("revision") == revision
@@ -169,11 +176,11 @@ def test_pull_model_calls_snapshot_download_with_pinned_revision(
 @pytest.mark.parametrize("name", sorted(EXPECTED))
 def test_pull_model_revision_never_omitted(name: str, tmp_path) -> None:
     """The revision kwarg must be present and equal to the full SHA —
-    a call without it is the 'moving ref' regression."""
-    repo_id, revision = EXPECTED[name]
-    _make_complete_cache(tmp_path, repo_id, revision)
+    a call without it is the 'moving ref' regression. Cold cache, so the
+    real download runs (a warm cache makes no hub call, issue #252)."""
     with patch("huggingface_hub.snapshot_download", return_value="/tmp/snap") as snap:
         pull_model(name, cache_dir=str(tmp_path))
+        assert snap.call_count == 1
         _, kwargs = snap.call_args
         assert "revision" in kwargs
         assert kwargs["revision"] == EXPECTED[name][1]
@@ -181,10 +188,10 @@ def test_pull_model_revision_never_omitted(name: str, tmp_path) -> None:
 
 
 def test_pull_model_accepts_cache_dir(tmp_path) -> None:
-    repo_id, revision = EXPECTED["parakeet"]
-    _make_complete_cache(tmp_path, repo_id, revision)
+    # Cold cache: the download call must carry the pinned revision.
     with patch("huggingface_hub.snapshot_download", return_value="/tmp/snap") as snap:
         pull_model("parakeet", cache_dir=str(tmp_path))
+    assert snap.call_count == 1
     for call in snap.call_args_list:
         _, kwargs = call
         assert kwargs.get("revision") == EXPECTED["parakeet"][1]
@@ -199,9 +206,9 @@ def test_pull_model_unknown_name_raises_before_any_download() -> None:
 
 def test_pull_model_routes_through_resolve_model_path() -> None:
     """``pull_model`` delegates to the shared ``resolve_model_path`` seam —
-    the warm-cache silencing logic lives in exactly one place (issue #147).
-    If ``pull_model`` ever re-implements its own ``snapshot_download`` call,
-    this test fails: the loader-side fix stops covering ``models pull``."""
+    the warm-cache shortcut logic lives in exactly one place (issues #147,
+    #252). If ``pull_model`` ever re-implements its own ``snapshot_download``
+    call, this test fails: the loader-side fix stops covering ``models pull``."""
     with patch.object(
         _models_mod, "resolve_model_path", return_value="/tmp/snap"
     ) as seam:
@@ -337,36 +344,20 @@ def _fake_response(status: int) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def test_pull_model_warm_cache_silences_progress_bars(tmp_path) -> None:
-    """A locally-complete snapshot is fetched with the library's own
-    progress-bar switch off (and no network), so no "Fetching" /
-    "Download" / "Reconstruction" bar reaches the terminal."""
-    from huggingface_hub import utils as hf_utils
-
+def test_pull_model_warm_cache_never_calls_snapshot_download(tmp_path) -> None:
+    """Issue #252 (invariant #1): a locally-complete snapshot is served
+    straight from the cache directory — ``huggingface_hub`` is not called
+    at all, so no header-building HTTP request (e.g. the
+    ``/api/agent-harnesses`` call huggingface_hub 1.29 makes while
+    building headers) can leak on a warm cache."""
     repo_id, revision = EXPECTED["parakeet"]
-    _make_complete_cache(tmp_path, repo_id, revision)
-    seen: list[bool] = []  # one entry per call: bars-disabled state at call time
+    snap_dir = _make_complete_cache(tmp_path, repo_id, revision)
 
-    def fake_snapshot(repo_id, **kwargs):
-        seen.append(hf_utils.are_progress_bars_disabled())
-        return str(tmp_path)
-
-    with patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot) as snap:
-        # The conservative probe succeeds => warm cache => silent path.
+    with patch("huggingface_hub.snapshot_download") as snap:
         result = pull_model("parakeet", cache_dir=str(tmp_path))
-        # After the call the library's global state must be back to enabled
-        # (the context manager re-enabled it) — a leaked disable would be
-        # a regression this assertion catches.
-        assert not hf_utils.are_progress_bars_disabled()
 
-    assert result == str(tmp_path)
-    # The probe no longer calls snapshot_download: exactly one (silent) call.
-    assert snap.call_count == 1
-    # During the real call the library's own switch was OFF.
-    assert seen == [True], (
-        "warm-cache download must run while HF's progress bars are disabled; "
-        f"saw disabled-states {seen}"
-    )
+    snap.assert_not_called()
+    assert result == str(snap_dir)
 
 
 def test_pull_model_cold_cache_keeps_progress_bars(tmp_path) -> None:
@@ -392,57 +383,27 @@ def test_pull_model_cold_cache_keeps_progress_bars(tmp_path) -> None:
     )
 
 
-def test_pull_model_warm_cache_uses_library_switch_not_print_patch(tmp_path) -> None:
-    """Break-and-fail: the warm-cache path must silence the bars through
-    huggingface_hub's own ``disable_progress_bars`` switch. Remove that
-    from ``pull_model`` and this test fails, because the library's switch
-    is never consulted during the download call."""
-    repo_id, revision = EXPECTED["parakeet"]
-    _make_complete_cache(tmp_path, repo_id, revision)
-    consulted: list[bool] = []
-
-    def fake_snapshot(repo_id, **kwargs):
-        consulted.append(True)
-        return str(tmp_path)
-
-    with patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot):
-        pull_model("parakeet", cache_dir=str(tmp_path))
-
-    assert consulted, (
-        "pull_model must run the real download inside the library's own "
-        "disable_progress_bars switch for a warm cache"
-    )
-
-
-def test_pull_models_warm_cache_silences_per_model(tmp_path) -> None:
-    """``pull_models`` (the ``models pull`` seam) silences each model
-    individually when its snapshot is locally complete."""
-    from huggingface_hub import utils as hf_utils
-
+def test_pull_models_warm_cache_never_calls_snapshot_download(tmp_path) -> None:
+    """``pull_models`` (the ``models pull`` seam) serves every locally-
+    complete model from disk: the probe short-circuits the hub call for
+    each model individually (issue #252)."""
     from vemoizer import model_cache as _mc
 
     _mc.clear_memo()
-    for spec in MODELS:
-        _make_complete_cache(tmp_path, spec.repo_id, spec.revision)
+    snap_dirs = {
+        spec.name: _make_complete_cache(tmp_path, spec.repo_id, spec.revision)
+        for spec in MODELS
+    }
 
-    seen: list[bool] = []
-
-    def fake_snapshot(repo_id, **kwargs):
-        seen.append(hf_utils.are_progress_bars_disabled())
-        return f"/cache/{repo_id}"
-
-    with patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot) as snap:
+    with patch("huggingface_hub.snapshot_download") as snap:
         from vemoizer.models import pull_models
 
         results = pull_models(MODELS, cache_dir=str(tmp_path))
-        assert not hf_utils.are_progress_bars_disabled()
 
+    snap.assert_not_called()
     assert all(r.error is None for r in results)
-    assert snap.call_count == len(MODELS)
-    for i, spec in enumerate(MODELS):
-        real = snap.call_args_list[i]
-        assert real.kwargs.get("revision") == spec.revision
-    assert all(state is True for state in seen), f"saw disabled-states {seen}"
+    for r in results:
+        assert r.local_path == str(snap_dirs[r.spec.name])
 
 
 # ---------------------------------------------------------------------------
@@ -472,29 +433,27 @@ def test_resolve_model_path_forwards_revision_and_extra_kwargs(tmp_path) -> None
     assert real[1].get("token") == "hf_token"
 
 
-def test_resolve_model_path_warm_cache_silences(tmp_path) -> None:
-    """A locally-complete snapshot is fetched through the library's own
-    progress-bar switch; the switch is re-enabled afterwards (no leak)."""
-    from huggingface_hub import utils as hf_utils
-
+def test_resolve_model_path_warm_cache_returns_local_path_without_download(
+    tmp_path,
+) -> None:
+    """Issue #252: on a warm cache the seam hands out the snapshot directory
+    and the fake ``snapshot_download`` is NEVER called — not even inside
+    ``disable_progress_bars``, because the library call itself makes HTTP
+    requests (header building) on a warm cache."""
     repo_id, revision = EXPECTED["whisper-turbo"]
-    _make_complete_cache(tmp_path, repo_id, revision)
-    seen: list[bool] = []
+    snap_dir = _make_complete_cache(tmp_path, repo_id, revision)
 
-    def fake_snapshot(repo_id, **kwargs):
-        seen.append(hf_utils.are_progress_bars_disabled())
-        return str(tmp_path)
+    with patch("huggingface_hub.snapshot_download") as snap:
+        path = resolve_model_path(repo_id, revision, cache_dir=str(tmp_path))
 
-    with patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot):
-        resolve_model_path(repo_id, revision, cache_dir=str(tmp_path))
-        assert not hf_utils.are_progress_bars_disabled()
-
-    assert seen == [True]
+    assert path == str(snap_dir)
+    snap.assert_not_called()
 
 
 def test_resolve_model_path_cold_cache_keeps_bars(tmp_path) -> None:
     """A failed conservative probe means 'not provably cached' — the real
-    download runs with the bars on (a multi-GB silent fetch looks like a hang)."""
+    download runs once, with the bars on (a multi-GB silent fetch looks
+    like a hang)."""
     from huggingface_hub import utils as hf_utils
 
     seen: list[bool] = []

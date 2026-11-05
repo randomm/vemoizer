@@ -2,8 +2,10 @@
 
 The single place that decides whether a pinned snapshot is already
 resolvable from the local cache, so that :func:`vemoizer.models.resolve_model_path`
-can silence the warm-cache download (no HF progress bars) while leaving
-the cold-cache download with its progress bar.
+can serve a warm cache straight from disk — :func:`local_snapshot_path`
+returns the snapshot directory and ``huggingface_hub`` is never called
+at all (issue #252, project invariant #1) — while the cold-cache download
+keeps its progress bar.
 
 The probe is a **conservative, filesystem-only completeness check** (no
 ``snapshot_download``, no network): it reports a snapshot as complete only
@@ -28,7 +30,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-__all__ = ["snapshot_locally_complete", "clear_memo"]
+__all__ = ["snapshot_locally_complete", "local_snapshot_path", "clear_memo"]
 
 #: Per-process memo of "pinned snapshot resolvable from local cache" probes,
 #: keyed by ``(repo_id, revision, resolved storage root)``. Only negative
@@ -95,6 +97,27 @@ def snapshot_locally_complete(
     if not complete:
         _COMPLETE_SNAPSHOTS[key] = False
     return complete
+
+
+def local_snapshot_path(
+    repo_id: str, revision: str, cache_dir: str | Path | None = None
+) -> Path | None:
+    """The local snapshot directory for a provably-complete pinned snapshot.
+
+    Issue #252 (project invariant #1: nothing leaves the machine once the
+    weights are cached): ``snapshot_download`` is not a pure local operation
+    even on a warm cache — huggingface_hub still makes HTTP requests while
+    building request headers (e.g. ``/api/agent-harnesses``). Callers that
+    only need the directory must use this instead of the hub call: it
+    returns the exact snapshot directory
+    (``_storage_folder(repo_id, cache_dir) / "snapshots" / revision``, the
+    same path :func:`_snapshot_is_complete` validates) when
+    :func:`snapshot_locally_complete` is True, and ``None`` otherwise — the
+    caller then runs the real download. Filesystem-only, like the probe.
+    """
+    if not snapshot_locally_complete(repo_id, revision, cache_dir):
+        return None
+    return _storage_folder(repo_id, cache_dir) / "snapshots" / revision
 
 
 def _storage_root(cache_dir: str | Path | None) -> Path:

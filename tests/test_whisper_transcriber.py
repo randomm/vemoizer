@@ -169,15 +169,15 @@ def test_load_failure_latches_and_raises(tmp_path: Path) -> None:
     assert dl.call_count == 1
 
 
-def test_warm_cache_load_silences_progress_bars(
+def test_warm_cache_load_skips_hub_call_entirely(
     tmp_path: Path,
     _hermetic_hf_cache: Path,
 ) -> None:
-    """A locally-complete snapshot is resolved silently (no HF bars) on the
-    meeting decode path — the load goes through the shared models seam
-    (issue #147), so a warm-cache `vemoizer meeting` run prints no
-    "Fetching" / "Download" / "Reconstruction" bars."""
-    from huggingface_hub import utils as hf_utils
+    """Issue #252 (invariant #1): a locally-complete snapshot is served
+    straight from disk on the meeting decode path — the load goes through
+    the shared models seam, so ``huggingface_hub`` is never called and a
+    warm-cache `vemoizer meeting` run makes no HTTP requests (the hub call
+    would still hit the network while building headers)."""
     from huggingface_hub.file_download import repo_folder_name
 
     from vemoizer import model_cache
@@ -193,23 +193,19 @@ def test_warm_cache_load_silences_progress_bars(
         weight.write_bytes(b"0" * 16)
 
     mock = _mock_whisper({})
-    seen: list[bool] = []
-
-    def fake_snapshot(repo_id, **kwargs):
-        seen.append(hf_utils.are_progress_bars_disabled())
-        return "/tmp/turbo"
 
     with (
         patch.dict("sys.modules", {"mlx_whisper": mock}),
-        patch("huggingface_hub.snapshot_download", side_effect=fake_snapshot),
+        patch("huggingface_hub.snapshot_download") as fake_snapshot,
     ):
         t = WhisperTranscriber()
         # Use 1 s of audio (non-empty) so the model actually loads.
         result = t.transcribe(np.zeros(16_000, dtype=np.float32))
-        assert not hf_utils.are_progress_bars_disabled()  # no leaked disable
     assert result["text"] == ""
-    # The probe no longer calls snapshot_download: exactly one silent call.
-    assert seen == [True]
+    # Warm cache: the hub call never runs, and the model path is the
+    # probe-validated snapshot dir itself.
+    fake_snapshot.assert_not_called()
+    assert t._model_path == str(snap)
 
 
 # -- slice_records_from_words --------------------------------------------

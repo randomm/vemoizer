@@ -208,40 +208,24 @@ def test_render_pull_report_stages_and_sizes() -> None:
 def test_pull_warm_cache_no_redownload(
     tmp_path: Path, _hermetic_hf_cache: Path
 ) -> None:
-    """A fully warm cache (laid out under the hermetic cache the probe
-    actually reads, i.e. ``huggingface_hub.constants.HF_HUB_CACHE``) takes
-    the SILENT warm path: exactly one ``snapshot_download`` call per model,
-    and every call runs with HF's progress-bar switch OFF. Before the fix
-    this test passed vacuously — the snapshots were laid out in the test's
-    own ``tmp_path`` while the probe read the hermetic empty cache, so the
-    cold path ran and still showed 5 calls. The ``seen == [True]*5``
-    assertion is the proof the warm path was taken."""
-    from huggingface_hub import utils as hf_utils
-
-    seen: list[bool] = []
-
-    def fake_download(repo_id, revision=None, **_kwargs):
-        seen.append(hf_utils.are_progress_bars_disabled())
-        return f"/fake/cache/{repo_id}"
-
+    """Issue #252 (invariant #1): a fully warm cache (laid out under the
+    hermetic cache the probe actually reads, i.e.
+    ``huggingface_hub.constants.HF_HUB_CACHE``) takes the NO-HUB-CALL path:
+    ``snapshot_download`` never runs, so ``models pull`` makes no HTTP
+    requests — before the fix each model still made one (silenced) hub
+    call, and huggingface_hub hits the network even for a fully cached
+    download while building request headers."""
     for spec in models_mod.MODELS:
         _make_cache_in(_hermetic_hf_cache, spec.repo_id, spec.revision)
     with (
-        _patch_download(side_effect=fake_download) as mock_dl,
+        _patch_download() as mock_dl,
         patch.object(models_mod, "cache_size", return_value=_empty_sizes()),
     ):
         result = runner.invoke(app, ["models", "pull"])
 
     assert result.exit_code == 0
-    # The conservative probe no longer calls snapshot_download: exactly one
-    # (silent) real call per model.
-    assert mock_dl.call_count == 5
-    # Proof the warm path was taken: every call ran bars-disabled.
-    assert seen == [True] * 5, (
-        "warm-cache pull must run every download with HF's progress bars "
-        f"disabled (the probe read the hermetic cache); saw disabled-states {seen}"
-    )
-    assert not hf_utils.are_progress_bars_disabled()  # no leaked disable
+    # Proof the warm path was taken: not a single hub call.
+    mock_dl.assert_not_called()
 
 
 def _make_cache_in(cache: Path, repo_id: str, revision: str) -> None:
@@ -330,10 +314,10 @@ def test_pull_partial_failure_continues_to_remaining_models(
     tmp_path: Path, _hermetic_hf_cache: Path
 ) -> None:
     """A per-model failure (404 on the first model) must not stop the pull:
-    all five models still get exactly one download call, exit 1, and the
-    models whose snapshot was laid out complete under the hermetic cache
-    were silenced (warm path) while the failing model was NOT — proof the
-    probe read the hermetic cache, not the test's own tmp_path."""
+    only the missing (cold) model makes a download call, exit 1, and the
+    four models whose snapshot was laid out complete under the hermetic
+    cache make no hub call at all (issue #252) — proof the probe read the
+    hermetic cache, not the test's own tmp_path."""
     from huggingface_hub import utils as hf_utils
 
     # Layout: the first model (parakeet) is NOT in the cache (it fails with
@@ -356,17 +340,15 @@ def test_pull_partial_failure_continues_to_remaining_models(
     ):
         result = runner.invoke(app, ["models", "pull"])
 
-    # The conservative probe no longer calls snapshot_download: exactly one
-    # real call per model, and the first model's failure did not stop the
-    # remaining four.
-    assert mock_dl.call_count == 5
+    # Only the missing (cold) model reaches the hub — one call; the first
+    # model's failure did not stop the remaining four (served from disk).
+    assert mock_dl.call_count == 1
     assert result.exit_code == 1
     assert "FAILED" in result.stdout
-    # Warm-path proof: the four laid-out models ran bars-disabled; the
-    # failing model (cold + error) did not.
+    # Warm-path proof: only the cold model was downloaded, with the bars
+    # ENABLED; the four laid-out models made no hub call at all.
+    assert set(seen) == {first_spec.repo_id}
     assert seen[first_spec.repo_id] is False
-    for spec in models_mod.MODELS[1:]:
-        assert seen[spec.repo_id] is True
     assert not hf_utils.are_progress_bars_disabled()  # no leaked disable
 
 
