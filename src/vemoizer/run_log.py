@@ -83,9 +83,11 @@ def _reset_notice() -> None:
 
 def reset_run_log() -> None:
     """Reset the run-log module state (test helper): the once-per-run notice
-    flag, the re-entrancy guard, and the sanitised-collision owner map."""
+    flag, the re-entrancy guard, the adopting span stack, and the
+    sanitised-collision owner map."""
     _reset_notice()
     _open_paths.clear()
+    _adopted.clear()
     _stem_owner.clear()
 
 
@@ -103,6 +105,28 @@ def reset_run_log() -> None:
 # filename stems with no ``/``, so the disambiguation is defensive.)
 
 _open_paths: set[str] = set()
+
+# --- one log per run (issue #254) ----------------------------------------
+# ``listen`` records a call and then transcribes its mix, which is one run of
+# work but two spans: the recording and the transcription's per-file span
+# (stem ``call``). Opening the log with ``adopt_nested=True`` makes that span
+# THE log of this process: while it is open every other ``file_log`` yields a
+# no-op, so recording and transcription alike land in the one file and no
+# second ``call.log`` appears. The stack is a list rather than a single slot
+# so a nested adopting span restores its parent instead of clearing the
+# adoption. Batch runs open no adopting span, so their per-file behaviour is
+# untouched.
+_adopted: list[str] = []
+
+
+@contextmanager
+def _own_log(key: str) -> Iterator[None]:
+    """Adopt every span opened while this one is active (issue #254)."""
+    _adopted.append(key)
+    try:
+        yield
+    finally:
+        _adopted.pop()
 
 
 # --- run context (design 5) ----------------------------------------------
@@ -333,6 +357,7 @@ def file_log(
     base_dir: Path | None = None,
     verbose: bool | None = None,
     quiet: bool | None = None,
+    adopt_nested: bool = False,
 ) -> Iterator[None]:
     """Write ``base_dir/.vemoizer/logs/<stem>.log`` for the duration.
 
@@ -341,7 +366,13 @@ def file_log(
     two different raw stems that sanitise to the same name are written to
     distinct files (``<sanitised>.log`` and ``<sanitised>.2.log``).
     *base_dir* defaults to the CWD. *verbose* / *quiet* default to the
-    run context set by :func:`configure` (design 5).
+    run context set by :func:`configure` (design 5). *adopt_nested* makes
+    this span the log of the whole process: any span opened inside it
+    yields a no-op and writes here instead of its own file (one ``listen``
+    call, one log, issue #254).
+
+    A span writes one INFO ``log started for <stem>`` line on open; a nested
+    same-stem span, or any span inside an adopting span, adds no second line.
 
     Fail-open: any error creating the directory/file degrades to no file
     logging with at most one short stderr notice per invocation (design 5).
@@ -363,6 +394,12 @@ def file_log(
         # (a nested open would truncate it mid-run). Yield a no-op.
         yield
         return
+    if _adopted:
+        # An adopting span (one listen call's log, issue #254) owns this
+        # process's log: this stage's records reach it via the root logger,
+        # so opening a second file would only split the run across two logs.
+        yield
+        return
     _open_paths.add(key)
     try:
         # Claim the slot under the guard: for a re-run the owner is already
@@ -381,7 +418,9 @@ def file_log(
             # span, naming the ORIGINAL stem (the sanitised path is only
             # for the file).
             logging.getLogger("vemoizer.run_log").info("log started for %s", stem)
-            yield
+            owner = _own_log(key) if adopt_nested else contextlib.nullcontext()
+            with owner:
+                yield
         finally:
             _detach(undo)
             handler.close()

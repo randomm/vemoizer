@@ -757,6 +757,13 @@ stays out of the way; the log file keeps the detail.
 - The post-call `meeting` pass draws no mlx-whisper progress bars: it has
   its own stage display, and the self-heal/span re-decodes that run outside
   the progress shim would put a bar beside every stage line.
+- One run log per call (issue #254): `.vemoizer/logs/<ts>.log`, named after
+  the call folder, opens before the models load and covers recording through
+  the end of the transcription; the per-file span the `meeting` pass opens
+  for `call.flac` writes into that same file instead of a separate
+  `call.log`. Because a root handler therefore exists while recording,
+  `logging.lastResort` cannot weld a raw `log.warning` onto the `● REC`
+  line; the console hears only the lines above.
 
 Missing the `listen` extra exits 2 with the install command.
 
@@ -1449,6 +1456,13 @@ The four seams (`with file_log(stem)` per output):
   single-file / `--no-group` short-circuit path (expert multi-file
   `--no-group`, and the expert single-file path when routed through
   `run_batch`); the log is named after the file's NFC stem.
+
+`listen` is the one run that is not per output (issue #254): it opens a
+single span named after the `calls/<ts>/` folder before recording, with
+`adopt_nested=True`, so every span opened inside it — the preset's per-file
+span for `call.flac` — is a no-op that writes into the call's log. A root
+handler is attached for the whole recording, so `logging.lastResort` cannot
+print a raw `log.warning` over the `● REC` status line.
 
 ## Invariants (authoritative: AGENTS.md "Project Invariants")
 

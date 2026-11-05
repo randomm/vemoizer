@@ -1,8 +1,9 @@
 """The ``listen --live`` draft around a recording (issue #180).
 
 ``listen`` owns the recording; this module owns the optional draft beside it
-and the session lifecycle around it: the models load before the recording
-clock starts, the draft is opened before recording and closed on every path.
+and the session lifecycle around it: the run log, the models that load before
+the recording clock starts, the draft that is opened before recording and
+closed on every path.
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import typer
+
+from vemoizer.run_log import file_log
 
 if TYPE_CHECKING:
     from vemoizer.listen import Hardware, ListenRun, Sleep
@@ -89,6 +92,12 @@ def run_session(
 ) -> int:
     """Capture, mix, decode; each stage's failure is an exit code.
 
+    One run log covers the whole call: the span named after the call folder
+    is opened before the models load and stays open through the transcription,
+    so a recording warning and a decode stage land in the same file (issue
+    #254). It adopts the nested per-file span the preset opens for the mix,
+    which therefore writes here instead of a separate ``call.log``.
+
     The live draft (``--live``) is opened before recording and closed on every
     path. It is removed only when the final pass succeeded and ``--keep-live``
     is off, so a failed or interrupted call keeps whatever the draft captured.
@@ -96,29 +105,30 @@ def run_session(
     they are ready. The draft labels the owner's speech with ``owner.label``;
     the final pass gets the ``RunOwner`` itself.
     """
-    loaded = load_live(run, live_models)
-    t0 = clock()
-    live = start_live(call_dir, owner.label, tracker, loaded, t0, clock)
-    code: int | None = None
-    try:
-        code = _record_mix_decode(
-            run,
-            call_dir,
-            owner,
-            tracker,
-            open_sources,
-            clock,
-            sleep,
-            output_name,
-            start_epoch,
-            speakers,
-            t0,
-            live,
-        )
-        return code
-    finally:
-        if live is not None:
-            live.close(remove_draft=code == 0 and not run.keep_live)
+    with file_log(call_dir.name, adopt_nested=True):
+        loaded = load_live(run, live_models)
+        t0 = clock()
+        live = start_live(call_dir, owner.label, tracker, loaded, t0, clock)
+        code: int | None = None
+        try:
+            code = _record_mix_decode(
+                run,
+                call_dir,
+                owner,
+                tracker,
+                open_sources,
+                clock,
+                sleep,
+                output_name,
+                start_epoch,
+                speakers,
+                t0,
+                live,
+            )
+            return code
+        finally:
+            if live is not None:
+                live.close(remove_draft=code == 0 and not run.keep_live)
 
 
 def _record_mix_decode(
