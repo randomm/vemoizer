@@ -1,20 +1,13 @@
-"""M5b: speaker clip selection and playback helpers (issue #90).
+"""M5b: speaker clip extraction and playback helpers (issue #90).
 
-Pure selectors over a rendered sidecar's ``paragraphs``/``segments``, plus
-the audio helpers that extract the selected windows from the SOURCE files
-recorded in the sidecar's ``source`` entries and play them with ``afplay``.
+The audio half of the speaker-clip feature: extract the windows chosen by
+:func:`vemoizer.speaker_clip_select.select_clips` (re-exported here, with
+:func:`talk_share`, as the module's public seam) from the SOURCE files
+recorded in the sidecar's ``source`` entries, and play them with ``afplay``.
 
 Design notes
 ------------
 
-* A *turn* is one labelled, non-suspect paragraph that is not a
-  backchannel and is at least 2 s long (see :func:`select_clips` rules).
-  Because a speaker's contiguous same-speaker paragraphs are the only
-  candidate turns, a turn's ``[start, end)`` never crosses a speaker
-  boundary by construction.
-* ``select_clips`` is pure and never touches audio; the window is the
-  middle ``min(max_s, turn_duration)`` seconds of the turn, clamped to the
-  audio duration (the end of the last paragraph).
 * ``extract_clips`` maps each group-level window onto the source part that
   contains it via the sidecar ``source`` entries' ``part_offset_s`` (and
   optional ``duration_s``), decodes only the needed span with ffmpeg
@@ -41,7 +34,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from .speaker_align import BACKCHANNEL_PHRASES, BACKCHANNELS
+from .speaker_clip_select import ClipWindow, select_clips, talk_share
 
 __all__ = [
     "ClipWindow",
@@ -52,12 +45,6 @@ __all__ = [
     "talk_share",
 ]
 
-#: A turn shorter than this is not a clip candidate.
-MIN_TURN_S = 2.0
-
-#: Quote text is bounded to roughly this many characters.
-MAX_QUOTE_CHARS = 120
-
 #: play() wall-clock bound for afplay, in seconds.
 PLAY_TIMEOUT_S = 30.0
 
@@ -67,212 +54,6 @@ FFMPEG_TIMEOUT_S = 60.0
 #: Output sample rate and channel count (the 16 kHz mono audio contract).
 _SAMPLE_RATE = "16000"
 _CHANNELS = "1"
-
-
-class ClipWindow(tuple):
-    """A selected clip: ``(start_s, end_s, quote)``.
-
-    Subclasses ``tuple`` so a window is a hashable, comparable 3-tuple the
-    callers can use as a dict key (``extract_clips`` returns
-    ``dict[ClipWindow, Path | None]``) while still exposing named fields.
-    """
-
-    __slots__ = ()
-
-    def __new__(cls, start_s: float, end_s: float, quote: str = "") -> ClipWindow:
-        return tuple.__new__(cls, (float(start_s), float(end_s), quote))
-
-    @property
-    def start_s(self) -> float:
-        return self[0]
-
-    @property
-    def end_s(self) -> float:
-        return self[1]
-
-    @property
-    def quote(self) -> str:
-        return self[2]
-
-
-def _labelled(p: dict[str, Any]) -> str | None:
-    """The speaker label of *p*, or ``None`` when unlabelled.
-
-    A paragraph is labelled iff ``speaker`` is a non-empty string; a
-    missing key, ``None``, or ``""`` all count as unlabelled.
-    """
-    label = p.get("speaker")
-    return label if isinstance(label, str) and label else None
-
-
-def talk_share(paragraphs: list[dict[str, Any]]) -> dict[str, float]:
-    """Per-speaker fraction of labelled talk time.
-
-    Fractions sum to 1 over labelled paragraphs (within float error);
-    unlabelled text is excluded. Empty or all-unlabelled input gives {}.
-    """
-    duration: dict[str, float] = {}
-    for p in paragraphs:
-        label = _labelled(p)
-        if label is None:
-            continue
-        span = float(p.get("end", 0.0)) - float(p.get("start", 0.0))
-        if span > 0:
-            duration[label] = duration.get(label, 0.0) + span
-    total = sum(duration.values())
-    if total <= 0:
-        return {}
-    return {label: span / total for label, span in duration.items()}
-
-
-def _is_backchannel(text: str) -> bool:
-    """True when the whitespace-collapsed, casefolded turn text is a
-    backchannel (membership in ``BACKCHANNELS ∪ BACKCHANNEL_PHRASES`` —
-    no word-count condition, so "joo" inside a longer sentence is fine).
-    """
-    collapsed = " ".join(text.split()).casefold()
-    return collapsed in BACKCHANNELS or collapsed in BACKCHANNEL_PHRASES
-
-
-def _quote(paragraphs: list[dict[str, Any]], start: float, end: float) -> str:
-    """Whitespace-collapsed text of the paragraphs overlapping [start, end),
-    bounded to about :data:`MAX_QUOTE_CHARS` characters.
-    """
-    parts = [
-        " ".join(str(p.get("text", "")).split())
-        for p in paragraphs
-        if float(p.get("start", 0.0)) < end and float(p.get("end", 0.0)) > start
-    ]
-    quote = " ".join(t for t in parts if t)
-    if len(quote) > MAX_QUOTE_CHARS:
-        quote = quote[:MAX_QUOTE_CHARS].rstrip() + "…"
-    return quote
-
-
-def _third_for(start: float, audio_end: float) -> int:
-    """Which third of the meeting [0, audio_end) *start* falls in (0..2)."""
-    if audio_end <= 0:
-        return 0
-    third = audio_end / 3.0
-    return min(int(start // third), 2)
-
-
-def _turn_windows(
-    paragraphs: list[dict[str, Any]],
-    audio_end: float,
-    max_s: float,
-    *,
-    clean_only: bool,
-) -> dict[str, list[tuple[float, float]]]:
-    """Candidate clip windows per label, from labelled turns of >= 2 s with text.
-
-    ``clean_only`` also drops suspect turns and backchannels. The window is
-    the middle ``min(max_s, D)`` seconds centered on the turn midpoint,
-    clamped to ``[0, audio_end]``.
-    """
-    windows: dict[str, list[tuple[float, float]]] = {}
-    for p in paragraphs:
-        label = _labelled(p)
-        if label is None:
-            continue
-        text = str(p.get("text", ""))
-        if not text or (clean_only and (p.get("suspect") or _is_backchannel(text))):
-            continue
-        start, end = float(p.get("start", 0.0)), float(p.get("end", 0.0))
-        duration = end - start
-        if duration < MIN_TURN_S:
-            continue
-        length = min(max_s, duration)
-        mid = (start + end) / 2.0
-        w_start = mid - length / 2.0
-        w_end = w_start + length
-        if audio_end > 0:
-            w_end = min(w_end, audio_end)
-            w_start = max(0.0, max(w_start, w_end - length))
-        windows.setdefault(label, []).append((w_start, w_end))
-    return windows
-
-
-def select_clips(
-    paragraphs: list[dict[str, Any]],
-    segments: list[dict[str, Any]] | None = None,
-    *,
-    per_speaker: int = 3,
-    min_s: float = 3.0,
-    max_s: float = 5.0,
-    total_duration: float | None = None,
-) -> dict[str, list[ClipWindow]]:
-    """Pick up to *per_speaker* short windows per speaker label.
-
-    Rules (see module docstring): candidates are labelled turns of one
-    speaker lasting >= 2 s with text, preferring the non-suspect,
-    non-backchannel ones (a label with only such turns still gets clips, so
-    every label with speech gets a quote and a clip); the window is the
-    middle ``min(max_s, D)`` seconds of the turn (so a turn of 3-5 s yields
-    a window the full length of the turn, longer turns 5 s) centered on the
-    turn midpoint and clamped to the audio duration. Picks for one speaker
-    spread across the beginning, middle and end of the meeting: the longest
-    candidate from each third where possible, otherwise the longest
-    remaining candidate regardless of third.
-
-    ``min_s`` is a display annotation only (the nominal lower bound for a
-    clip's length); it never disqualifies a candidate — the disqualification
-    threshold is the 2 s :data:`MIN_TURN_S` gate, and the window length is
-    ``min(max_s, turn_duration)``.
-
-    ``segments`` is accepted for interface symmetry with the sidecar (the
-    selector's rules operate on paragraph fields) and is not read.
-    *total_duration* clamps windows to the audio end; it defaults to the
-    end of the last paragraph. Returns an ordered dict of label -> windows
-    sorted by ``start_s``; a speaker with fewer clean turns gets fewer
-    clips, without error.
-    """
-    audio_end = total_duration
-    if audio_end is None:
-        audio_end = max(
-            (float(p.get("end", 0.0)) for p in paragraphs if "end" in p),
-            default=0.0,
-        )
-    # A label with a clean turn uses only clean turns; a label whose turns
-    # are all suspect or backchannels still gets its longest turn (issue #202).
-    clean = _turn_windows(paragraphs, audio_end, max_s, clean_only=True)
-    any_turn = _turn_windows(paragraphs, audio_end, max_s, clean_only=False)
-    candidates = {label: clean.get(label) or turns for label, turns in any_turn.items()}
-
-    result: dict[str, list[ClipWindow]] = {}
-    for label, turns in candidates.items():
-        if not turns:
-            continue
-        picked: list[tuple[float, float]] = []
-        # Spread rule: fill beginning -> middle -> end thirds with the
-        # longest candidate in each, then top up from the longest
-        # remaining regardless of third.
-        for third in (0, 1, 2):
-            best = max(
-                (
-                    t
-                    for t in turns
-                    if t not in picked and _third_for(t[0], audio_end) == third
-                ),
-                key=lambda t: t[1] - t[0],
-                default=None,
-            )
-            if best is not None:
-                picked.append(best)
-        for t in sorted(
-            (t for t in turns if t not in picked),
-            key=lambda t: t[1] - t[0],
-            reverse=True,
-        ):
-            if len(picked) >= per_speaker:
-                break
-            picked.append(t)
-        picked.sort(key=lambda t: t[0])
-        result[label] = [
-            ClipWindow(w_start, w_end, _quote(paragraphs, w_start, w_end))
-            for w_start, w_end in picked[:per_speaker]
-        ]
-    return result
 
 
 def _map_window(

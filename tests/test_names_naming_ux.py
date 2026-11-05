@@ -364,3 +364,129 @@ class TestPeopleList:
             f"Add Iris to people in {cfg}? [y/N] ",
         ]
         assert read_people_list(cfg) == ["Eero"]
+
+
+# --- 5. quote/clip pairing (issue #253) ---
+
+
+def _three_turn_sidecar(tmp_path: Path) -> Path:
+    """One label with one clean >= 2 s segment (and paragraph) per third."""
+    _make_wav(tmp_path / "calls" / "t" / "call.flac")
+    turns = [
+        (1.0, 8.0, "first utterance words"),
+        (32.0, 39.0, "second utterance words"),
+        (64.0, 71.0, "third utterance words"),
+    ]
+    items = [
+        {"start": s, "end": e, "text": t, "speaker": "Others"} for s, e, t in turns
+    ]
+    data = {
+        "text": " ".join(t for _, _, t in turns),
+        "paragraphs": items,
+        "segments": items,
+        "source": [{"path": "calls/t/call.flac", "part_offset_s": 0.0}],
+        "options": {
+            "command": "meeting",
+            "glossary_files": [],
+            "glossary_sha256": None,
+        },
+        "speaker_names": {},
+    }
+    path = tmp_path / "2026-11-04 Pairing.json"
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def pairing(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Ordered log of quote lines and play calls; scriptable extract failures.
+
+    ``ctrl["fail"]`` holds window indices whose extraction "fails" (the
+    window maps to ``None``), the way a missing source part does.
+    """
+    events: list[tuple[str, str]] = []
+    ctrl: dict[str, Any] = {"events": events, "fail": set()}
+
+    def fake_extract(source, windows, tmp_dir):
+        out = {}
+        for i, window in enumerate(windows):
+            if i in ctrl["fail"]:
+                out[window] = None
+                continue
+            wav = Path(tmp_dir) / f"pair_{i}.wav"
+            wav.write_bytes(b"RIFF")
+            out[window] = wav
+        return out
+
+    def fake_play(p: Path) -> bool:
+        events.append(("play", Path(p).name))
+        return True
+
+    real_echo = names_cli.typer.echo
+
+    def echo(msg: object = "", **kw: Any) -> Any:
+        text = str(msg)
+        if text.startswith('  "'):
+            events.append(("quote", text))
+        return real_echo(msg, **kw)
+
+    monkeypatch.setattr(names_cli, "extract_clips", fake_extract)
+    monkeypatch.setattr(names_cli, "play", fake_play)
+    monkeypatch.setattr(names_cli.typer, "echo", echo)
+    return ctrl
+
+
+class TestQuoteClipPairing:
+    def test_each_quote_printed_immediately_before_its_own_clip_plays(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        pairing: dict[str, Any],
+    ) -> None:
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        sc = _three_turn_sidecar(tmp_path)
+        assert _run(sc, _Recorder(["Aino", "n"])) == 0
+        ev = pairing["events"]
+        assert [k for k, _ in ev] == ["quote", "play"] * 3
+        assert [t for k, t in ev if k == "quote"] == [
+            '  "first utterance words"',
+            '  "second utterance words"',
+            '  "third utterance words"',
+        ]
+        # The clip played after each quote is that quote's own clip.
+        assert [t for k, t in ev if k == "play"] == [
+            "pair_0.wav",
+            "pair_1.wav",
+            "pair_2.wav",
+        ]
+
+    def test_pairing_holds_when_one_extraction_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        pairing: dict[str, Any],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        pairing["fail"].add(1)  # second window maps to None, like a straddle
+        sc = _three_turn_sidecar(tmp_path)
+        assert _run(sc, _Recorder(["Aino", "n"])) == 0
+        ev = pairing["events"]
+        # The failed clip keeps its quote line and skips playback; the
+        # remaining quotes/clips stay paired.
+        assert [k for k, _ in ev] == ["quote", "play", "quote", "quote", "play"]
+        assert ev[2] == ("quote", '  "second utterance words"')
+        assert ev[3] == ("quote", '  "third utterance words"')
+        assert ev[4] == ("play", "pair_2.wav")
+        assert "quotes only" in capsys.readouterr().err
+
+    def test_no_play_prints_quotes_without_any_playback(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        pairing: dict[str, Any],
+    ) -> None:
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        sc = _three_turn_sidecar(tmp_path)
+        assert _run(sc, _Recorder(["Aino", "n"]), no_play=True) == 0
+        assert [k for k, _ in pairing["events"]] == ["quote"] * 3

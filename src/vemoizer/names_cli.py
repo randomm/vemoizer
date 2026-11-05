@@ -300,13 +300,16 @@ def run_names(
                 label_clips: list[ClipWindow] = clips.get(label, [])
 
                 typer.echo(f"\n{label}  ({share:.0%} of talk)")
-                for w in label_clips[:3]:
-                    typer.echo(f'  "{w.quote}"')
-
-                # Play clips (skipped under --no-play; quotes only then)
+                # Cut the clips first, then print each quote immediately
+                # before playing its own clip, so the printed words always
+                # pair with the heard words (issue #253). A window whose
+                # extraction failed keeps its quote line and skips playback.
+                clip_map: dict[ClipWindow, Path | None] = {}
                 if resolved_source and not no_play and label_clips:
                     clip_map = extract_clips(resolved_source, label_clips[:3], tmp_dir)
-                    for w in label_clips[:3]:
+                for w in label_clips[:3]:
+                    typer.echo(f'  "{w.quote}"')
+                    if clip_map:
                         path = clip_map.get(w)
                         if path is not None and path.is_file():
                             play(path)
