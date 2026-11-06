@@ -316,10 +316,10 @@ def prompt_term_list(files: list[str] | list[Path]) -> list[str]:
     Reads each glossary file in list order (project layer first) and keeps
     the non-correction (no ``=>``), non-``@`` lines — the prompt terms —
     deduped case-insensitively with the first-seen spelling winning
-    (project over home, mirroring ``glossary_layers.merge``). This is the
-    single derivation that :func:`prompt_term_set_hash` hashes and that
-    the run seam (``load_layers`` + ``merge``) produces, so the two
-    cannot drift silently.
+    (project over home, mirroring ``glossary_layers.merge``'s spelling rule).
+    This is the single derivation that :func:`prompt_term_set_hash` hashes,
+    and it covers the same prompt-term *set* the run seam (``load_layers`` +
+    ``merge``) feeds the whisper prompt, so the two cannot drift silently.
 
     Non-regular paths (directories, special files) and missing/unreadable
     files are skipped silently (fail-open, like a missing glossary).

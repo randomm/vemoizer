@@ -271,6 +271,29 @@ def test_no_file_reads_merged_layers(tmp_path, monkeypatch) -> None:
     assert report.corrections == {"pf": "pr", "hf": "hr"}
 
 
+def test_no_file_shared_term_prints_once_with_project_spelling(
+    tmp_path, monkeypatch
+) -> None:
+    # Issue #262: the merged term list (not the raw layer lists) is what
+    # prints, so a term in both layers appears ONCE with the project
+    # spelling, after the home-only terms (home first, project last).
+    project = tmp_path / "project" / ".vemoizer" / "glossary.txt"
+    project.parent.mkdir(parents=True)
+    project.write_text("Vemoizer\n", encoding="utf-8")
+    home = tmp_path / "home" / ".vemoizer" / "glossary.txt"
+    home.parent.mkdir(parents=True)
+    home.write_text("Alpha\nvemoizer\n", encoding="utf-8")
+
+    from vemoizer import glossary_layers as gl
+
+    monkeypatch.setattr(gl, "_nearest_project_glossary", lambda: project)
+    monkeypatch.setattr(gl, "_home_glossary_path", lambda: home)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    report = gc.check_file(None)
+    assert report.terms == ["Alpha", "Vemoizer"]
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------

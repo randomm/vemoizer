@@ -26,7 +26,9 @@ The composition the presets pin down (all on existing seams —
   nothing to the prompt).
 
 Precedence (issue #82): built-in defaults < layers < CLI overrides.
-The layers themselves merge with project layer first: on conflict the
+The layers themselves merge via ``glossary_layers.merge``: home terms
+first, project terms LAST (``glossary_prompt`` treats the last-listed
+term as highest priority, issue #262); on a correction conflict the
 project value wins.
 """
 
@@ -34,6 +36,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+from vemoizer import glossary_layers
 from vemoizer.diarization import SpeakerCount
 from vemoizer.tracks import TrackPaths
 
@@ -182,28 +185,30 @@ def _split_terms(terms: list[str]) -> tuple[list[str], list[str]]:
 
 
 def _merge_layers(layers: dict[str, dict] | None) -> tuple[list[str], dict[str, str]]:
-    """Merge the given layer dicts, project layer winning.
+    """Merge the given layer dicts via ``glossary_layers.merge``, project winning.
 
-    Returns ``(terms, corrections)``: terms are the project layer's terms
-    first (project priority for the whisper prompt budget), then the
-    remaining home terms; corrections are the home layer's pairs, with
-    the project layer's right side winning on the same wrong side. The
-    dedupe of terms (case-insensitive, project spelling kept) and the
-    token budget with drop-notices are ``glossary_layers.merge``'s job
-    (sibling workstream) — it returns exactly this shape; this helper is
-    the fallback for callers that skip the layered merge (e.g. unit
-    tests passing a single layer dict).
+    Returns ``(terms, corrections)``: terms are the merged prompt terms —
+    home terms first, project terms LAST (``glossary_prompt`` treats the
+    last-listed term as highest priority, so project terms win the budget,
+    issue #262), case-insensitively deduped keeping the project spelling;
+    corrections are the union of both layers' pairs, with the project
+    layer's right side winning on the same wrong side. The dedupe and the
+    token budget are ``glossary_layers.merge``'s job; it is called without
+    a tokenizer (fail-open), so the budget itself is applied downstream by
+    ``glossary.glossary_prompt``. This helper is the fallback for callers
+    that skip the layered merge (e.g. unit tests passing a single layer
+    dict).
     """
     layers = layers or {}
-    home_terms = list(layers.get("home", {}).get("terms", []))
-    project_terms = list(layers.get("project", {}).get("terms", []))
-    seen = {t.lower() for t in project_terms}
-    # Project terms first (highest priority), then home terms the project
-    # did not already cover (case-insensitive, project spelling wins).
-    terms = project_terms + [t for t in home_terms if t.lower() not in seen]
-
-    corrections = dict(layers.get("home", {}).get("corrections", {}))
-    corrections.update(layers.get("project", {}).get("corrections", {}))
+    home = layers.get("home", {})
+    project = layers.get("project", {})
+    terms, corrections, _notices = glossary_layers.merge(
+        list(project.get("terms", [])),
+        dict(project.get("corrections", {})),
+        list(home.get("terms", [])),
+        dict(home.get("corrections", {})),
+        tokenizer=None,
+    )
     return terms, corrections
 
 

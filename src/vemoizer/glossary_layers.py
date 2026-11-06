@@ -7,10 +7,12 @@ returning ``(terms, corrections, notices)``.
 
 Merge rules
 -----------
-- Prompt terms: project first, case-insensitive dedupe keeping project
-  spelling; the M0 token budget is applied after the merge and the
-  lowest-priority (earliest-listed) terms are dropped first, each named
-  in ``notices``.
+- Prompt terms: home first, project LAST, case-insensitive dedupe keeping
+  project spelling; the M0 token budget is applied after the merge and the
+  lowest-priority (earliest-listed, i.e. home) terms are dropped first,
+  each named in ``notices``.  ``glossary_prompt`` treats the LAST-listed
+  term as highest priority, so project terms — listed last — are the ones
+  that survive an overflow (issue #262).
 - Correction pairs: union of both layers; for the same ``wrong``-side key
   the project's ``right`` side wins.  Correction lines never contribute
   prompt terms.
@@ -205,7 +207,9 @@ def merge(
     (merged_terms, merged_corrections, notices)
 
     * ``merged_terms`` — case-insensitive dedupe keeping the project
-      spelling; project terms first; token budget applied after merge
+      spelling; home terms first, project terms LAST (``glossary_prompt``
+      treats the last-listed term as highest priority, so project terms
+      win the budget); token budget applied after merge
       (only when a tokenizer is passed; otherwise budgeting is deferred
       to ``glossary_prompt``); ``@``-prefixed LLM-only terms are
       preserved.
@@ -215,14 +219,25 @@ def merge(
       the dropped terms in lowest-priority order.  Empty when nothing is
       dropped.  ``merge`` itself never prints; ``batch.py`` prints them.
     """
-    # --- case-insensitive dedupe, project first, keep project spelling ---
+    # --- case-insensitive dedupe, home first / project last, project spelling ---
+    # Order IS priority: glossary_prompt (and _budget_terms) treat the
+    # last-listed term as highest priority and drop the earliest-listed
+    # first, so project terms go last to win the budget (issue #262).
+    project_keys = {term.lower() for term in project_terms}
     seen: set[str] = set()
     deduped: list[str] = []
-    for term in project_terms + home_terms:
+    for term in home_terms:
         key = term.lower()
-        if key not in seen:
-            seen.add(key)
-            deduped.append(term)
+        if key in project_keys or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(term)
+    for term in project_terms:
+        key = term.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(term)
 
     # --- token budget applied after merge ---
     kept, dropped = _budget_terms(deduped, tokenizer, budget)
