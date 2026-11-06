@@ -375,11 +375,17 @@ def test_render_parent_component_is_regular_file_exits_1(
 
 
 def test_prompt_term_hash_equals_run_seam_derivation(tmp_path: Path) -> None:
-    """The term list ``prompt_term_set_hash`` hashes equals the term list
+    """The term list ``prompt_term_set_hash`` hashes covers the same term list
     derived through the run's real seam (``load_layers`` + ``merge`` with a
     ``None`` tokenizer, ``@`` terms filtered) across layered fixtures —
     project + home layers, case-differing duplicates, ``@`` names,
-    ``=>`` pairs, comments. If the two derivations drift, this fails."""
+    ``=>`` pairs, comments. If the two derivations drift, this fails.
+
+    The comparison is order-insensitive on purpose: ``merge`` lists home
+    first and project last (``glossary_prompt`` priority, issue #262), while
+    ``prompt_term_list`` keeps file order (project file first) so the
+    sidecar hash stays stable for glossaries already written.
+    """
     import hashlib
 
     from vemoizer.glossary_layers import load_layers, merge
@@ -407,7 +413,7 @@ def test_prompt_term_hash_equals_run_seam_derivation(tmp_path: Path) -> None:
     merged, _, _ = merge(proj_terms, proj_corr, home_terms, home_corr)
     run_terms = [t for t in merged if not t.startswith("@")]
 
-    assert hashed == run_terms
+    assert sorted(hashed) == sorted(run_terms)
     assert hashlib.sha256("\n".join(hashed).encode("utf-8")).hexdigest() == (
         prompt_term_set_hash(files)
     )

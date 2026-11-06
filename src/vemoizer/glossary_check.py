@@ -208,19 +208,22 @@ def _dropped_terms(
 
 
 def _layer_lines() -> list[str]:
-    """Raw lines of the merged ``.vemoizer`` layers (project first).
+    """Lines of the merged ``.vemoizer`` layers (merged terms + corrections).
 
     Reads the two layers via ``glossary_layers.load_layers`` (the same seam
-    the presets use) so the audit sees exactly what the pipeline's whisper
-    prompt would; the ``merge`` semantics (case-insensitive dedupe, project
-    wins for a conflicting wrong side) apply here too.  The raw-line list
-    keeps the correction pairs in file order so conflict/chained detection
-    still works.  A missing layer contributes nothing (fail-open).
+    the presets use) and lists the terms ``glossary_layers.merge`` returns
+    — home first, project last, case-insensitively deduped with the project
+    spelling kept — so a term in both layers prints ONCE, with the spelling
+    a real run uses, and the printed prompt and drop list match that run
+    (``glossary_prompt`` treats the LAST-listed term as highest priority,
+    issue #262).  Correction lines are the merged pairs (project right side
+    wins on the same wrong side), as before.  A missing layer contributes
+    nothing (fail-open).
     """
     from . import glossary_layers as gl
 
     home_terms, home_corr, project_terms, project_corr = gl.load_layers()
-    _, merged_corr, _ = gl.merge(
+    merged_terms, merged_corr, _ = gl.merge(
         project_terms,
         project_corr,
         home_terms,
@@ -228,8 +231,7 @@ def _layer_lines() -> list[str]:
         tokenizer=None,  # budgeting is applied by glossary_prompt, not here
     )
     lines: list[str] = []
-    lines.extend(project_terms)
-    lines.extend(home_terms)
+    lines.extend(merged_terms)
     lines.extend(f"{w} => {r}" for w, r in merged_corr.items())
     return lines
 
@@ -241,8 +243,9 @@ def check_file(path: Path | str | None = None) -> CheckReport:
     EXISTING but non-UTF-8 file is an error (``UnicodeDecodeError``
     name printed to stderr, exit 1) — the check tool audits the file the
     user named, so silently auditing nothing would be a lie.  The
-    merged-layer path uses the two ``.vemoizer`` glossary files (project
-    first); an explicit path replaces both layers.
+    merged-layer path uses the two ``.vemoizer`` glossary files (home terms
+    first, project terms last — project wins the prompt budget); an explicit
+    path replaces both layers.
     """
     lines = _read_raw_lines(path) if path is not None else _layer_lines()
 

@@ -458,10 +458,13 @@ them (present-only, so old JSON without the keys and the expert
 **`glossary_sha256` — prompt-term-set hash (issue #107)**: the
 hash covers only the glossary *prompt terms* — the non-correction
 (`=>`-free), non-`@`-prefixed lines — after layer merge, deduped
-case-insensitively with first-seen spelling winning (project over home),
-newline-joined, then sha256. This is the canonical deduplicated
-prompt-term set, the input to `glossary_prompt` before its token-budget
-truncation; correction pairs and `@`-names are render-safe and
+case-insensitively with the project spelling winning (project over home),
+newline-joined, then sha256. The hash covers the prompt-term SET:
+the order of the hashed list is file order (project layer file first,
+via `prompt_term_list`), kept stable so existing sidecar hashes do not
+change, while `glossary_prompt` itself receives the merged home-first /
+project-last order from `glossary_layers.merge` (issue #262); correction
+pairs and `@`-names are render-safe and
 ever excluded. `render` recomputes the same hash over the current
 glossary files via the shared `prompt_term_set_hash`, so a mismatch
 means the prompt-term set genuinely changed.
@@ -1407,10 +1410,12 @@ glossary for the `meeting` and `memo` presets:
   tokenizer=None, budget=GLOSSARY_PROMPT_TOKEN_BUDGET)` — pure
   (no I/O, no printing). Returns `(merged_terms, merged_corrections,
   notices)`:  
-  - Prompt terms: project first, case-insensitive dedupe keeping the
-    project spelling. The M0 token budget is applied when the prompt is
+  - Prompt terms: home first, project last (``glossary_prompt`` treats the
+    last-listed term as highest priority, so project terms win the budget),
+    case-insensitive dedupe keeping the project spelling. The M0 token
+    budget is applied when the prompt is
     built (by `glossary_prompt`, after the merge) and the
-    lowest-priority (earliest-listed) terms are dropped first; each
+    lowest-priority (earliest-listed, i.e. home) terms are dropped first; each
     dropped term is named in `notices`. `@`-prefixed LLM-only terms
     are excluded from the budget entirely (they never enter the whisper
     prompt).

@@ -223,8 +223,8 @@ def test_batch_preset_and_accept_share_the_glossary_composition(
     options = batch_preset.resolve_preset_glossary_options("meeting", {})
     lines = batch_preset.meeting_glossary_lines(options)
     assert lines == [
-        GLOSSARY_TERM,
         "vanha",
+        GLOSSARY_TERM,
         f"@{GLOSSARY_TERM}-llm",
         "konto => kontexti",
     ]

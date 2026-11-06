@@ -81,7 +81,7 @@ class TestMeetingPreset:
         assert opts.whisper_prompt == ["Flagship"]
         assert opts.llm_terms == ["Nordea"]
 
-    def test_meeting_layers_merge_project_first(
+    def test_meeting_layers_merge_home_first_project_last(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         layers = {
@@ -92,10 +92,11 @@ class TestMeetingPreset:
             "project": {"terms": ["Flagship", "Vemoizer"]},
         }
         opts = _opts("meeting", layers, None, capsys)
-        # Project terms first (whisper priority: last-listed wins), then
-        # the home terms the project did not cover (case-insensitive:
-        # home's "flagship" is dropped, "Nordea"/"RFID" survive).
-        assert opts.whisper_prompt == ["Flagship", "Vemoizer", "Nordea", "RFID"]
+        # Home terms first, project terms LAST (whisper priority:
+        # last-listed wins, issue #262), case-insensitive dedupe keeping
+        # the project spelling (home's "flagship" is dropped in favour
+        # of "Flagship", "Nordea"/"RFID" survive).
+        assert opts.whisper_prompt == ["Nordea", "RFID", "Flagship", "Vemoizer"]
         # Correction union: project right side wins on the same wrong side.
         assert opts.corrections == {"Blacksit": "Flagship"}
 

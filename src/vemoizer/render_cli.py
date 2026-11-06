@@ -10,8 +10,10 @@ Glossary resolution mirrors ``run_preset``: the layered glossary
 replaces both layers entirely. The stored ``options.glossary_sha256``
 is the sha256 over the run's **prompt-term set** — the non-correction,
 non-``@`` lines after layer merge, deduped case-insensitively (first-seen
-spelling wins), i.e. the canonical deduplicated prompt-term set that is
-the input to ``glossary_prompt`` before its token-budget truncation —
+spelling wins); the hash covers that term SET — the hashed list keeps
+file order (project layer file first), unchanged so existing sidecar
+hashes do not shift, while the run seam feeds ``glossary_prompt`` the
+merged home-first / project-last order (issue #262) —
 and render recomputes the same hash (via the shared
 :func:`vemoizer.sidecar.prompt_term_set_hash`) over the current
 glossary files. Only a change to that set prints a drift warning;

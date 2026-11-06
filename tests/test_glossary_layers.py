@@ -2,7 +2,8 @@
 
 Covers:
 - load_layers reading both ~/.vemozer/glossary.txt and ./.vemozer/glossary.txt
-- merge() case-insensitive dedupe keeping project spelling
+- merge() case-insensitive dedupe keeping project spelling (home terms
+  listed first, project terms last = highest prompt priority, issue #262)
 - correction union with project right-side winning on same wrong-side key
 - token-budget drop order and notices
 - @-line exclusion from prompt terms (LLM-only terms preserved, budget-skipped)
@@ -123,20 +124,63 @@ class TestMerge:
             home_terms=["Nordea", "Flagship-hanke", "Riihimäki"],
             home_corrections={},
         )
-        # "Nordea" deduped, project spelling kept.
+        # "Nordea" deduped, project spelling kept, listed at the project
+        # position (home first, project last = highest prompt priority).
         # "flagship-hanke" vs "Flagship-hanke" → project spelling kept.
-        assert terms == ["Nordea", "flagship-hanke", "Riihimäki"]
+        assert terms == ["Riihimäki", "Nordea", "flagship-hanke"]
         assert corr == {}
         assert notices == []
 
-    def test_project_terms_first_in_order(self) -> None:
+    def test_project_terms_last_in_order(self) -> None:
+        """Home terms are listed first, project terms LAST (issue #262).
+
+        ``glossary_prompt``/``_budget_terms`` treat the LAST-listed term as
+        highest priority and drop the earliest-listed first, so project
+        terms must be listed last for "project wins" to hold on overflow.
+        """
         terms, _, _ = merge(
             project_terms=["Alpha", "Beta"],
             project_corrections={},
             home_terms=["Gamma", "Delta"],
             home_corrections={},
         )
-        assert terms == ["Alpha", "Beta", "Gamma", "Delta"]
+        assert terms == ["Gamma", "Delta", "Alpha", "Beta"]
+
+    def test_project_spelling_kept_at_the_project_position(self) -> None:
+        """A term in both layers keeps the project spelling, at the tail."""
+        terms, _, _ = merge(
+            project_terms=["projectmode"],
+            project_corrections={},
+            home_terms=["ProjectMode", "HomeOnly"],
+            home_corrections={},
+        )
+        assert terms == ["HomeOnly", "projectmode"]
+
+    def test_home_glossary_overflow_never_pushes_out_a_project_term(self) -> None:
+        """A long home layer loses the budget fight, never the project one.
+
+        FakeTokenizer: single-word term = 1 token, ", " separator = 1 token,
+        trailing period = 1 token.  Budget 6 → 5 usable → the two project
+        terms plus the last (highest-priority) home term fit; the four
+        earlier home terms are dropped and named in the notices.
+        """
+        home = ["Home0", "Home1", "Home2", "Home3", "Home4"]
+        project = ["ProjA", "ProjB"]
+        terms, _, notices = merge(
+            project_terms=project,
+            project_corrections={},
+            home_terms=home,
+            home_corrections={},
+            tokenizer=FakeTokenizer(),
+            budget=6,
+        )
+        assert all(t in terms for t in project)
+        assert "Home4" in terms  # the home term nearest the tail survives
+        for dropped in ["Home0", "Home1", "Home2", "Home3"]:
+            assert dropped not in terms
+            assert any(dropped in n for n in notices)
+        # No project term is ever named by a drop notice.
+        assert not any(any(p in n for p in project) for n in notices)
 
     def test_correction_union_project_right_wins(self) -> None:
         _, corr, _ = merge(
@@ -170,8 +214,9 @@ class TestMerge:
             home_terms=["@jukka", "Riihimäki"],
             home_corrections={},
         )
-        # "@Jukka" and "@jukka" dedupe case-insensitively; project spelling kept.
-        assert terms == ["@Jukka", "Nordea", "Riihimäki"]
+        # "@Jukka" and "@jukka" dedupe case-insensitively; project spelling
+        # kept, listed in the project block (home terms first).
+        assert terms == ["Riihimäki", "@Jukka", "Nordea"]
 
     def test_budget_drops_lowest_priority_first(self) -> None:
         """Lowest-priority (earliest-listed) terms are dropped first; notices
