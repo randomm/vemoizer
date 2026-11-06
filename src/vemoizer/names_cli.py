@@ -1,7 +1,7 @@
 """``vemoizer names X.json`` Typer command (issue #93, M5c-1).
 
 Interactive speaker-naming: for each labelled speaker (ordered by talk
-share) show talk share and up to 3 quotes, optionally play voice clips,
+share) show talk share and up to 2 quotes, optionally play voice clips,
 prompt for a name, then persist into the sidecar ``speaker_names`` and
 re-render the Markdown.
 
@@ -306,8 +306,8 @@ def run_names(
                 # extraction failed keeps its quote line and skips playback.
                 clip_map: dict[ClipWindow, Path | None] = {}
                 if resolved_source and not no_play and label_clips:
-                    clip_map = extract_clips(resolved_source, label_clips[:3], tmp_dir)
-                for w in label_clips[:3]:
+                    clip_map = extract_clips(resolved_source, label_clips, tmp_dir)
+                for w in label_clips:
                     typer.echo(f'  "{w.quote}"')
                     if clip_map:
                         path = clip_map.get(w)

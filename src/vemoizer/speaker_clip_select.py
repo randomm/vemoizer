@@ -265,7 +265,7 @@ def select_clips(
     paragraphs: list[dict[str, Any]],
     segments: list[dict[str, Any]] | None = None,
     *,
-    per_speaker: int = 3,
+    per_speaker: int = 2,
     min_s: float = 3.0,
     max_s: float = 5.0,
     total_duration: float | None = None,
@@ -288,10 +288,12 @@ def select_clips(
     yields no clip. Paragraph candidates prefer non-suspect, non-backchannel
     turns; a label with only such turns still gets clips, so every label
     with speech gets a quote and a clip (issue #202). Picks spread across
-    the beginning, middle and end of the meeting: the LONGEST candidate from
-    each third where possible (ranked by its turn duration, ties going to
-    the earlier start), otherwise the longest remaining candidate regardless
-    of third. No two chosen windows of one label overlap (issue #253).
+    the meeting: the LONGEST candidate from each third where possible,
+    filling the thirds in the order beginning → end → middle and stopping
+    once *per_speaker* picks are made (ranked by its turn duration, ties
+    going to the earlier start), otherwise the longest remaining candidate
+    regardless of third. No two chosen windows of one label overlap
+    (issue #253).
 
     ``min_s`` is a display annotation only (the nominal lower bound for a
     clip's length); it never disqualifies a candidate — the disqualification
@@ -339,13 +341,16 @@ def select_clips(
         if not seg_turns and not para_turns:
             continue
         picked: list[_Candidate] = []
-        # Spread rule: fill beginning -> middle -> end thirds with the
+        # Spread rule: fill beginning -> end -> middle thirds with the
         # longest clean segment in each, falling back to the label's own
         # paragraph candidates when a third has none (a third with no
-        # acceptable window stays empty), then top up from the longest
-        # remaining regardless of third. _fits() keeps any window that
-        # overlaps an already-picked one out, equal start or not.
-        for third in (0, 1, 2):
+        # acceptable window stays empty), stopping at per_speaker, then top
+        # up from the longest remaining regardless of third. _fits() keeps
+        # any window that overlaps an already-picked one out, equal start
+        # or not.
+        for third in (0, 2, 1):
+            if len(picked) >= per_speaker:
+                break
             for pool in (seg_turns, para_turns):
                 best = _longest_in_third(pool, picked, third, audio_end)
                 if best is not None:
