@@ -101,6 +101,19 @@ def register_listen(app: typer.Typer) -> None:
             config_path=str(config) if config is not None else None,
         )
 
+        # Issue #268: one nudge before recording so the empty-glossary case
+        # is not a mystery after the call (the post-run term check saves here).
+        from vemoizer import glossary_layers
+
+        home_terms, _home_corr, project_terms, _proj_corr = (
+            glossary_layers.load_layers()
+        )
+        if not home_terms and not project_terms:
+            typer.echo(
+                "no glossary for this folder yet — terms you confirm after "
+                "the call are saved to ./.vemoizer/glossary.txt"
+            )
+
         from vemoizer.listen import ListenRun, run_listen
 
         tracker = begin_interrupt_tracking()

@@ -46,6 +46,7 @@ from vemoizer.names_cli import register_names
 from vemoizer.output.formatters import OUTPUT_FORMATS
 from vemoizer.preset_cli import register_presets
 from vemoizer.render_cli import register_render
+from vemoizer.term_check_cli import register_terms
 
 app = typer.Typer(
     name="vemoizer",
@@ -62,6 +63,7 @@ register_eval(app)
 register_accept(app)
 register_render(app)
 register_names(app)
+register_terms(app)
 
 
 register_glossary(app)

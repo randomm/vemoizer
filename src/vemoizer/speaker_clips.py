@@ -42,6 +42,7 @@ __all__ = [
     "extract_clips",
     "play",
     "select_clips",
+    "source_duration",
     "talk_share",
 ]
 
@@ -54,6 +55,27 @@ FFMPEG_TIMEOUT_S = 60.0
 #: Output sample rate and channel count (the 16 kHz mono audio contract).
 _SAMPLE_RATE = "16000"
 _CHANNELS = "1"
+
+
+def source_duration(
+    source: list[dict[str, Any]], words: list[dict[str, Any]] | None = None
+) -> float:
+    """End of the last measured source part; falls back to the last word end.
+
+    Clip windows must be clamped to something: the sidecar's ``duration_s``
+    entries when present, the sidecar's ``words`` otherwise. *source* holds
+    resolved entry dicts (see ``names_cli._resolve_source_entry``).
+    """
+    duration = 0.0
+    for entry in source:
+        offset = float(entry.get("part_offset_s", 0.0))
+        part = entry.get("duration_s")
+        if isinstance(part, (int, float)) and part > 0:
+            duration = max(duration, offset + float(part))
+    if duration <= 0:
+        for w in words or []:
+            duration = max(duration, float(w.get("end", w.get("start", 0.0))))
+    return duration
 
 
 def _map_window(

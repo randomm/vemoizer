@@ -45,6 +45,7 @@ from vemoizer.preset_final import (
 from vemoizer.preset_interrupt import note_written_files
 from vemoizer.progress_wiring import _close_run_display
 from vemoizer.sidecar import build_sidecar, resolve_run_glossary_files
+from vemoizer.terms_hook import ask_terms_hook
 
 if TYPE_CHECKING:
     from vemoizer.preset_interrupt import InterruptTracker
@@ -221,9 +222,11 @@ def run_preset_plain_loop(
     if run_went_full(written, len(files), exit_code):
         print_final_line(len(written), quiet=quiet)
     # End-of-meeting naming hook (issue #95): memo never prompts;
-    # the hook never alters the run's exit code.
+    # the hook never alters the run's exit code. The term-check hook
+    # (issue #268) follows naming, run or not.
     if command == "meeting":
         ask_naming_hook(
             written, yes=yes, quiet=quiet, input_fn=input_fn, tty_isatty=tty_isatty
         )
+        ask_terms_hook(written, yes=yes, input_fn=input_fn, tty_isatty=tty_isatty)
     return exit_code
