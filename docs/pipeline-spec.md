@@ -493,6 +493,68 @@ equals the stored `options.glossary_sha256`. When they differ,
 corrections and names are still applied but byte-identity is not
 guaranteed (the hash-mismatch warning fires).
 
+**Interactive term check (issue #268)** — `vemoizer terms <x.json>` lists the
+words in the call that look like terms but are not in any glossary, least
+sure first, and the operator hears and fixes them one by one. Calibration on
+a real 48-min call showed Whisper's per-word `p` alone does NOT find the
+errors (several misrecognitions sat at p 0.7-0.96), so no probability
+threshold decides what is listed — the operator does. `src/vemoizer/term_review.py`
+selects the candidates from the sidecar's `words` and final `paragraphs`:
+
+- **Shape filter** (`is_term_shaped`, on the stem): an acronym (2-6 upper-case
+  letters, digits allowed), a letters+digits mix, a spelling containing
+  `c q w x z` (rare in native Finnish), or a capitalised word that is NOT
+  sentence-initial (the previous word ended with `. ? !`, or the gap to it
+  exceeds 1.5 s, or there is no previous word, or the word starts within
+  0.05 s of a VAD **segment start** — the recognizer capitalizes those, so
+  "Joo"/"Päivää" at a segment boundary are prose, not terms). Single letters
+  and pure numbers never qualify. Surrounding punctuation is stripped (inner
+  `-`, `/` and `.` survive) and a Finnish case suffix after `:` is split off,
+  so `AVS:n` groups with `AVS`; the group's displayed form is its most
+  frequent surface form.
+- **Known words excluded**: stems and full tokens already in the layered
+  glossary (terms, `@`-terms stripped, both sides of every correction pair),
+  the `people` list, or the sidecar's `speaker_names` values.
+- **Still present**: the stem must occur as a whole word (case-insensitive) in
+  a final paragraph, so a term repair or a glossary correction already
+  rewrote is never asked about again.
+- **Uncertainty is a ranking, not a filter**: `score = sum(1 - p)` over the
+  occurrences (the Whisper per-word probability of issue #263), ×1.5 for
+  acronyms; sorted by score then first start, capped at `LIST_LIMIT` (30),
+  count shown when > 1. A sidecar with no `p` anywhere lists nothing — shape
+  alone would nag about every acronym.
+
+The flow (`src/vemoizer/term_check_cli.py`, mirroring `names`): the list
+prints 4 aligned columns per row (`  1 THS (2×)`), then `Number to hear and
+fix (Enter when done): ` accepts any number of picks. Each pick prints one
+context line (`  [HH:MM:SS] <name>: "…before [WORD] after…"` from the sidecar
+words) and plays a clip of the word's LOWEST-`p` occurrence padded ±1.5 s
+(`--no-play`, a missing source or a failed extraction skip playback silently).
+`Right spelling (Enter = it is right, r = replay, - = skip): `: Enter records
+the bare term, text `T` records the pair `STEM => T` plus the bare term `T`
+— always the group's case-suffix-free STEM, never the surface: `AVS:n`
+saves as `AVS => AWS`, and the re-render maps `AVS:n` to `AWS:n`.
+`r` replays, `-` skips; a word may be revisited, the last answer wins.
+Ctrl-D/Ctrl-C at any prompt stop the loop with the answers kept. On yes at
+`Save to <./.vemoizer/glossary.txt>?`, `src/vemoizer/glossary_write.py`
+appends the lines to the nearest project glossary (never the home one;
+duplicates skipped case-insensitively, wrong side for pairs; wildcard `*`
+pairs never written; atomic tmp + `os.replace`), the `.md` is re-rendered
+once with the fresh corrections (`wrote <name>.md`), and one counts-only
+INFO line is logged (`term check: listed N, heard H, corrected C, confirmed
+K` — never the words). `n` prints `not saved`. Non-TTY exits 2.
+
+The post-meeting hook (`src/vemoizer/terms_hook.py`) asks `Check the terms
+in this transcript? [y/N] ` right after the naming hook for `meeting` runs,
+with the naming hook's skip rules and fail-open boundary; a skip prints
+nothing — the naming hook running right before it narrates those conditions.
+`vemoizer
+listen` prints one `no glossary for this folder yet` line before recording
+when the layered glossary has 0 terms.
+
+Report-only where it can be: a bad sidecar simply lists nothing and never
+moves the run's exit code.
+
 ### 16. Dated output naming (issue #82)
 
 `src/vemoizer/output/naming.py` adds three exports on top of the
@@ -650,7 +712,8 @@ bounds.
 `vemoizer` (Typer; entry point in `pyproject.toml`). The wired commands:
 `transcribe` (expert), `meeting`, `memo` (preset commands added in issue
 #82), `render` (M5a, issue #89 — model-free re-render of a stored sidecar),
-`names` (speaker naming), `glossary` (glossary inspection), `models`
+`names` (speaker naming), `terms` (interactive term check, issue #268),
+`glossary` (glossary inspection), `models`
 (model management), `doctor` (environment diagnostics), and `listen`
 (record a call, then the `meeting` preset; issue #173). `eval` is
 registered with `hidden=True` and does not appear in the main `--help`.

@@ -8,6 +8,7 @@ first file's ``st_mtime`` (fallback: today).
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from collections.abc import Callable
@@ -34,6 +35,7 @@ from vemoizer.progress import ProgressDisplay
 from vemoizer.progress_wiring import _close_run_display
 from vemoizer.run_log import file_log as file_log
 from vemoizer.sidecar import resolve_run_glossary_files
+from vemoizer.terms_hook import ask_terms_hook
 from vemoizer.tracks import TrackPaths, tracks_error
 
 # The seam invariant this module keeps for the moved plain loop
@@ -50,6 +52,8 @@ if TYPE_CHECKING:
     from vemoizer.preset_interrupt import InterruptTracker
 
 __all__ = ["run_preset"]
+
+logger = logging.getLogger(__name__)
 
 
 def _mtime_date_str(path: Path) -> str:
@@ -253,10 +257,14 @@ def _run_preset_groups(
         print_final_line(len(written), quiet=quiet)
     # End-of-meeting naming hook (issue #95): the prompt is the last
     # interactive output; the hook never alters the run's exit code.
+    # Issue #268 rework: the interactive term check follows naming, run or
+    # not — its own hook handles the skip rules (silently: the naming hook
+    # narrates them).
     if command == "meeting":
         ask_naming_hook(
             written, yes=yes, quiet=quiet, input_fn=input_fn, tty_isatty=tty_isatty
         )
+        ask_terms_hook(written, yes=yes, input_fn=input_fn, tty_isatty=tty_isatty)
     return max(code, exit_code)
 
 
