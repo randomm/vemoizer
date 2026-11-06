@@ -763,3 +763,27 @@ def test_format_transcript_md_without_language_key_defaults_fi() -> None:
     md = format_transcript(t, "md")
     assert "## Tiivistelmä" in md
     assert "## Summary" not in md
+
+
+# ---------------------------------------------------------------------------
+# The sidecar words key must not move any other format (issue #263)
+# ---------------------------------------------------------------------------
+
+
+def test_words_key_changes_only_the_json_format() -> None:
+    """A result carrying ``words`` renders txt/srt/vtt/md exactly as without.
+
+    The pipeline now writes a ``words`` list onto the run dict for the JSON
+    sidecar (issue #263). Nothing else may read it: txt and md never touch
+    the key, and SRT/VTT only fall back to words when there are NO segments
+    (the pipeline's list is empty exactly then, because a word needs a kept
+    segment to fall inside). This is the guard against sidecar word timings
+    leaking into a subtitle or Markdown deliverable.
+    """
+    assert TRANSCRIPT["words"], "the guard is only meaningful with words"
+    without = {k: v for k, v in TRANSCRIPT.items() if k != "words"}
+    for fmt in ("txt", "srt", "vtt", "md"):
+        assert format_transcript(TRANSCRIPT, fmt) == format_transcript(without, fmt)
+    # json is the one format that mirrors the key, present-only.
+    assert json.loads(format_json(TRANSCRIPT))["words"] == TRANSCRIPT["words"]
+    assert "words" not in json.loads(format_json(without))

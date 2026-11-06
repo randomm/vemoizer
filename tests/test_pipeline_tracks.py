@@ -214,6 +214,67 @@ def test_assemble_drops_them_segments_inside_echo_spans() -> None:
     assert result["text"] == "moi terve"
 
 
+def test_assemble_sidecar_words_follow_only_the_kept_segments() -> None:
+    """Issue #263: the result's ``words`` list is the kept segments' words.
+
+    The sidecar word timings come from decode A's words but are filtered
+    against the FINAL segments, so a word of an echo-dropped segment and a
+    word falling outside every segment are both absent, and only the
+    sidecar keys (``word``/``start``/``end``/``p``, plus ``speaker`` when
+    the word already had one) are mirrored.
+    """
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "moi", "track": "them"},
+        {"start": 2.5, "end": 3.5, "text": "terve", "track": "them"},
+        {"start": 6.0, "end": 7.0, "text": "sinulle", "track": "me"},
+    ]
+    words = [
+        {"word": "moi", "start": 0.0, "end": 0.5, "p": 0.42, "probability": 0.42},
+        {"word": "hei", "start": 0.5, "end": 1.0, "track": "them"},
+        {"word": "terve", "start": 2.5, "end": 3.0, "p": 0.99, "speaker": REMOTE_LABEL},
+        {"word": "kaiku", "start": 4.0, "end": 4.5, "p": 0.1},
+        {"word": "sinulle", "start": 6.5, "end": 7.0, "p": 0.7},
+    ]
+    result_a = {"text": TEXT, "words": words, "segments": segments}
+    turns = [(0.0, 1.0, "Janni"), (2.5, 3.5, REMOTE_LABEL)]
+
+    result = _assemble(
+        result_a,
+        None,
+        None,
+        None,
+        turns,
+        spans=[],
+        trusted_labels=frozenset({"Janni"}),
+        echo_spans=[(0.0, 1.0), (4.0, 4.5)],
+    )
+
+    assert result["words"] == [
+        {"word": "terve", "start": 2.5, "end": 3.0, "p": 0.99, "speaker": REMOTE_LABEL},
+        {"word": "sinulle", "start": 6.5, "end": 7.0, "p": 0.7},
+    ]
+    # The words key is a sidecar addition: the transcript itself is unchanged
+    # (the echo text was already dropped by issue #238, not by this change).
+    assert result["text"] == "terve sinulle"
+
+
+def test_assemble_without_segments_has_no_sidecar_words() -> None:
+    """No kept segments means no words, so the sidecar omits the key."""
+    words = [{"word": "moi", "start": 0.0, "end": 0.5, "p": 0.5}]
+    turns = [(0.0, 1.0, "Janni")]
+    result = _assemble(
+        {"text": "moi", "words": words, "segments": []},
+        None,
+        None,
+        None,
+        turns,
+        spans=[],
+        trusted_labels=frozenset({"Janni"}),
+    )
+
+    assert result["words"] == []
+
+
 def test_two_track_run_seeds_no_speaker_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

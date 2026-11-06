@@ -442,6 +442,18 @@ them (present-only, so old JSON without the keys and the expert
   that contained speech but returned 0 segments even after the prompt-free
   retry (issue #152). Present-only: absent on clean runs. Added by issue
   #152; JSON round-trip lists are accepted (tuples become lists in JSON).
+- `words` — decode A's word timings as `[{word, start, end, p?}]`, on the
+  recording timeline (issue #263). `p` is Whisper's per-word probability
+  (0..1) rounded to 2 decimals, reported by `mlx-whisper` under
+  `word_timestamps=True`; the key is omitted for a word whose probability is
+  missing or not a finite number. Only words whose midpoint
+  (`(start + end) / 2`) falls inside a FINAL kept segment are listed, so an
+  echo-dropped or otherwise filtered segment contributes no words (and a run
+  with no segments has no `words` key at all, since the list is empty and
+  `format_json` mirrors present-and-non-empty). A pure sidecar addition:
+  `text`, `segments`, `paragraphs`, notes, Markdown and SRT/VTT do not read
+  the key — SRT/VTT only fall back to words when there are no segments, and
+  the filtered list is empty exactly then.
 
 **`glossary_sha256` — prompt-term-set hash (issue #107)**: the
 hash covers only the glossary *prompt terms* — the non-correction

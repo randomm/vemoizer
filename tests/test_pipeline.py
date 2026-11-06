@@ -22,6 +22,7 @@ import vemoizer.eval_backends as eval_backends
 import vemoizer.pipeline as pipeline
 import vemoizer.preflight as preflight
 import vemoizer.progress as progress
+from vemoizer.output.formatters import format_transcript
 from vemoizer.pipeline import transcribe_file
 
 
@@ -225,7 +226,7 @@ def test_full_pipeline_assembles_text_and_spans(tmp_path, monkeypatch) -> None:
     _patch_ingest(monkeypatch)
     _patch_vad(monkeypatch)
     words_a = [
-        {"word": "hei", "start": 0.0, "end": 0.4},
+        {"word": "hei", "start": 0.0, "end": 0.4, "p": 0.98},
         {"word": "maailma", "start": 0.5, "end": 1.0},
     ]
     words_b: list[dict] = []  # decode B has no word timestamps
@@ -246,6 +247,12 @@ def test_full_pipeline_assembles_text_and_spans(tmp_path, monkeypatch) -> None:
     seg = result["segments"][0]
     assert seg["text"] == "moikka"  # re-decode fallback (no LLM configured)
     assert 0.0 <= seg["start"] < seg["end"]
+    # Issue #263: the sidecar word list is decode A's words inside the kept
+    # segments (probability included), and no other deliverable reads it --
+    # Markdown renders identically with and without the key.
+    assert result["words"] == words_a
+    stripped = {k: v for k, v in result.items() if k != "words"}
+    assert format_transcript(result, "md") == format_transcript(stripped, "md")
 
 
 def test_fail_open_when_decode_b_missing(tmp_path, monkeypatch) -> None:
