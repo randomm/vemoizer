@@ -212,7 +212,7 @@ class TestSelectClipsWindow:
 class TestSelectClipsSpread:
     def test_one_clip_from_each_third(self):
         paras = [_para(0, 20), _para(30, 50), _para(70, 90)]
-        clips = select_clips(paras, [])["A"]
+        clips = select_clips(paras, [], per_speaker=3)["A"]
         assert [w.start_s for w in clips] == [
             pytest.approx(0.0),
             pytest.approx(30.0),
@@ -269,7 +269,7 @@ class TestSelectClipsSpread:
 
     def test_empty_third_falls_back_to_longest_remaining(self):
         paras = [_para(0, 4), _para(5, 15), _para(16, 21)]
-        clips = select_clips(paras, [])["A"]
+        clips = select_clips(paras, [], per_speaker=3)["A"]
         assert [w.start_s for w in clips] == [
             pytest.approx(0.0),
             pytest.approx(5.0),
@@ -283,6 +283,30 @@ class TestSelectClipsSpread:
     def test_per_speaker_limit(self):
         paras = [_para(i * 10, i * 10 + 8) for i in range(6)]
         assert len(select_clips(paras, [], per_speaker=2)["A"]) == 2
+
+    def test_default_two_clips_are_beginning_and_end_thirds(self):
+        # Long clean segments in all three thirds: the default picks exactly
+        # 2, filling beginning -> end -> middle and stopping at per_speaker,
+        # so the two clips spread over the meeting for recognising a voice.
+        paras = [_para(0.0, 90.0, text="P0")]
+        segs = [
+            _seg(1.0, 8.0, "beginning segment words"),
+            _seg(31.0, 38.0, "middle segment words"),
+            _seg(61.0, 68.0, "end segment words"),
+        ]
+        clips = select_clips(paras, segs)["A"]
+        assert [w.start_s for w in clips] == [pytest.approx(1.0), pytest.approx(61.0)]
+        assert [w.quote for w in clips] == [
+            "beginning segment words",
+            "end segment words",
+        ]
+        # With per_speaker=3 the middle third fills in too.
+        three = select_clips(paras, segs, per_speaker=3)["A"]
+        assert [w.start_s for w in three] == [
+            pytest.approx(1.0),
+            pytest.approx(31.0),
+            pytest.approx(61.0),
+        ]
 
     def test_speaker_boundary_never_crossed(self):
         paras = [_para(0, 10, speaker="A"), _para(10.5, 20, speaker="B")]
@@ -410,7 +434,7 @@ class TestSelectClipsSegments:
             _seg(0.0, 6.0, "early words"),
             _seg(31.0, 38.0, "mid words"),
         ]
-        clips = select_clips(paras, segs)["A"]
+        clips = select_clips(paras, segs, per_speaker=3)["A"]
         assert [w.start_s for w in clips] == [
             pytest.approx(0.0),
             pytest.approx(31.0),

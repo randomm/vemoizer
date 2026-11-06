@@ -447,17 +447,16 @@ class TestQuoteClipPairing:
         sc = _three_turn_sidecar(tmp_path)
         assert _run(sc, _Recorder(["Aino", "n"])) == 0
         ev = pairing["events"]
-        assert [k for k, _ in ev] == ["quote", "play"] * 3
+        # Two clips by default (issue #260): the beginning and end thirds.
+        assert [k for k, _ in ev] == ["quote", "play"] * 2
         assert [t for k, t in ev if k == "quote"] == [
             '  "first utterance words"',
-            '  "second utterance words"',
             '  "third utterance words"',
         ]
         # The clip played after each quote is that quote's own clip.
         assert [t for k, t in ev if k == "play"] == [
             "pair_0.wav",
             "pair_1.wav",
-            "pair_2.wav",
         ]
 
     def test_pairing_holds_when_one_extraction_fails(
@@ -474,10 +473,9 @@ class TestQuoteClipPairing:
         ev = pairing["events"]
         # The failed clip keeps its quote line and skips playback; the
         # remaining quotes/clips stay paired.
-        assert [k for k, _ in ev] == ["quote", "play", "quote", "quote", "play"]
-        assert ev[2] == ("quote", '  "second utterance words"')
-        assert ev[3] == ("quote", '  "third utterance words"')
-        assert ev[4] == ("play", "pair_2.wav")
+        assert [k for k, _ in ev] == ["quote", "play", "quote"]
+        assert ev[0] == ("quote", '  "first utterance words"')
+        assert ev[2] == ("quote", '  "third utterance words"')
         assert "quotes only" in capsys.readouterr().err
 
     def test_no_play_prints_quotes_without_any_playback(
@@ -489,4 +487,4 @@ class TestQuoteClipPairing:
         isolate_home(monkeypatch, tmp_path, tmp_path)
         sc = _three_turn_sidecar(tmp_path)
         assert _run(sc, _Recorder(["Aino", "n"]), no_play=True) == 0
-        assert [k for k, _ in pairing["events"]] == ["quote"] * 3
+        assert [k for k, _ in pairing["events"]] == ["quote"] * 2

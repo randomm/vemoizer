@@ -510,7 +510,7 @@ rendered sidecar's `paragraphs`/`segments`; `src/vemoizer/speaker_clips.py`
 (extract, play, temp dir) is the audio half and re-exports the selector.
 Nothing either does changes the pipeline output.
 
-**Selection rules** (`select_clips(paragraphs, segments, *, per_speaker=3,
+**Selection rules** (`select_clips(paragraphs, segments, *, per_speaker=2,
 min_s=3.0, max_s=5.0, total_duration=None) -> dict[label, list[ClipWindow]]`
 — `total_duration` overrides the audio-end used to clamp windows; it
 defaults to the end of the last paragraph or segment):
@@ -542,11 +542,11 @@ dict returned by `extract_clips`:
   otherwise another label's `paragraph`. A third left with no acceptable
   window yields no clip.
 - `min_s` is a display annotation, not a disqualification threshold.
-- Picks for one speaker spread across the beginning, middle and end of
-  the meeting: the longest candidate (ranked by its **turn duration**, ties
-  to the earlier start) from each third in order (beginning → middle → end);
-  when a third is empty, the longest remaining candidate regardless of
-  third. Candidates are de-duplicated by **time overlap**: no two chosen
+- Picks for one speaker spread across the meeting: the longest candidate
+  (ranked by its **turn duration**, ties to the earlier start) from each
+  third, filling the thirds in order (beginning → end → middle) and stopping
+  at `per_speaker`; when a third is empty, the longest remaining candidate
+  regardless of third. Candidates are de-duplicated by **time overlap**: no two chosen
   windows of one label overlap. Fewer than `per_speaker` clean turns
   yields fewer clips, without error. The result is sorted by `start_s`.
 
