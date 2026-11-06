@@ -687,6 +687,50 @@ class TestNonDictSpeakerNames:
         assert updated["speaker_names"].get("SPEAKER_1") == "Mikko"
 
 
+# --- Glossary corrections on re-render (issue #261) ---
+
+
+class TestReRenderCorrections:
+    def _avs_sidecar(self, tmp_path: Path) -> Path:
+        """One labelled paragraph whose text contains the wrong term AVS."""
+        data = _sidecar()
+        data.pop("source", None)
+        data["paragraphs"] = [
+            {
+                "start": 0.0,
+                "end": 10.0,
+                "text": "Kaytetaan AVS:aa.",
+                "speaker": "SPEAKER_1",
+            },
+        ]
+        return _write_sidecar(tmp_path, data)
+
+    def test_project_glossary_applied_on_rerender(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Naming re-renders with glossary corrections: AVS becomes AWS."""
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        glossary_dir = tmp_path / ".vemoizer"
+        glossary_dir.mkdir()
+        (glossary_dir / "glossary.txt").write_text("AVS => AWS\n", encoding="utf-8")
+        sc = self._avs_sidecar(tmp_path)
+        assert _run(sc, ["Mikko", "n"]) == 0
+        md = sc.with_suffix(".md").read_text(encoding="utf-8")
+        assert "AWS" in md
+        assert "AVS" not in md
+
+    def test_no_glossary_leaves_text_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """No glossary anywhere → re-render keeps the original term."""
+        isolate_home(monkeypatch, tmp_path, tmp_path)
+        sc = self._avs_sidecar(tmp_path)
+        assert _run(sc, ["Mikko", "n"]) == 0
+        md = sc.with_suffix(".md").read_text(encoding="utf-8")
+        assert "AVS" in md
+        assert "AWS" not in md
+
+
 # --- CLI registration ---
 
 

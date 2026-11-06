@@ -33,8 +33,10 @@ from vemoizer.people_config import (
 from vemoizer.render import render_markdown
 from vemoizer.render_cli import (
     _atomic_write_text,
+    _load_corrections,
     _persist_speaker_names,
     _read_sidecar,
+    _resolve_glossary_files,
 )
 from vemoizer.speaker_clips import (
     ClipWindow,
@@ -366,7 +368,12 @@ def run_names(
             return 1
 
         # --- Re-render Markdown in place (issue #202: one .md per sidecar) ---
-        markdown = render_markdown(data, corrections={}, speaker_names=new_names)
+        # Load glossary corrections exactly like `vemoizer render` (issue #261)
+        # so naming does not wipe the `wrong => right` fixes from the .md.
+        corrections = _load_corrections(_resolve_glossary_files(None))
+        markdown = render_markdown(
+            data, corrections=corrections, speaker_names=new_names
+        )
         md_path = sidecar_path.with_suffix(".md")
         try:
             _atomic_write_text(md_path, markdown)
