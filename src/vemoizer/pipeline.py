@@ -45,7 +45,7 @@ from .progress import ProgressDisplay, StageProgress, format_duration
 from .readability import paragraphs, splice_verdicts, tidy_paragraphs
 from .redecode import WhisperReDecodeTranscriber
 from .repair import repair_paragraphs  # noqa: F401
-from .spans import Span, span_context, words_in_span
+from .spans import Span, span_context, words_in_segments, words_in_span
 from .speaker_align import (
     assign_track_labels,
     drop_echo_segments,
@@ -205,8 +205,14 @@ def _assemble(
         sentences = split_segments_at_speaker_changes(sentences, words, labels)
     if verdicts and not sentences:
         # A backend without sentence segments cannot be spliced; keep the
-        # verdict list as the segments (the pre-splice contract).
-        return {"text": base_text, "segments": verdicts}
+        # verdict list as the segments (the pre-splice contract). The
+        # verdicts ARE the final segments there, so they filter the sidecar
+        # word list too (issue #263).
+        return {
+            "text": base_text,
+            "segments": verdicts,
+            "words": words_in_segments(words, verdicts),
+        }
     text, segments = splice_verdicts(base_text, words, sentences, verdicts)
     if speaker_segments is not None:
         # Speakers attach to EVERY segment, not only the adjudicated ones:
@@ -227,6 +233,11 @@ def _assemble(
         segments = kept
         label_segments_by_track(segments, speaker_segments, trusted_labels)
     result: dict[str, Any] = {"text": text, "segments": segments}
+    # Sidecar word timings (issue #263): decode A's words narrowed to the
+    # FINAL kept segments, so a word of an echo-dropped segment never comes
+    # back through the .json. Presentation-only: text/segments/paragraphs
+    # are computed above and are untouched by this key.
+    result["words"] = words_in_segments(words, segments)
     # Per-window language distribution (issue #147, display only): decode A's
     # whisper windows report a ``language_summary`` (e.g. "fi 29/30, en
     # 1/30"); carry it onto the run dict so the end-of-run quality report's

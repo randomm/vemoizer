@@ -227,6 +227,41 @@ def words_in_span(words: list[dict[str, Any]], span: Span) -> str:
     ).strip()
 
 
+#: The word keys the transcript sidecar mirrors (issue #263). ``p`` is
+#: Whisper's word probability and ``speaker`` is diarization's attribution;
+#: both are kept only when the source word already carries them.
+SIDECAR_WORD_KEYS = ("word", "start", "end", "p", "speaker")
+
+
+def words_in_segments(
+    words: list[dict[str, Any]], segments: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The *words* whose midpoint lies inside one of *segments* (issue #263).
+
+    The pipeline result's sidecar word list (``word``/``start``/``end``,
+    optional ``p``/``speaker``) is derived from decode A's words but filtered
+    against the FINAL kept segments, so a word of an echo-dropped or
+    otherwise filtered segment can never come back through the sidecar. A
+    word's midpoint (not its start) decides: a word straddling a segment
+    boundary belongs to the segment where it is heard, which is where its
+    midpoint sits. Words with no segment have no midpoint to fall inside,
+    so an empty segment list yields no words.
+    """
+    spans: list[tuple[float, float]] = []
+    for seg in segments:
+        start = float(seg.get("start", 0.0))
+        end = seg.get("end", start)
+        spans.append((start, max(start, float(end))))
+    kept: list[dict[str, Any]] = []
+    for w in words:
+        start = float(w.get("start", 0.0))
+        end = w.get("end", start)
+        midpoint = (start + (float(end) if end is not None else start)) / 2
+        if any(lo <= midpoint <= hi for lo, hi in spans):
+            kept.append({k: w[k] for k in SIDECAR_WORD_KEYS if k in w})
+    return kept
+
+
 #: Seconds of decode-A words offered to the adjudicator around a span.
 CONTEXT_WINDOW_S = 10.0
 

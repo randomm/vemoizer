@@ -28,7 +28,9 @@ the prompt.
 from __future__ import annotations
 
 import logging
+import math
 import re
+from numbers import Real
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -153,22 +155,47 @@ def vocabulary_set(echo_terms: list[str] | None) -> set[str]:
     return {t.lower() for t in echo_terms}
 
 
+def _probability(w: dict[str, Any]) -> float | None:
+    """Whisper's per-word probability, rounded for the sidecar; ``None`` = omit.
+
+    ``mlx-whisper`` reports ``probability`` (0..1) per word when decoding
+    with ``word_timestamps=True``; a word without a numeric, finite value
+    (a non-MLX backend, a missing key, ``NaN``) yields ``None`` so the key
+    is omitted rather than faked (issue #263).
+    """
+    prob = w.get("probability")
+    if isinstance(prob, bool) or not isinstance(prob, Real):
+        return None
+    value = float(prob)
+    if not math.isfinite(value):
+        return None
+    return round(value, 2)
+
+
 def _words_on_timeline(
     segments: list[dict[str, Any]], offset_s: float
 ) -> list[dict[str, Any]]:
-    """The segments' words, shifted onto the recording timeline."""
+    """The segments' words, shifted onto the recording timeline.
+
+    Each word carries ``word``/``start``/``end``, plus ``p`` (Whisper's word
+    probability, 2 decimals) when the source word reported one — see
+    :func:`_probability`.
+    """
     words: list[dict[str, Any]] = []
     for seg in segments:
         for w in seg.get("words") or []:
             word = str(w.get("word", "")).strip()
-            if word:
-                words.append(
-                    {
-                        "word": word,
-                        "start": float(w.get("start", 0.0)) + offset_s,
-                        "end": float(w.get("end", 0.0)) + offset_s,
-                    }
-                )
+            if not word:
+                continue
+            entry: dict[str, Any] = {
+                "word": word,
+                "start": float(w.get("start", 0.0)) + offset_s,
+                "end": float(w.get("end", 0.0)) + offset_s,
+            }
+            prob = _probability(w)
+            if prob is not None:
+                entry["p"] = prob
+            words.append(entry)
     return words
 
 

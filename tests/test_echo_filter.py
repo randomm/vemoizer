@@ -11,16 +11,59 @@ windows, not just the last.
 
 from __future__ import annotations
 
+from math import nan
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 
-from vemoizer.echo_filter import echo_vocabulary, filter_echo_segments
+from vemoizer.echo_filter import (
+    _words_on_timeline,
+    echo_vocabulary,
+    filter_echo_segments,
+)
 from vemoizer.whisper_transcriber import WhisperTranscriber
 
 
 def _echo_vocab(prompt):
     return echo_vocabulary(prompt)
+
+
+def test_words_on_timeline_keeps_word_probability() -> None:
+    """Whisper's ``probability`` rides on the word as ``p``, 2 decimals.
+
+    Issue #263: the transcript sidecar carries per-word confidence, so the
+    word timeline must not lose the number the decode reported.
+    """
+    seg = {
+        "text": "moi hei",
+        "start": 0.0,
+        "end": 1.0,
+        "words": [
+            {"word": "moi", "start": 0.0, "end": 0.4, "probability": 0.987},
+            {"word": "hei", "start": 0.5, "end": 1.0},
+        ],
+    }
+    assert _words_on_timeline([seg], 10.0) == [
+        {"word": "moi", "start": 10.0, "end": 10.4, "p": 0.99},
+        {"word": "hei", "start": 10.5, "end": 11.0},
+    ]
+
+
+@pytest.mark.parametrize("bad", [None, nan, float("inf"), "0.9", True, {}])
+def test_words_on_timeline_omits_unusable_probability(bad: object) -> None:
+    """A missing/non-numeric/non-finite ``probability`` omits ``p``.
+
+    The key is never fabricated: a backend without word probabilities (or
+    a garbage value) yields the plain ``{word, start, end}`` word.
+    """
+    seg = {
+        "text": "moi",
+        "start": 0.0,
+        "end": 0.5,
+        "words": [{"word": "moi", "start": 0.0, "end": 0.5, "probability": bad}],
+    }
+    assert _words_on_timeline([seg], 0.0) == [{"word": "moi", "start": 0.0, "end": 0.5}]
 
 
 def test_filter_keeps_single_term_segment() -> None:
