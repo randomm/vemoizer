@@ -129,6 +129,8 @@ def repair_paragraphs(
     total = len(paragraphs)
     repaired: list[dict[str, Any]] = []
     fixed = 0
+    audit_kept = 0
+    audit_weak = 0
     reverted_replace = 0
     reverted_insert = 0
     reverted_delete = 0
@@ -162,6 +164,7 @@ def repair_paragraphs(
             logger.warning("repair failed; keeping originals: %s", e)
             candidate = None
         text = original
+        edits: list[dict[str, Any]] = []
         if candidate:
             candidate = candidate.strip()
             grew_too_much = len(candidate) > len(original) * MAX_GROWTH
@@ -170,7 +173,9 @@ def repair_paragraphs(
                 # Paragraph-level guard passed; the token guard then
                 # reverts the single-word swaps, insertions and content
                 # deletions the whole-paragraph checks cannot see.
-                text, stats = guard_tokens(original, candidate)
+                text, stats, edits = guard_tokens(original, candidate)
+                audit_kept += len(edits)
+                audit_weak += sum(1 for e in edits if e["weak"])
                 reverted_replace += stats.reverted_replace
                 reverted_insert += stats.reverted_insert
                 reverted_delete += stats.reverted_delete
@@ -178,7 +183,14 @@ def repair_paragraphs(
                     fixed += 1
             else:
                 logger.info("repair rejected by guard (kept original paragraph)")
-        repaired.append({**para, "text": text})
+        para_out: dict[str, Any] = {**para, "text": text}
+        if edits:
+            para_out["repairs"] = edits
+        elif text != original:
+            # Re-written text with no kept edit (case/punctuation only):
+            # an audit describing different words must not ride along.
+            para_out.pop("repairs", None)
+        repaired.append(para_out)
         processed += 1
         if progress_cb is not None:
             progress_cb(processed, total)
@@ -207,6 +219,9 @@ def repair_paragraphs(
         )
     if fixed:
         logger.info("repair: %d/%d paragraphs corrected", fixed, len(paragraphs))
+    if audit_kept:
+        # Counts only, never transcript text (privacy contract).
+        logger.info("repair audit: %d changes kept, %d weak", audit_kept, audit_weak)
     if reverted_replace or reverted_insert or reverted_delete:
         # Counts only, never transcript text (privacy contract).
         logger.info(

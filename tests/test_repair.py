@@ -330,6 +330,96 @@ def test_token_guard_logs_counts_only(caplog) -> None:
         assert word not in line
 
 
+# -- per-change repair audit (issue #274) ---------------------------------
+#
+# A repair is invisible after the run unless the paragraph records what
+# changed. ``guard_tokens`` reports the edits it kept; they ride along under
+# the paragraph's ``repairs`` key (and into the JSON sidecar verbatim).
+
+
+def test_repairs_are_attached_only_to_changed_paragraphs() -> None:
+    changed = "meillä parastaa rotkeasti tänään"
+    fixed = "meillä parantaa rohkeasti tänään"
+    untouched = "mitä sanotaan"
+    out = repair_paragraphs(
+        _client([fixed, untouched]), [_para(changed), _para(untouched)]
+    )
+    assert out[0]["repairs"] == [
+        {"from": "parastaa", "to": "parantaa", "weak": False},
+        {"from": "rotkeasti", "to": "rohkeasti", "weak": False},
+    ]
+    assert "repairs" not in out[1]
+
+
+def test_a_weak_change_is_recorded_as_weak() -> None:
+    """A barely-phonetic swap is kept but marked for a human check."""
+    out = repair_paragraphs(
+        _client(["minä kulki eilen kauppassa"]),
+        [_para("minä tuli eilen kauppassa")],
+    )
+    assert out[0]["repairs"] == [{"from": "tuli", "to": "kulki", "weak": True}]
+
+
+def test_a_reverted_edit_is_not_recorded() -> None:
+    original = "meillä on IBS tänään"
+    out = repair_paragraphs(_client(["meillä on IBC-kontti tänään"]), [_para(original)])
+    assert out[0]["text"] == original
+    assert "repairs" not in out[0]
+
+
+def test_untouched_paragraph_keeps_a_repairs_key_it_already_had() -> None:
+    """A paragraph this stage did not rewrite passes through unchanged."""
+    para = _para(
+        "alkuperäinen teksti", repairs=[{"from": "a", "to": "b", "weak": False}]
+    )
+    out = repair_paragraphs(_client([None]), [para])
+    assert out[0]["repairs"] == [{"from": "a", "to": "b", "weak": False}]
+
+
+def test_repair_audit_reaches_the_json_sidecar_verbatim() -> None:
+    """format_json dumps paragraphs as they are, so the audit survives."""
+    import json
+
+    from vemoizer.output.formatters import format_json
+
+    para = _para("me parantaa tätä", repairs=[{"from": "a", "to": "b", "weak": True}])
+    parsed = json.loads(format_json({"text": para["text"], "paragraphs": [para]}))
+    assert parsed["paragraphs"][0]["repairs"] == [
+        {"from": "a", "to": "b", "weak": True}
+    ]
+
+
+def test_repair_audit_log_is_counts_only(caplog) -> None:
+    """One INFO line about what the guard kept — counts, never text."""
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="vemoizer.repair"):
+        repair_paragraphs(
+            _client(["minä kulki eilen kauppassa rohkeasti"]),
+            [_para("minä tuli eilen kauppassa rotkeasti")],
+        )
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if r.getMessage().startswith("repair audit:")
+    ]
+    assert lines == ["repair audit: 2 changes kept, 1 weak"]
+    for word in ("tuli", "kulki", "rotkeasti", "rohkeasti", "kauppassa"):
+        assert word not in lines[0]
+
+
+def test_repair_audit_is_silent_without_kept_changes(caplog) -> None:
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="vemoizer.repair"):
+        repair_paragraphs(_client([None]), [_para("alkuperäinen teksti")])
+    assert not [
+        r.getMessage()
+        for r in caplog.records
+        if r.getMessage().startswith("repair audit:")
+    ]
+
+
 # -- corrections survive the repair pass (issue #272) ---------------------
 
 
