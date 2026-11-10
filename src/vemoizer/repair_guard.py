@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from typing import Any
 
 from .slice_align import slice_similarity
 from .textnorm import textnorm
@@ -23,6 +24,11 @@ from .textnorm import textnorm
 #: characters; "IBS" -> "IBC-kontti" does not, and no model may decide the
 #: meaning of a term it never heard spoken.
 TOKEN_MIN_SIMILARITY = 0.5
+
+#: A kept replace that scores this low passed the gate, but only just: it
+#: is likely a real word, just not a close rendering of the spoken one, so
+#: the audit flags it for a human glance rather than trusting it blindly.
+WEAK_SIMILARITY = 0.7
 
 #: Filler removal is one or two words ("niinku", "että niin"); a longer
 #: deleted run is content the model dropped, so it ships back.
@@ -56,24 +62,36 @@ def _is_marker(candidate_run: list[str]) -> bool:
     )
 
 
-def _run_is_kept(orig_run: list[str], cand_run: list[str]) -> bool:
-    """Whether a replaced run earns its place: the unclear marker or a
-    run similar enough to be the same words, not a different term."""
-    return _is_marker(cand_run) or (
-        slice_similarity(" ".join(orig_run), " ".join(cand_run)) >= TOKEN_MIN_SIMILARITY
-    )
+def _run_similarity(orig_run: list[str], cand_run: list[str]) -> float:
+    """How much of the original a replaced run kept — its keep decision.
+
+    The unclear marker scores 1.0 rather than its own character overlap:
+    its letters are not a phonetic signal at all (the prompt writes it for
+    a passage nobody can read), and the audit must never flag it as weak.
+    """
+    if _is_marker(cand_run):
+        return 1.0
+    return slice_similarity(" ".join(orig_run), " ".join(cand_run))
 
 
-def guard_tokens(original: str, candidate: str) -> tuple[str, GuardStats]:
+def guard_tokens(
+    original: str, candidate: str
+) -> tuple[str, GuardStats, list[dict[str, Any]]]:
     """Revert the un-phonetic edits of an accepted *candidate* over *original*.
 
     Both sides are tokenised on whitespace (punctuation stays attached) and
     aligned on their normalized forms, so a capitalization or punctuation
     change is an ``equal`` opcode and ships as the candidate wrote it. An
     empty side is not a repair at all: the *original* is returned untouched.
+
+    Returns ``(text, stats, edits)``: *edits* are the changes the guard
+    KEPT, in order, as ``{"from": orig run, "to": candidate run, "weak":
+    bool}`` (a kept filler deletion has ``"to": ""``). Equal runs are not
+    edits and reverted ones are not kept, so neither is recorded; the audit
+    is what lets a reader check a repair after the fact (issue #274).
     """
     if not original.strip() or not candidate.strip():
-        return original, GuardStats()
+        return original, GuardStats(), []
     orig_tokens = original.split()
     cand_tokens = candidate.split()
     matcher = SequenceMatcher(
@@ -87,6 +105,7 @@ def guard_tokens(original: str, candidate: str) -> tuple[str, GuardStats]:
     reverted_replace = 0
     reverted_insert = 0
     reverted_delete = 0
+    edits: list[dict[str, Any]] = []
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
             out.extend(cand_tokens[j1:j2])
@@ -96,6 +115,10 @@ def guard_tokens(original: str, candidate: str) -> tuple[str, GuardStats]:
             if i2 - i1 > MAX_DELETE_RUN:
                 out.extend(orig_tokens[i1:i2])  # content, not filler
                 reverted_delete += 1
+            else:
+                edits.append(
+                    {"from": " ".join(orig_tokens[i1:i2]), "to": "", "weak": False}
+                )
         else:  # replace
             orig_run = orig_tokens[i1:i2]
             cand_run = cand_tokens[j1:j2]
@@ -105,21 +128,42 @@ def guard_tokens(original: str, candidate: str) -> tuple[str, GuardStats]:
                 # aggregate similarity: judge the pairs 1:1 with the same
                 # rule and count each decision individually.
                 for orig_tok, cand_tok in zip(orig_run, cand_run, strict=True):
-                    if _run_is_kept([orig_tok], [cand_tok]):
+                    sim = _run_similarity([orig_tok], [cand_tok])
+                    if sim >= TOKEN_MIN_SIMILARITY:
                         out.append(cand_tok)
                         kept += 1
+                        edits.append(
+                            {
+                                "from": orig_tok,
+                                "to": cand_tok,
+                                "weak": sim < WEAK_SIMILARITY,
+                            }
+                        )
                     else:
                         out.append(orig_tok)
                         reverted_replace += 1
-            elif _run_is_kept(orig_run, cand_run):
-                out.extend(cand_run)
-                kept += 1
             else:
-                out.extend(orig_run)
-                reverted_replace += 1
-    return " ".join(out), GuardStats(
-        kept=kept,
-        reverted_replace=reverted_replace,
-        reverted_insert=reverted_insert,
-        reverted_delete=reverted_delete,
+                sim = _run_similarity(orig_run, cand_run)
+                if sim >= TOKEN_MIN_SIMILARITY:
+                    out.extend(cand_run)
+                    kept += 1
+                    edits.append(
+                        {
+                            "from": " ".join(orig_run),
+                            "to": " ".join(cand_run),
+                            "weak": sim < WEAK_SIMILARITY,
+                        }
+                    )
+                else:
+                    out.extend(orig_run)
+                    reverted_replace += 1
+    return (
+        " ".join(out),
+        GuardStats(
+            kept=kept,
+            reverted_replace=reverted_replace,
+            reverted_insert=reverted_insert,
+            reverted_delete=reverted_delete,
+        ),
+        edits,
     )

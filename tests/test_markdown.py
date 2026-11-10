@@ -545,3 +545,18 @@ def test_language_en_header_labels() -> None:
 def test_language_unknown_defaults_to_fi() -> None:
     md = format_md({"text": "x", "duration_s": 60}, language="xx")
     assert "Kesto: [00:01:00]" in md
+
+
+def test_repairs_key_does_not_change_the_markdown() -> None:
+    """The repair audit (issue #274) is sidecar-only: the .md is identical.
+
+    A paragraph-level key the renderers do not read must not leak into the
+    document; showing weak changes to the reader is a later Wave 2 item.
+    """
+    plain = _transcript()
+    audited = _transcript()
+    audited["paragraphs"][0]["repairs"] = [
+        {"from": "parastaa", "to": "parantaa", "weak": False},
+        {"from": "että niinku", "to": "", "weak": False},
+    ]
+    assert format_md(audited) == format_md(plain)

@@ -329,7 +329,15 @@ edit:
   stays deleted; a longer run is content and ships back.
 
 Reverted runs are reported in one counts-only INFO line (no transcript
-text — privacy contract). An all-filler paragraph whose text the guard
+text — privacy contract). The runs the guard KEPT are returned alongside
+the stats as an audit list — `{"from": original run, "to": candidate run,
+"weak": bool}`, a kept filler deletion having `"to": ""` — which
+`repair_paragraphs` stores under the paragraph's `repairs` key and sums
+into one counts-only INFO line (`repair audit: N changes kept, M weak`);
+a replace that cleared `TOKEN_MIN_SIMILARITY` but scored under
+`WEAK_SIMILARITY` (0.7) is flagged `weak`, because it passed the gate
+without much margin and a reader should look at it. An all-filler
+paragraph whose text the guard
 empties is caught by the paragraph guard, which never accepts an empty or
 low-similarity result. Because a repair may also rewrite a term the
 deterministic glossary had already corrected, `apply_llm_tail` re-applies
@@ -437,6 +445,13 @@ them (present-only, so old JSON without the keys and the expert
 - `notes` — the LLM notes verbatim (`{title, summary, key_points,
   action_items}`); the key is omitted when there were no notes (absent
   or `None`, i.e. LLM fail-open). Never fabricated.
+- `paragraphs[]` — beyond the assembled paragraph fields, a paragraph the
+  token guard (see “LLM repair pass and its token guard” above) actually
+  changed carries `repairs`: the edits it kept, in order, as
+  `[{from, to, weak}]` (a kept filler deletion has `to: ""`, and `weak`
+  marks a replace below `WEAK_SIMILARITY`). The key is omitted on every
+  paragraph with no kept edit, and it is JSON-only: the `.md` is
+  unaffected (issue #274).
 - `source` — one entry per recorded part: `{path, part_offset_s,
   duration_s?}`. Single-file runs: one entry with the file path,
   `part_offset_s: 0.0`. Grouped runs: one entry per `part_markers` part,
