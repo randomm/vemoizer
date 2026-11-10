@@ -44,6 +44,13 @@ _LOOP_ANCHOR = "self-heal"
 #: timestamps").
 _MAX_SUSPECTS = 3
 
+#: The shown-weak-repairs cap (mirrors ``_MAX_SUSPECTS``).
+_MAX_WEAK_REPAIRS = 3
+
+#: Rendered for a weak edit whose ``to`` is empty (a kept filler
+#: deletion is never weak, so this is only a malformed-input guard).
+_EMPTY_TO = "∅"
+
 
 def _paragraphs(transcript: dict[str, Any]) -> list[dict[str, Any]]:
     """The run-dict paragraphs as a dict-only list (non-dicts dropped)."""
@@ -80,6 +87,36 @@ def _worst_suspects(paragraphs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     suspects = [p for p in paragraphs if p.get("suspect") in SUSPECT_RANK]
     suspects.sort(key=lambda p: (-SUSPECT_RANK[p["suspect"]], _start_value(p)))
     return suspects[:_MAX_SUSPECTS]
+
+
+def _weak_repairs(paragraphs: list[dict[str, Any]]) -> list[tuple[float, str, str]]:
+    """Every weak repair edit as ``(paragraph start, from, to)``, earliest first.
+
+    Reads the ``repairs`` audit list the repair stage may attach to a
+    paragraph (issue #274) and keeps only the edits explicitly marked
+    ``weak is True`` — the ones the token guard kept on thin evidence.
+    A non-list ``repairs`` value, a non-dict entry, an edit whose
+    ``from``/``to`` is not a ``str``, and a missing/invalid ``start``
+    never raise: the first two are skipped, the last two degrade (the
+    edit still counts; its clock is omitted). Ordering is by paragraph
+    ``start`` (earliest first, ``inf`` last); a stable sort preserves the
+    within-paragraph order.
+    """
+    edits: list[tuple[float, str, str]] = []
+    for para in paragraphs:
+        repairs = para.get("repairs")
+        if not isinstance(repairs, list):
+            continue
+        for edit in repairs:
+            if not isinstance(edit, dict) or edit.get("weak") is not True:
+                continue
+            frm = edit.get("from")
+            to = edit.get("to")
+            if not isinstance(frm, str) or not isinstance(to, str):
+                continue
+            edits.append((_start_value(para), frm, to))
+    edits.sort(key=lambda e: e[0])
+    return edits
 
 
 def _residual_windows(transcript: dict[str, Any]) -> list[tuple[float, float]]:
@@ -178,6 +215,10 @@ def render_report(
       honestly (never a fabricated speaker list).
     - **Suspects**: ``⚠`` count plus the 3 worst timestamps (loop before
       garble before number, ties earliest start). Count 0 → section omitted.
+    - **Weak repairs**: the repair-audit edits explicitly marked
+      ``weak`` (kept on thin evidence): count plus the 3 earliest
+      ``[HH:MM:SS] from → to`` lines (a missing start omits the clock, an
+      empty ``to`` renders ``∅``). Count 0 → section omitted.
     - **Residual loops**: ``find_degenerate_windows`` over the FINAL
       segments; count and time windows. 0 → "none" rendered only when
       the section has something to anchor against; per the ticket, count
@@ -225,6 +266,17 @@ def render_report(
             f"({', '.join(suspect_labels)})"
             "\n" + "\n".join(worst_lines)
         )
+
+    # -- Weak repairs ---------------------------------------------------
+    weak = _weak_repairs(paragraphs)
+    if weak:
+        label = {"fi": "Heikot korjaukset", "en": "Weak repairs"}[lang]
+        weak_lines: list[str] = []
+        for start, frm, to in weak[:_MAX_WEAK_REPAIRS]:
+            stamp = _clock_or_none(start)
+            time_part = f"{stamp} " if stamp else ""
+            weak_lines.append(f"- {time_part}{frm} → {to or _EMPTY_TO}")
+        sections.append(f"{label}: {len(weak)}\n" + "\n".join(weak_lines))
 
     # -- Residual loops -------------------------------------------------
     windows = _residual_windows(transcript)

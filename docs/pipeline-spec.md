@@ -440,6 +440,13 @@ and `loop`; the `loop` category carries the `selfheal.heal` unhealed-wall
 warning with its seconds ("self-heal: 12s of repetition loops could not be
 repaired…"), which is the reader's only signal that a wall shipped.
 
+**Weak repairs in the report** (issue #278): the `Heikot korjaukset` /
+`Weak repairs` section counts the paragraph `repairs` audit edits marked
+`weak` (issue #274) and prints the 3 earliest as
+`[HH:MM:SS] from → to` (a paragraph without a valid `start` omits the
+clock, an empty `to` renders `∅`, malformed entries are skipped); count 0
+omits the section.
+
 ### 15. M5a JSON sidecar keys (issue #89)
 
 The dated `.json` written next to the `.md` by the `meeting` and `memo`
