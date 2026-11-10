@@ -118,7 +118,8 @@ To check the terms after a run: `vemoizer terms <x.json>` (or accept the
 post-call prompt) lists the call's term-like words least sure first; pick
 any number to hear the word in context and fix its spelling. Confirmed and
 corrected terms are saved to the folder's `.vemoizer/glossary.txt` and the
-Markdown is re-rendered.
+Markdown is re-rendered; a fix can also be kept for this call only (stored in
+the sidecar, never in the glossary).
 
 Two-track call (mic and system audio recorded separately):
 `vemoizer meeting call.m4a --mic-track call-me.wav --system-track call-them.wav --speakers 4`.

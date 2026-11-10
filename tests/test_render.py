@@ -106,6 +106,148 @@ def test_render_without_corrections_is_verbatim() -> None:
 
 
 # ---------------------------------------------------------------------------
+# call_corrections (issue #270): fixes kept for THIS call only
+# ---------------------------------------------------------------------------
+
+
+def test_render_applies_call_corrections_from_sidecar() -> None:
+    sidecar = _sidecar()
+    sidecar["call_corrections"] = {"Blacksit": "Vantaa", "epit*": "KPI"}
+    md = render_markdown(sidecar, corrections={}, speaker_names={})
+    assert "Vantaa-hankkeesta" in md
+    assert "Blacksit" not in md
+    assert "KPI selvitetään myöhemmin" in md
+
+
+def test_render_call_corrections_override_the_glossary_pair() -> None:
+    sidecar = _sidecar()
+    sidecar["call_corrections"] = {"Blacksit": "Vantaa"}
+    md = render_markdown(sidecar, corrections=_corrections(), speaker_names={})
+    assert "Vantaa" in md and "Flagship" not in md
+
+
+def test_render_call_correction_wins_case_insensitively() -> None:
+    """The term check keys the map by the stem as typed and a glossary pair is
+    written by hand, so ``Blacksit => Flagship`` and ``{blacksit: Vantaa}`` are
+    the SAME key: the call-only fix wins, it does not lose to the glossary."""
+    sidecar = _sidecar()
+    sidecar["call_corrections"] = {"blacksit": "Vantaa"}
+    md = render_markdown(sidecar, corrections=_corrections(), speaker_names={})
+    assert "Vantaa" in md and "Flagship" not in md and "Blacksit" not in md
+
+
+def test_render_call_correction_beats_a_glossary_wildcard() -> None:
+    """Correction pairs are applied in dict order, so the call-only fix must
+    come FIRST: a glossary wildcard that also covers the word (``epit*``)
+    would otherwise rewrite it before the exact call fix can match."""
+    sidecar = _sidecar()
+    sidecar["call_corrections"] = {"epittä": "EBITDA"}
+    md = render_markdown(sidecar, corrections={"epit*": "KPI"}, speaker_names={})
+    assert "EBITDA selvitetään myöhemmin" in md
+    assert "KPI" not in md
+
+
+def test_render_call_fix_right_side_is_never_re_touched() -> None:
+    """The call fix's OUTPUT is final: it is held as a token while the
+    glossary pairs run, so ``AVS => AWS`` cannot undo it."""
+    sidecar = _sidecar()
+    sidecar["paragraphs"][0]["text"] = "Puhuttiin APS-hankkeesta."
+    sidecar["call_corrections"] = {"APS": "AVS"}
+    md = render_markdown(sidecar, corrections={"AVS": "AWS"}, speaker_names={})
+    assert "AVS-hankkeesta" in md and "AWS" not in md
+
+
+def test_render_chained_call_fixes_are_order_independent() -> None:
+    """A call fix's output is never an input to another call fix: ``APS``
+    renders as ``AVS`` and the real ``AVS`` as ``AWS``, whichever way the
+    two pairs are ordered in the map."""
+    for call in ({"APS": "AVS", "AVS": "AWS"}, {"AVS": "AWS", "APS": "AVS"}):
+        sidecar = _sidecar()
+        sidecar["paragraphs"][0]["text"] = "Puhuttiin APS ja AVS."
+        sidecar["call_corrections"] = call
+        md = render_markdown(sidecar, corrections={}, speaker_names={})
+        assert "Puhuttiin AVS ja AWS." in md
+
+
+def test_render_glossary_still_fixes_a_word_a_call_fix_also_produces() -> None:
+    """The protection is per occurrence, not a blanket skip: the glossary
+    pair still rewrites the ``AVS`` that was really spoken."""
+    sidecar = _sidecar()
+    sidecar["paragraphs"][0]["text"] = "Puhuttiin APS ja AVS."
+    sidecar["call_corrections"] = {"APS": "AVS"}
+    md = render_markdown(sidecar, corrections={"AVS": "AWS"}, speaker_names={})
+    assert "Puhuttiin AVS ja AWS." in md
+
+
+def test_render_call_fix_keeps_a_case_suffix() -> None:
+    """``AVS:n`` (the form the term check is shown) keeps its case suffix."""
+    sidecar = _sidecar()
+    sidecar["paragraphs"][0]["text"] = "Puhuttiin AVS:n."
+    sidecar["call_corrections"] = {"AVS": "AWS"}
+    md = render_markdown(sidecar, corrections={}, speaker_names={})
+    assert "Puhuttiin AWS:n." in md
+
+
+def test_render_call_fix_right_side_survives_a_glossary_wildcard() -> None:
+    """The same rule under the wildcard rule of ``_compile_corrections``:
+    ``qwe*`` matches the stem of the word the call fix produced."""
+    sidecar = _sidecar()
+    sidecar["paragraphs"][0]["text"] = "Katsotaan QN2C demo."
+    sidecar["call_corrections"] = {"QN2C": "Qwen 27B"}
+    md = render_markdown(sidecar, corrections={"qwe*": "X"}, speaker_names={})
+    assert "Qwen 27B demo" in md and "X" not in md
+
+
+def test_render_unrelated_glossary_pair_still_applies_alongside_call_fixes() -> None:
+    """The token protection covers only the words the call fixes rewrote:
+    every other glossary pair applies in the very same render."""
+    sidecar = _sidecar()
+    sidecar["paragraphs"][0]["text"] = "Puhuttiin QN2C:stä Blacksit-hankkeesta."
+    sidecar["call_corrections"] = {"QN2C": "Qwen 27B"}
+    md = render_markdown(
+        sidecar,
+        corrections={"qwe*": "X", "Blacksit": "Flagship"},
+        speaker_names={},
+    )
+    assert "Qwen 27B:stä" in md and "X" not in md
+    assert "Flagship-hankkeesta" in md and "Blacksit" not in md
+
+
+def test_render_ignores_malformed_call_correction_entries() -> None:
+    control = render_markdown(_sidecar(), corrections={}, speaker_names={})
+    sidecar = _sidecar()
+    sidecar["call_corrections"] = {
+        "Blacksit": 42,  # non-str value
+        7: "Vantaa",  # non-str key
+        "": "X",  # empty key
+        "epit*": "",  # empty value
+    }
+    assert render_markdown(sidecar, corrections={}, speaker_names={}) == control
+
+
+def test_render_ignores_non_dict_call_corrections() -> None:
+    sidecar = _sidecar()
+    sidecar["call_corrections"] = "Blacksit => Vantaa"
+    md = render_markdown(sidecar, corrections={}, speaker_names={})
+    assert "Blacksit-hankkeesta" in md and "Vantaa" not in md
+
+
+def test_render_sidecar_without_call_corrections_key_is_stable() -> None:
+    """No key (the pre-#270 world) and an empty map render byte-identically."""
+    sidecar = _sidecar()
+    assert "call_corrections" not in sidecar
+    first = render_markdown(sidecar, corrections=_corrections(), speaker_names={})
+    assert (
+        render_markdown(_sidecar(), corrections=_corrections(), speaker_names={})
+        == first
+    )
+    sidecar["call_corrections"] = {}
+    assert (
+        render_markdown(sidecar, corrections=_corrections(), speaker_names={}) == first
+    )
+
+
+# ---------------------------------------------------------------------------
 # Speaker names: whole-word discipline
 # ---------------------------------------------------------------------------
 

@@ -428,6 +428,19 @@ them (present-only, so old JSON without the keys and the expert
   (the render command's `--name` persists into it atomically — temp
   file in the same directory + `os.replace`). A `clips` key is never
   written.
+- `call_corrections` — a `{wrong: right}` map written only by the
+  interactive term check (issue #270): fixes the operator kept for THIS
+  call only. Applied by every re-render BEFORE the glossary
+  corrections, and their output is PROTECTED: each fix's wrong side is
+  first swapped for a placeholder token, the glossary pairs run over the
+  tokenised text, and the tokens are swapped for the right sides last. So a
+  call fix's output is never re-touched — not by another call fix (the
+  render is order-independent: `{APS: AVS, AVS: AWS}` gives `AVS` for the
+  `APS` occurrence and `AWS` for the real `AVS`), not by a glossary pair —
+  while the glossary pairs still apply to every other word in the call, and
+  the call fix rewrites the word before any glossary wildcard (e.g. `epit*
+  => KPI`) can reach it; never in the glossary,
+  never in the Whisper prompt. Absent when there are none.
 - `duration_s` — the run's measured total PCM duration in seconds
   (float), mirrored into the JSON sidecar when present (e.g.
   `9.15`). Absent when the ffmpeg duration measurement failed
@@ -531,18 +544,38 @@ context line (`  [HH:MM:SS] <name>: "…before [WORD] after…"` from the sideca
 words) and plays a clip of the word's LOWEST-`p` occurrence padded ±1.5 s
 (`--no-play`, a missing source or a failed extraction skip playback silently).
 `Right spelling (Enter = it is right, r = replay, - = skip): `: Enter records
-the bare term, text `T` records the pair `STEM => T` plus the bare term `T`
-— always the group's case-suffix-free STEM, never the surface: `AVS:n`
-saves as `AVS => AWS`, and the re-render maps `AVS:n` to `AWS:n`.
+the bare term with no follow-up question, text `T` triggers one follow-up,
+`Use for later calls too (glossary)? [Y/n] `: empty/y/yes/k/kyllä records the
+pair `STEM => T` plus the bare term `T` — always the group's case-suffix-free
+STEM, never the surface: `AVS:n` saves as `AVS => AWS`, and the re-render
+maps `AVS:n` to `AWS:n`; n/no/ei keeps the fix for THIS call only, storing
+`{STEM: T}` in the sidecar's `call_corrections` map (never a glossary line).
+The reply is read case-insensitively and any other reply re-asks the same
+prompt. Answers key on the lower-cased stem, so re-picking a word replaces
+its earlier answer whichever kind it was. Ctrl-D/Ctrl-C at the follow-up
+prompt drops this pick's new answer (an earlier answer for that word stays)
+and stops the loop like at the spelling prompt, keeping the earlier answers.
 `r` replays, `-` skips; a word may be revisited, the last answer wins.
-Ctrl-D/Ctrl-C at any prompt stop the loop with the answers kept. On yes at
-`Save to <./.vemoizer/glossary.txt>?`, `src/vemoizer/glossary_write.py`
+Ctrl-D/Ctrl-C at any prompt stop the loop with the answers kept. The save
+confirmation lists both groups — `Save to <./.vemoizer/glossary.txt>?` plus
+the glossary lines, and `This call only:` plus `STEM => T` lines (only
+non-empty groups print; with no glossary lines the first header is `Save?`) —
+under one `[Y/n] `. On yes, `src/vemoizer/glossary_write.py`
 appends the lines to the nearest project glossary (never the home one;
 duplicates skipped case-insensitively, wrong side for pairs; wildcard `*`
-pairs never written; atomic tmp + `os.replace`), the `.md` is re-rendered
-once with the fresh corrections (`wrote <name>.md`), and one counts-only
-INFO line is logged (`term check: listed N, heard H, corrected C, confirmed
-K` — never the words). `n` prints `not saved`. Non-TTY exits 2.
+pairs never written; atomic tmp + `os.replace`), the call-only fixes are
+merged into the sidecar's `call_corrections` atomically (the same
+`render_cli._atomic_write_text` pattern as `_persist_speaker_names`; an
+OSError exits 1): every word answered in this session — glossary or
+this-call — drops its stored entry first, the new this-call fixes go on top,
+and the key is deleted when the map ends up empty; the sidecar is written
+only when that changes the stored map. The home-folder refusal guards only
+the glossary write: when the glossary lines are refused nothing is saved at
+all, and a this-call-only save (no glossary lines) goes ahead. The `.md` is
+then re-rendered once with the fresh corrections (`wrote <name>.md`), and one
+counts-only INFO line is logged (`term check: listed N, heard H, corrected C,
+confirmed K, call-only C2` — never the words). `n` prints `not saved`.
+Non-TTY exits 2.
 
 The post-meeting hook (`src/vemoizer/terms_hook.py`) asks `Check the terms
 in this transcript? [y/N] ` right after the naming hook for `meeting` runs,

@@ -14,6 +14,7 @@ unreadable sidecar or failed write, 2 non-TTY stdin.
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from collections.abc import Callable
@@ -57,6 +58,11 @@ CLIP_PAD_S = 1.5
 _LIST_HEADER = "Terms in this call, least sure first:"
 _PICK_PROMPT = "Number to hear and fix (Enter when done): "
 _SPELL_PROMPT = "  Right spelling (Enter = it is right, r = replay, - = skip): "
+_KEEP_PROMPT = "  Use for later calls too (glossary)? [Y/n] "
+#: Replies at the keep prompt that mean "yes, a glossary pair" (case-insensitive).
+_KEEP_GLOSSARY = ("", "y", "yes", "k", "kyllä")
+#: Replies that mean "this call only" (case-insensitive).
+_KEEP_CALL_ONLY = ("n", "no", "ei")
 _BAD_NUMBER = "type a number from the list, or Enter when done"
 _NO_CLIP = "  no clip to replay"
 _HOME_REFUSAL = "not saved: run this from the meeting's folder, not your home folder"
@@ -66,17 +72,37 @@ class _Abort:
     """Sentinel: EOFError/KeyboardInterrupt at a prompt — keep what we have."""
 
 
+def _ask_keep(ask: Callable[[str], str | _Abort]) -> bool | _Abort:
+    """Ask :data:`_KEEP_PROMPT` until a valid reply.
+
+    True means "a glossary pair", False "this call only"; anything else
+    re-asks the same prompt, so a typo cannot silently become a glossary
+    write (or a call-only fix).
+    """
+    while True:
+        reply = ask(_KEEP_PROMPT)
+        if isinstance(reply, _Abort):
+            return reply
+        verdict = reply.strip().lower()
+        if verdict in _KEEP_CALL_ONLY:
+            return False
+        if verdict in _KEEP_GLOSSARY:
+            return True
+
+
 def _save(
     ask: Callable[[str], str | _Abort],
     sidecar_path: Path,
     data: dict[str, Any],
     speaker_names: dict[str, str],
     answers: dict[str, list[str]],
+    call_only: dict[str, tuple[str, str]],
     heard: int,
     listed: int,
 ) -> int:
-    """The save step: ask, append to the glossary, re-render the .md once."""
-    if not answers:
+    """The save step: ask, append to the glossary, reconcile the sidecar's
+    call-only fixes with this session's answers, re-render the .md once."""
+    if not answers and not call_only:
         return 0
     lines = [line for entry in answers.values() for line in entry]
     target = project_glossary_path()
@@ -84,22 +110,57 @@ def _save(
         shown = str(target.relative_to(Path.cwd()))
     except ValueError:
         shown = str(target)
-    typer.echo(f"Save to {shown}?")
-    for line in lines:
-        typer.echo(f"  {line}")
+    if lines:
+        typer.echo(f"Save to {shown}?")
+        for line in lines:
+            typer.echo(f"  {line}")
+    else:
+        typer.echo("Save?")
+    if call_only:
+        typer.echo("This call only:")
+        for stem, spelling in call_only.values():
+            typer.echo(f"  {stem} => {spelling}")
     reply = ask("[Y/n] ")
     if isinstance(reply, _Abort) or reply.strip().lower() not in ("", "y", "yes"):
         typer.echo("not saved")
         return 0
-    try:
-        append_to_project_glossary(lines)
-    except HomeGlossaryWriteError:
-        # cwd is $HOME: the project fallback would write the home layer.
-        typer.echo(_HOME_REFUSAL)
-        return 0
-    except OSError as e:
-        typer.echo(f"error: could not write {target}: {e}", err=True)
-        return 1
+    if lines:
+        try:
+            append_to_project_glossary(lines)
+        except HomeGlossaryWriteError:
+            # cwd is $HOME and no project glossary was found: the fallback
+            # target would be the home layer. Only a GLOSSARY write is
+            # refused, so with glossary lines nothing is saved here; a
+            # call-only-only save (no glossary lines) never reaches this
+            # handler and goes ahead.
+            typer.echo(_HOME_REFUSAL)
+            return 0
+        except OSError as e:
+            typer.echo(f"error: could not write {target}: {e}", err=True)
+            return 1
+    # A word answered in THIS session (either kind) supersedes whatever the
+    # sidecar still carries for it, so a stored fix cannot outlive the
+    # answer that replaced it; the new call-only fixes go on top.
+    stored = data.get("call_corrections")
+    stored_map: dict[str, Any] = dict(stored) if isinstance(stored, dict) else {}
+    answered = {key.lower() for key in answers} | {key.lower() for key in call_only}
+    merged: dict[str, Any] = {
+        k: v for k, v in stored_map.items() if str(k).lower() not in answered
+    }
+    merged.update({stem: spelling for stem, spelling in call_only.values()})
+    if merged != stored_map:
+        if merged:
+            data["call_corrections"] = merged
+        else:
+            data.pop("call_corrections", None)
+        try:
+            _atomic_write_text(
+                sidecar_path,
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            )
+        except OSError as e:
+            typer.echo(f"error: could not write {sidecar_path}: {e}", err=True)
+            return 1
     corrections = _load_corrections(_resolve_glossary_files(None))
     markdown = render_markdown(
         data, corrections=corrections, speaker_names=speaker_names
@@ -113,11 +174,12 @@ def _save(
     typer.echo(f"wrote {md_path.name}")
     corrected = sum(1 for a in answers.values() if any("=>" in ln for ln in a))
     logger.info(
-        "term check: listed %d, heard %d, corrected %d, confirmed %d",
+        "term check: listed %d, heard %d, corrected %d, confirmed %d, call-only %d",
         listed,
         heard,
         corrected,
         len(answers) - corrected,
+        len(call_only),
     )
     return 0
 
@@ -192,7 +254,10 @@ def run_terms(
         return True
 
     # stem (lower) -> glossary lines for the word; the last answer wins.
+    # ``call_only`` holds the same-keyed this-call fixes ({STEM: T}); a word
+    # cannot be in both kinds at once — the last answer replaces the other.
     answers: dict[str, list[str]] = {}
+    call_only: dict[str, tuple[str, str]] = {}
     heard = 0
     aborted = False
     with clip_session() as tmp_dir:
@@ -251,15 +316,36 @@ def run_terms(
                     # punctuation (``AVS:n``); the correction maps the stem
                     # and the render re-attaches the suffix.
                     key = cand.stem.lower()
-                    answers[key] = (
-                        [cand.stem]
-                        if not answer
-                        else [f"{cand.stem} => {answer}", answer]
-                    )
+                    if not answer:
+                        answers[key] = [cand.stem]
+                        call_only.pop(key, None)
+                    else:
+                        keep = _ask_keep(_ask)
+                        if isinstance(keep, _Abort):
+                            # Ctrl-D/Ctrl-C here drops THIS pick's new
+                            # answer only — an earlier answer for the word
+                            # (either kind) stays — and stops the loop like
+                            # Ctrl-D at the spelling prompt, keeping the
+                            # earlier answers for the save step.
+                            aborted = True
+                            break
+                        if keep:
+                            answers[key] = [f"{cand.stem} => {answer}", answer]
+                            call_only.pop(key, None)
+                        else:
+                            call_only[key] = (cand.stem, answer)
+                            answers.pop(key, None)
                 break
 
     return _save(
-        _ask, sidecar_path, data, speaker_names, answers, heard, len(candidates)
+        _ask,
+        sidecar_path,
+        data,
+        speaker_names,
+        answers,
+        call_only,
+        heard,
+        len(candidates),
     )
 
 
