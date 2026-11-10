@@ -306,6 +306,36 @@ over 24 K chars are map-reduced in ~12 K-char chunks. Any failure returns
 no notes and lands one line in the run's warnings — the transcript is
 never affected.
 
+#### LLM repair pass and its token guard (issue #272)
+
+The other half of the LLM tail (`src/vemoizer/repair.py` +
+`src/vemoizer/repair_guard.py`, driven by `llm_tail.apply_llm_tail`).
+Every candidate passes two guards. The paragraph guard rejects outright a
+rewrite that ballooned past `MAX_GROWTH` (1.3x) or fell under
+`MIN_SIMILARITY` (0.5) — invention or paraphrase. What survives is
+re-walked token by token (`guard_tokens`: whitespace tokens compared on
+their `textnorm` forms), so a long paragraph cannot hide a single bad
+edit:
+
+- an `equal` token ships as the candidate wrote it (case and punctuation
+  changes are free);
+- a `replace` run is kept when its two sides are at least
+  `TOKEN_MIN_SIMILARITY` (0.5) similar — a phonetic fix keeps most of its
+  characters, an unrelated word does not — or when it is the prompt's
+  `[epäselvä]` / `[unclear]` marker; otherwise the ORIGINAL run ships back
+  (glossary over-steering such as "IBS" -> "IBC-kontti" dies here);
+- an `insert` is always reverted: the model adds nothing nobody spoke;
+- a `delete` of at most `MAX_DELETE_RUN` (2) tokens is filler removal and
+  stays deleted; a longer run is content and ships back.
+
+Reverted runs are reported in one counts-only INFO line (no transcript
+text — privacy contract). An all-filler paragraph whose text the guard
+empties is caught by the paragraph guard, which never accepts an empty or
+low-similarity result. Because a repair may also rewrite a term the
+deterministic glossary had already corrected, `apply_llm_tail` re-applies
+the correction table to the paragraphs AFTER the repair pass, under the
+same `corrections and paragraphs` guard as the pre-repair application.
+
 ### 13. Output formatting
 
 `src/vemoizer/output/`. Formats: `txt`, `json`, `srt`, `vtt`, `md`

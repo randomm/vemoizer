@@ -6,7 +6,10 @@ recovers real words from garble ("parastaa" -> "parantaa",
 fixed almost nothing. The stage runs over the assembled paragraphs, after
 consensus — it repairs *presentation*, never the record: every repair
 passes a no-invention guard, and anything the guard rejects (ballooned
-length, low similarity = paraphrase) ships as the original.
+length, low similarity = paraphrase) ships as the original. A paragraph
+that passes that guard still goes through the token guard
+(:mod:`vemoizer.repair_guard`), which reverts the individual edits inside
+it that were not phonetic fixes.
 
 Fail-open like every LLM stage (invariant #5): no config, no key, any
 error — the paragraphs pass through untouched. A per-stage wall-clock
@@ -25,6 +28,7 @@ from typing import Any
 from .llm import LLMClient
 from .llm_budget import StageBudget
 from .progress import PROGRESS_INTERVAL_S, format_duration
+from .repair_guard import guard_tokens
 from .slice_align import slice_similarity
 
 logger = logging.getLogger(__name__)
@@ -125,6 +129,9 @@ def repair_paragraphs(
     total = len(paragraphs)
     repaired: list[dict[str, Any]] = []
     fixed = 0
+    reverted_replace = 0
+    reverted_insert = 0
+    reverted_delete = 0
     processed = 0
     last_heartbeat = 0.0
     budget_exhausted = False
@@ -160,9 +167,15 @@ def repair_paragraphs(
             grew_too_much = len(candidate) > len(original) * MAX_GROWTH
             paraphrased = slice_similarity(original, candidate) < MIN_SIMILARITY
             if not grew_too_much and not paraphrased:
-                if candidate != original:
+                # Paragraph-level guard passed; the token guard then
+                # reverts the single-word swaps, insertions and content
+                # deletions the whole-paragraph checks cannot see.
+                text, stats = guard_tokens(original, candidate)
+                reverted_replace += stats.reverted_replace
+                reverted_insert += stats.reverted_insert
+                reverted_delete += stats.reverted_delete
+                if text != original:
                     fixed += 1
-                text = candidate
             else:
                 logger.info("repair rejected by guard (kept original paragraph)")
         repaired.append({**para, "text": text})
@@ -194,4 +207,12 @@ def repair_paragraphs(
         )
     if fixed:
         logger.info("repair: %d/%d paragraphs corrected", fixed, len(paragraphs))
+    if reverted_replace or reverted_insert or reverted_delete:
+        # Counts only, never transcript text (privacy contract).
+        logger.info(
+            "repair guard: reverted %d replaced, %d inserted, %d deleted runs",
+            reverted_replace,
+            reverted_insert,
+            reverted_delete,
+        )
     return repaired

@@ -289,3 +289,129 @@ def test_default_and_fi_repair_prompts_are_unchanged() -> None:
     assert "foneettisesti" in _REPAIR_SYSTEM_PROMPT
     fi_with_glossary = _systems(glossary=["Flagship-hanke"])[0]
     assert "Sanasto (oikeat kirjoitusasut): Flagship-hanke" in fi_with_glossary
+
+
+# -- token guard inside an accepted candidate (issue #272) ----------------
+#
+# The paragraph-level guard cannot see a single unrelated word swap in a
+# long paragraph: the token guard reverts exactly that edit and keeps the
+# phonetic fixes around it.
+
+
+def test_token_guard_reverts_an_unrelated_swap_but_keeps_the_fix() -> None:
+    original = "hyvä juttu että kokous eteni näin rotkeasti ja IBS nousi esiin"
+    candidate = "hyvä juttu että kokous eteni näin rohkeasti ja IBC-kontti nousi esiin"
+    out = repair_paragraphs(_client([candidate]), [_para(original)])
+    # 'rotkeasti' -> 'rohkeasti' is phonetic and stays; the glossary
+    # over-steering swapped IBS for an unrelated term and ships reverted.
+    assert out[0]["text"] == (
+        "hyvä juttu että kokous eteni näin rohkeasti ja IBS nousi esiin"
+    )
+
+
+def test_token_guard_logs_counts_only(caplog) -> None:
+    """One INFO line about what the token guard reverted — never text."""
+    import logging
+
+    original = "meillä on IBS tänään ja huomenna kaikki asia käsitelty nyt"
+    candidate = "meillä on IBC-kontti tänään todella ja huomenna kaikki"
+    with caplog.at_level(logging.INFO, logger="vemoizer.repair"):
+        repair_paragraphs(_client([candidate]), [_para(original)])
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if r.getMessage().startswith("repair guard:")
+    ]
+    assert lines, "the token guard reverted runs but logged nothing"
+    line = lines[0]
+    # swap reverted, insert reverted, 3-word content deletion reverted.
+    assert "reverted 1 replaced, 1 inserted, 1 deleted runs" in line
+    for word in ("IBS", "IBC", "kontti", "meillä", "todella", "käsitelty"):
+        assert word not in line
+
+
+# -- corrections survive the repair pass (issue #272) ---------------------
+
+
+def test_repair_cannot_undo_a_deterministic_correction() -> None:
+    """The glossary corrections are re-applied AFTER the repair pass.
+
+    A model that rewrites a corrected term back into its garbled form is
+    overruled by the deterministic table (``apply_llm_tail``, llm_tail).
+    """
+    import vemoizer.llm_tail as lt
+    from vemoizer.llm_config import LLMConfig
+
+    class _Client:
+        def __init__(self, config: Any = None) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    def undoing_repair(client: Any, paragraphs: list[dict], **kw: Any) -> list[dict]:
+        return [
+            {**p, "text": p["text"].replace("Flagship", "Blacksit")} for p in paragraphs
+        ]
+
+    config = LLMConfig(
+        base_url="http://localhost:9999/v1",
+        model="test",
+        api_key_env="VEMOIZER_TEST_KEY",
+        timeout_seconds=10.0,
+    )
+    result: dict[str, Any] = {
+        "text": "käytämme Flagship-hanketta",
+        "paragraphs": [{"text": "käytämme Flagship-hanketta"}],
+    }
+    lt.apply_llm_tail(
+        result,
+        config,
+        repair=True,
+        corrections={"Blacksit": "Flagship"},
+        glossary=None,
+        repair_paragraphs_fn=undoing_repair,
+        generate_notes_fn=lambda client, text, **kw: {"title": "T"},
+        llm_client_cls=_Client,
+    )
+    assert result["paragraphs"][0]["text"] == "käytämme Flagship-hanketta"
+
+
+def test_double_correction_application_does_not_double_the_term() -> None:
+    """The table is applied before AND after the repair pass; with a
+    no-op repair that is two applications, which must be idempotent:
+    "IBC" -> "IBC-kontti" may not compound into "IBC-kontti-kontti"."""
+    import vemoizer.llm_tail as lt
+    from vemoizer.llm_config import LLMConfig
+
+    class _Client:
+        def __init__(self, config: Any = None) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    def noop_repair(client: Any, paragraphs: list[dict], **kw: Any) -> list[dict]:
+        return paragraphs
+
+    config = LLMConfig(
+        base_url="http://localhost:9999/v1",
+        model="test",
+        api_key_env="VEMOIZER_TEST_KEY",
+        timeout_seconds=10.0,
+    )
+    result: dict[str, Any] = {
+        "text": "käytämme IBC-kontti ja IBC",
+        "paragraphs": [{"text": "käytämme IBC-kontti ja IBC"}],
+    }
+    lt.apply_llm_tail(
+        result,
+        config,
+        repair=True,
+        corrections={"IBC": "IBC-kontti"},
+        glossary=None,
+        repair_paragraphs_fn=noop_repair,
+        generate_notes_fn=lambda client, text, **kw: {"title": "T"},
+        llm_client_cls=_Client,
+    )
+    assert result["paragraphs"][0]["text"] == "käytämme IBC-kontti ja IBC-kontti"

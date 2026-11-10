@@ -198,6 +198,11 @@ def apply_llm_tail(
             tracker,
             language,
         )
+        # A repair must never undo a deterministic glossary fix: the model
+        # may rewrite a corrected term back into its garbled form, so the
+        # same table is re-applied after the pass, guarded identically.
+        if corrections and result.get("paragraphs"):
+            result["paragraphs"] = apply_corrections(result["paragraphs"], corrections)
     if llm_config is not None and result.get("text"):
         _run_notes(
             result,
