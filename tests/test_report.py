@@ -562,3 +562,144 @@ def test_build_quality_report_includes_lost_windows() -> None:
     t = _transcript(lost_windows=[(60.0, 90.0)])
     result = build_quality_report(t)
     assert "Häviäkkäiset ikkunat: 1" in result
+
+
+# ---------------------------------------------------------------------------
+# Weak repairs (issue #278)
+# ---------------------------------------------------------------------------
+
+
+def _weak_transcript() -> dict:
+    """Two weak edits in the earliest paragraph, one each in two later ones."""
+    return {
+        "text": "x",
+        "paragraphs": [
+            {
+                "start": 0.0,
+                "end": 5.0,
+                "text": "a",
+                "repairs": [
+                    {"from": "deploy", "to": "deployment", "weak": True},
+                    {"from": "pii", "to": "pii-ohjelma", "weak": True},
+                ],
+            },
+            {
+                "start": 65.0,
+                "end": 70.0,
+                "text": "b",
+                "repairs": [{"from": "canary", "to": "Canary", "weak": True}],
+            },
+            {
+                "start": 3600.0,
+                "end": 75.0,
+                "text": "c",
+                "repairs": [{"from": "viimeinen", "to": "viimeisin", "weak": True}],
+            },
+        ],
+    }
+
+
+def test_weak_repairs_absent_without_repairs() -> None:
+    result = render_report(_transcript())
+    assert "Heikot korjaukset" not in result
+    assert "Weak repairs" not in result
+
+
+def test_weak_repairs_absent_when_all_edits_strong() -> None:
+    t = {
+        "text": "x",
+        "paragraphs": [
+            {
+                "start": 0.0,
+                "end": 5.0,
+                "text": "a",
+                "repairs": [{"from": "deploy", "to": "deployment", "weak": False}],
+            },
+        ],
+    }
+    result = render_report(t)
+    assert "Heikot korjaukset" not in result
+
+
+def test_weak_repairs_counts_all_and_shows_three_earliest() -> None:
+    result = render_report(_weak_transcript())
+    assert "Heikot korjaukset: 4" in result
+    assert "- [00:00:00] deploy → deployment" in result
+    assert "- [00:00:00] pii → pii-ohjelma" in result
+    assert "- [00:01:05] canary → Canary" in result
+    # The 4th (latest paragraph) is not listed.
+    assert "viimeinen" not in result
+
+
+def test_weak_repairs_lists_earliest_paragraphs_in_order() -> None:
+    result = render_report(_weak_transcript())
+    assert result.index("deploy → deployment") < result.index("canary → Canary")
+
+
+def test_weak_repairs_ignores_malformed_entries() -> None:
+    t = {
+        "text": "x",
+        "paragraphs": [
+            {"start": 0.0, "end": 1.0, "text": "a", "repairs": "not-a-list"},
+            {"start": 1.0, "end": 2.0, "text": "b", "repairs": ["nope", 5]},
+            {
+                "start": 2.0,
+                "end": 3.0,
+                "text": "c",
+                "repairs": [
+                    {"from": 1, "to": "x", "weak": True},
+                    {"from": "putki", "to": "putki-ohjelma", "weak": True},
+                ],
+            },
+        ],
+    }
+    result = render_report(t)
+    assert "Heikot korjaukset: 1" in result
+    assert "- [00:00:02] putki → putki-ohjelma" in result
+
+
+def test_weak_repairs_english_label() -> None:
+    result = render_report(_weak_transcript(), language="en")
+    assert "Weak repairs: 4" in result
+    assert "Heikot korjaukset" not in result
+
+
+def test_weak_repairs_without_start_omits_clock() -> None:
+    t = {
+        "text": "x",
+        "paragraphs": [
+            {
+                "end": 5.0,
+                "text": "a",
+                "repairs": [{"from": "deploy", "to": "deployment", "weak": True}],
+            },
+        ],
+    }
+    result = render_report(t)
+    assert "Heikot korjaukset: 1" in result
+    assert "- deploy → deployment" in result
+
+
+def test_weak_repairs_empty_to_renders_empty_set() -> None:
+    t = {
+        "text": "x",
+        "paragraphs": [
+            {
+                "start": 0.0,
+                "end": 5.0,
+                "text": "a",
+                "repairs": [{"from": "joo", "to": "", "weak": True}],
+            },
+        ],
+    }
+    result = render_report(t)
+    assert "- [00:00:00] joo → ∅" in result
+
+
+def test_weak_repairs_section_follows_suspects() -> None:
+    t = _weak_transcript()
+    t["paragraphs"].insert(
+        0, {"start": 0.0, "end": 1.0, "text": "garble", "suspect": "garble"}
+    )
+    result = render_report(t)
+    assert result.index("Epävarmat kohdat") < result.index("Heikot korjaukset")
