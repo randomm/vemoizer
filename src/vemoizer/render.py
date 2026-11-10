@@ -57,6 +57,20 @@ def _apply_names_to_items(items: list[str], rename: dict[str, str]) -> list[str]
     return renamed
 
 
+def _call_corrections(sidecar: dict[str, Any]) -> dict[str, str]:
+    """The sidecar's ``call_corrections`` map (issue #270): ``{wrong: right}``
+    fixes the term check kept for THIS call only. Fail-open — a non-dict
+    value, or any non-str/empty key or value, is ignored."""
+    raw = sidecar.get("call_corrections")
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        k: v
+        for k, v in raw.items()
+        if isinstance(k, str) and isinstance(v, str) and k and v
+    }
+
+
 def _render_dict(
     sidecar: dict[str, Any],
     *,
@@ -67,10 +81,29 @@ def _render_dict(
     out = copy.deepcopy(sidecar)
 
     # Corrections first: names applied to owner prefixes must match the
-    # post-correction labels the notes actually carry.
+    # post-correction labels the notes actually carry. The sidecar's
+    # call-only fixes (issue #270) are applied BEFORE the glossary pairs and
+    # their output is PROTECTED: every call fix's wrong side is swapped for
+    # a placeholder token, the glossary pairs run over the tokenised text —
+    # they still apply to every other word in the call — and only then are
+    # the tokens swapped for the fixes' right sides. So a call fix's output
+    # is final: never re-touched by another call fix (``{APS: AVS, AVS: AWS}``
+    # renders "AVS" and "AWS", whatever the dict order) nor by a glossary
+    # pair, and the fix rewrites the word before a glossary wildcard such as
+    # ``epit* => KPI`` can reach it. ``_`` is a word character, so the
+    # whole-word patterns of ``_compile_corrections`` match the tokens, and
+    # no realistic glossary wrong side starts with ``__``.
+    call = _call_corrections(sidecar)
+    keys = sorted(call, key=len, reverse=True)
+    to_token = {key: f"__vmzcall{i}__" for i, key in enumerate(keys)}
+    from_token = {f"__vmzcall{i}__": call[key] for i, key in enumerate(keys)}
+    steps = [step for step in (to_token, corrections, from_token) if step]
+
     notes = out.get("notes")
     if isinstance(notes, dict) and notes:
-        out["notes"] = apply_corrections_to_notes(notes, corrections)
+        for step in steps:
+            notes = apply_corrections_to_notes(notes, step)
+        out["notes"] = notes
 
     paragraphs = out.get("paragraphs")
     if isinstance(paragraphs, list) and paragraphs:
@@ -78,9 +111,10 @@ def _render_dict(
         # ``format_md`` does the same — a corrupted sidecar can carry
         # non-dict entries, so drop them here
         # rather than raising ``AttributeError`` downstream.
-        out["paragraphs"] = [p for p in paragraphs if isinstance(p, dict)] or None
-        if out["paragraphs"]:
-            out["paragraphs"] = apply_corrections(out["paragraphs"], corrections)
+        kept = [p for p in paragraphs if isinstance(p, dict)]
+        for step in steps:
+            kept = apply_corrections(kept, step)
+        out["paragraphs"] = kept or None
 
     # Speaker names: ``--name`` rewrites a label to a display name; the
     # stored sidecar ``speaker_names`` (persisted by a previous render) is
@@ -164,10 +198,15 @@ def render_markdown(
     Re-applies *corrections* (whole-word ``wrong => right`` pairs, via
     ``apply_corrections`` / ``apply_corrections_to_notes``) and the
     *speaker_names* label rewrites to the sidecar's paragraphs, segments
-    and notes (including flat action-item owner prefixes), then calls
-    ``format_md``. Notes are re-emitted from the sidecar verbatim apart
-    from those rewrites; the LLM is never invoked. Old sidecars missing
-    the M5a keys render unchanged.
+    and notes (including flat action-item owner prefixes). A
+    ``call_corrections`` map in the *sidecar* (the fixes the term check kept
+    for this call only, issue #270) is applied first and its output is
+    protected by placeholder tokens, so a call fix's output is never
+    re-touched by another call fix or by a glossary pair; the glossary pairs
+    still apply to every other word in the call. Then calls
+    ``format_md``. Notes are re-emitted from the sidecar verbatim apart from
+    those rewrites; the LLM is never invoked. Old sidecars missing the M5a
+    keys render unchanged.
     """
     from vemoizer.output.markdown import format_md
 

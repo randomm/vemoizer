@@ -7,6 +7,7 @@ these tests NEVER play audio.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -153,7 +154,7 @@ class TestHearAndFix:
         self, env: dict[str, Any]
     ) -> None:
         path = _sidecar(env["cwd"])
-        rc = _run(env, path, _Inputs("1", "AVS", "", "y"))
+        rc = _run(env, path, _Inputs("1", "AVS", "", "", "y"))
         assert rc == 0
         glossary = env["cwd"] / ".vemoizer" / "glossary.txt"
         assert glossary.read_text(encoding="utf-8") == "APS => AVS\nAVS\n"
@@ -175,7 +176,7 @@ class TestHearAndFix:
         """``AVS:n`` corrects to AWS as ``AVS => AWS``; the render keeps the
         suffix: the .md shows ``AWS:n``."""
         path = _sidecar(env["cwd"], word="AVS:n")
-        rc = _run(env, path, _Inputs("1", "AWS", "", "y"))
+        rc = _run(env, path, _Inputs("1", "AWS", "", "", "y"))
         assert rc == 0
         glossary = env["cwd"] / ".vemoizer" / "glossary.txt"
         assert glossary.read_text(encoding="utf-8") == "AVS => AWS\nAWS\n"
@@ -205,7 +206,7 @@ class TestHearAndFix:
 
     def test_revisit_last_answer_wins(self, env: dict[str, Any]) -> None:
         path = _sidecar(env["cwd"])
-        _run(env, path, _Inputs("1", "X", "1", "", "", "y"))
+        _run(env, path, _Inputs("1", "X", "y", "1", "", "", "y"))
         glossary = env["cwd"] / ".vemoizer" / "glossary.txt"
         assert glossary.read_text(encoding="utf-8") == "APS\n"
 
@@ -227,7 +228,7 @@ class TestHearAndFix:
     ) -> None:
         """--no-play: ``r`` re-prompts (message once) and cannot save "r"."""
         path = _sidecar(env["cwd"])
-        rc = _run(env, path, _Inputs("1", "r", "r", "AVS", "", "y"), no_play=True)
+        rc = _run(env, path, _Inputs("1", "r", "r", "AVS", "", "", "y"), no_play=True)
         assert rc == 0
         assert env["echoes"].count("  no clip to replay") == 1
         glossary = env["cwd"] / ".vemoizer" / "glossary.txt"
@@ -245,8 +246,8 @@ class TestHearAndFix:
 class TestSaveAndAbort:
     def test_ctrl_d_keeps_answers_and_saves(self, env: dict[str, Any]) -> None:
         path = _sidecar(env["cwd"])
-        # pick, fix, then Ctrl-D at the pick prompt; "y" answers the save.
-        rc = _run(env, path, _Inputs("1", "AVS", None, "y"))
+        # pick, fix, keep, then Ctrl-D at the pick prompt; "y" answers the save.
+        rc = _run(env, path, _Inputs("1", "AVS", "", None, "y"))
         assert rc == 0
         glossary = env["cwd"] / ".vemoizer" / "glossary.txt"
         assert glossary.read_text(encoding="utf-8") == "APS => AVS\nAVS\n"
@@ -286,8 +287,9 @@ class TestSaveAndAbort:
             if len(plays) == 2:
                 raise KeyboardInterrupt
 
-        # pick+fix, then a second pick whose playback is interrupted; "y" saves.
-        rc = _run(env, path, _Inputs("1", "AVS", "1", "y"), play_fn=play_fn)
+        # pick+fix+keep, then a second pick whose playback is interrupted;
+        # "y" saves.
+        rc = _run(env, path, _Inputs("1", "AVS", "y", "1", "y"), play_fn=play_fn)
         assert rc == 0
         assert len(plays) == 2
         glossary = env["cwd"] / ".vemoizer" / "glossary.txt"
@@ -306,7 +308,7 @@ class TestSaveAndAbort:
                 raise KeyboardInterrupt
             return real_extract(source, windows, tmp)
 
-        rc = _run(env, path, _Inputs("1", "AVS", "1", "y"), extract_fn=extract_fn)
+        rc = _run(env, path, _Inputs("1", "AVS", "y", "1", "y"), extract_fn=extract_fn)
         assert rc == 0
         assert len(calls) == 2
         glossary = env["cwd"] / ".vemoizer" / "glossary.txt"
@@ -318,7 +320,7 @@ class TestSaveAndAbort:
         """HOME == cwd, no project glossary: refuse, no write, no re-render."""
         monkeypatch.setenv("HOME", str(env["cwd"]))
         path = _sidecar(env["cwd"])
-        rc = _run(env, path, _Inputs("1", "AVS", "", "y"))
+        rc = _run(env, path, _Inputs("1", "AVS", "", "", "y"))
         assert rc == 0
         assert (
             "not saved: run this from the meeting's folder, not your home folder"
@@ -329,28 +331,26 @@ class TestSaveAndAbort:
 
     def test_n_at_save_writes_nothing(self, env: dict[str, Any]) -> None:
         path = _sidecar(env["cwd"])
-        assert _run(env, path, _Inputs("1", "AVS", "", "n")) == 0
+        assert _run(env, path, _Inputs("1", "AVS", "", "", "n")) == 0
         assert "not saved" in env["echoes"]
         assert not (env["cwd"] / ".vemoizer").exists()
         assert not (env["cwd"] / "run.md").exists()
 
     def test_save_prompt_lists_the_lines(self, env: dict[str, Any]) -> None:
         path = _sidecar(env["cwd"])
-        _run(env, path, _Inputs("1", "AVS", "", "y"))
+        _run(env, path, _Inputs("1", "AVS", "", "", "y"))
         i = env["echoes"].index("Save to .vemoizer/glossary.txt?")
         assert env["echoes"][i + 1 : i + 3] == ["  APS => AVS", "  AVS"]
 
     def test_counts_only_log(
         self, env: dict[str, Any], caplog: pytest.LogCaptureFixture
     ) -> None:
-        import logging
-
         path = _sidecar(env["cwd"])
         with caplog.at_level(logging.INFO, logger="vemoizer.term_check_cli"):
-            _run(env, path, _Inputs("1", "AVS", "", "y"))
+            _run(env, path, _Inputs("1", "AVS", "", "", "y"))
         line = next(r for r in caplog.records if "term check:" in r.getMessage())
         assert line.getMessage() == (
-            "term check: listed 1, heard 1, corrected 1, confirmed 0"
+            "term check: listed 1, heard 1, corrected 1, confirmed 0, call-only 0"
         )
         assert "APS" not in line.getMessage()
 
@@ -364,3 +364,206 @@ class TestCommand:
         path.write_text(json.dumps({"text": "joo"}), encoding="utf-8")
         result = runner.invoke(app, ["terms", str(path)])
         assert result.exit_code == 2
+
+
+def _two_term_sidecar(tmp_path: Path) -> Path:
+    """The fixture sidecar plus a second term-shaped word: pick 1 is APS
+    (score 1.2), pick 2 is KXQ (score 1.05) — both acronyms, so deterministic."""
+    path = _sidecar(tmp_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["words"].append({"word": "KXQ", "start": 3.5, "end": 3.8, "p": 0.3})
+    data["paragraphs"][0]["text"] += " KXQ"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+class TestCallOnlyFixes:
+    """Issue #270: a typed fix can be kept for THIS call only (sidecar
+    ``call_corrections``) instead of the folder glossary."""
+
+    def test_n_at_keep_prompt_saves_call_only_not_glossary(
+        self, env: dict[str, Any]
+    ) -> None:
+        path = _sidecar(env["cwd"])
+        rc = _run(env, path, _Inputs("1", "AVS", "n", "", "y"))
+        assert rc == 0
+        assert not (env["cwd"] / ".vemoizer").exists()
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["call_corrections"] == {"APS": "AVS"}
+        md = (env["cwd"] / "run.md").read_text(encoding="utf-8")
+        assert "AVS" in md and "APS" not in md
+        # No glossary lines: the header degrades to "Save?" and only the
+        # call-only group prints.
+        assert "Save?" in env["echoes"]
+        i = env["echoes"].index("This call only:")
+        assert env["echoes"][i + 1] == "  APS => AVS"
+
+    def test_y_at_keep_prompt_keeps_glossary_behaviour(
+        self, env: dict[str, Any]
+    ) -> None:
+        path = _sidecar(env["cwd"])
+        rc = _run(env, path, _Inputs("1", "AVS", "y", "", "y"))
+        assert rc == 0
+        glossary = env["cwd"] / ".vemoizer" / "glossary.txt"
+        assert glossary.read_text(encoding="utf-8") == "APS => AVS\nAVS\n"
+        assert "call_corrections" not in json.loads(path.read_text(encoding="utf-8"))
+
+    def test_mixed_glossary_and_call_only_in_one_session(
+        self, env: dict[str, Any]
+    ) -> None:
+        path = _two_term_sidecar(env["cwd"])
+        rc = _run(env, path, _Inputs("1", "AVS", "y", "2", "KXW", "n", "", "y"))
+        assert rc == 0
+        glossary = env["cwd"] / ".vemoizer" / "glossary.txt"
+        assert glossary.read_text(encoding="utf-8") == "APS => AVS\nAVS\n"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["call_corrections"] == {"KXQ": "KXW"}
+        md = (env["cwd"] / "run.md").read_text(encoding="utf-8")
+        assert "AVS" in md and "APS" not in md
+        assert "KXW" in md and "KXQ" not in md
+        i = env["echoes"].index("Save to .vemoizer/glossary.txt?")
+        assert env["echoes"][i + 3 : i + 5] == ["This call only:", "  KXQ => KXW"]
+
+    def test_repick_call_only_then_glossary_last_answer_wins(
+        self, env: dict[str, Any]
+    ) -> None:
+        path = _sidecar(env["cwd"])
+        _run(env, path, _Inputs("1", "AVS", "n", "1", "AWS", "y", "", "y"))
+        glossary = env["cwd"] / ".vemoizer" / "glossary.txt"
+        assert glossary.read_text(encoding="utf-8") == "APS => AWS\nAWS\n"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert "call_corrections" not in data
+        md = (env["cwd"] / "run.md").read_text(encoding="utf-8")
+        assert "AWS" in md and "AVS" not in md and "APS" not in md
+
+    def test_existing_call_corrections_merge_and_overwrite(
+        self, env: dict[str, Any]
+    ) -> None:
+        path = _sidecar(env["cwd"])
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["call_corrections"] = {"APS": "VANHA", "XOV": "Y"}
+        path.write_text(json.dumps(data), encoding="utf-8")
+        _run(env, path, _Inputs("1", "AVS", "no", "", "y"))
+        saved = json.loads(path.read_text(encoding="utf-8"))["call_corrections"]
+        assert saved == {"APS": "AVS", "XOV": "Y"}
+
+    def test_abort_at_keep_prompt_drops_that_word_keeps_earlier(
+        self, env: dict[str, Any]
+    ) -> None:
+        path = _two_term_sidecar(env["cwd"])
+        # APS is kept for later calls; the KXQ follow-up gets Ctrl-D.
+        rc = _run(env, path, _Inputs("1", "AVS", "y", "2", "KXW", None, "y"))
+        assert rc == 0
+        glossary = env["cwd"] / ".vemoizer" / "glossary.txt"
+        assert glossary.read_text(encoding="utf-8") == "APS => AVS\nAVS\n"
+        assert "call_corrections" not in json.loads(path.read_text(encoding="utf-8"))
+        assert any(e.startswith("Save to") for e in env["echoes"])
+
+    def test_n_at_save_confirmation_leaves_sidecar_unchanged(
+        self, env: dict[str, Any]
+    ) -> None:
+        path = _sidecar(env["cwd"])
+        before = path.read_text(encoding="utf-8")
+        assert _run(env, path, _Inputs("1", "AVS", "n", "", "n")) == 0
+        assert path.read_text(encoding="utf-8") == before
+        assert not (env["cwd"] / ".vemoizer").exists()
+        assert not (env["cwd"] / "run.md").exists()
+
+    def test_home_refusal_saves_no_call_corrections_either(
+        self, env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HOME", str(env["cwd"]))
+        path = _two_term_sidecar(env["cwd"])
+        before = path.read_text(encoding="utf-8")
+        rc = _run(env, path, _Inputs("1", "AVS", "y", "2", "KXW", "n", "", "y"))
+        assert rc == 0
+        assert (
+            "not saved: run this from the meeting's folder, not your home folder"
+            in env["echoes"]
+        )
+        assert not (env["cwd"] / ".vemoizer").exists()
+        assert path.read_text(encoding="utf-8") == before
+        assert not (env["cwd"] / "run.md").exists()
+
+    def test_log_line_counts_call_only_without_the_words(
+        self, env: dict[str, Any], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        path = _sidecar(env["cwd"])
+        with caplog.at_level(logging.INFO, logger="vemoizer.term_check_cli"):
+            _run(env, path, _Inputs("1", "AVS", "n", "", "y"))
+        line = next(r for r in caplog.records if "term check:" in r.getMessage())
+        assert line.getMessage().endswith("call-only 1")
+        assert "APS" not in line.getMessage() and "AVS" not in line.getMessage()
+
+    def test_ei_at_keep_prompt_stores_a_call_only_fix(
+        self, env: dict[str, Any]
+    ) -> None:
+        """Finnish ``ei`` is "this call only", same as ``n``/``no``."""
+        path = _sidecar(env["cwd"])
+        rc = _run(env, path, _Inputs("1", "AVS", "ei", "", "y"))
+        assert rc == 0
+        assert not (env["cwd"] / ".vemoizer").exists()
+        assert json.loads(path.read_text(encoding="utf-8"))["call_corrections"] == {
+            "APS": "AVS"
+        }
+        assert "AVS" in (env["cwd"] / "run.md").read_text(encoding="utf-8")
+
+    def test_invalid_keep_reply_reasks_the_same_prompt(
+        self, env: dict[str, Any]
+    ) -> None:
+        """Only the known replies are accepted; ``KYLLÄ`` is the glossary one."""
+        path = _sidecar(env["cwd"])
+        inputs = _Inputs("1", "AVS", "maybe", "KYLLÄ", "", "y")
+        rc = _run(env, path, inputs)
+        assert rc == 0
+        assert inputs.prompts.count(tcli._KEEP_PROMPT) == 2
+        glossary = env["cwd"] / ".vemoizer" / "glossary.txt"
+        assert glossary.read_text(encoding="utf-8") == "APS => AVS\nAVS\n"
+        assert "call_corrections" not in json.loads(path.read_text(encoding="utf-8"))
+
+    def test_confirm_in_a_later_session_removes_the_stored_call_fix(
+        self, env: dict[str, Any]
+    ) -> None:
+        """An Enter on a word the sidecar still carries a fix for retires the
+        fix: the map key goes and the .md shows the original word again."""
+        path = _sidecar(env["cwd"])
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["call_corrections"] = {"APS": "AVS"}
+        path.write_text(json.dumps(data), encoding="utf-8")
+        rc = _run(env, path, _Inputs("1", "", "", "y"))
+        assert rc == 0
+        assert "call_corrections" not in json.loads(path.read_text(encoding="utf-8"))
+        md = (env["cwd"] / "run.md").read_text(encoding="utf-8")
+        assert "APS" in md and "AVS" not in md
+
+    def test_glossary_answer_in_a_later_session_replaces_the_stored_call_fix(
+        self, env: dict[str, Any]
+    ) -> None:
+        path = _sidecar(env["cwd"])
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["call_corrections"] = {"APS": "VANHA"}
+        path.write_text(json.dumps(data), encoding="utf-8")
+        rc = _run(env, path, _Inputs("1", "AVS", "y", "", "y"))
+        assert rc == 0
+        assert "call_corrections" not in json.loads(path.read_text(encoding="utf-8"))
+        glossary = env["cwd"] / ".vemoizer" / "glossary.txt"
+        assert glossary.read_text(encoding="utf-8") == "APS => AVS\nAVS\n"
+        md = (env["cwd"] / "run.md").read_text(encoding="utf-8")
+        assert "AVS" in md and "VANHA" not in md and "APS" not in md
+
+    def test_call_only_save_from_the_home_folder_writes_the_sidecar(
+        self, env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """HOME == cwd refuses the HOME GLOSSARY only: a fix kept for this
+        call goes into the sidecar anyway (issue #270 review)."""
+        monkeypatch.setenv("HOME", str(env["cwd"]))
+        path = _sidecar(env["cwd"])
+        rc = _run(env, path, _Inputs("1", "AVS", "n", "", "y"))
+        assert rc == 0
+        assert not any("home folder" in e for e in env["echoes"])
+        assert not (env["cwd"] / ".vemoizer").exists()
+        assert json.loads(path.read_text(encoding="utf-8"))["call_corrections"] == {
+            "APS": "AVS"
+        }
+        md = (env["cwd"] / "run.md").read_text(encoding="utf-8")
+        assert "AVS" in md and "APS" not in md
