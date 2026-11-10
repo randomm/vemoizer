@@ -279,3 +279,52 @@ def test_whole_word_group_ref_in_right_side_is_literal() -> None:
     paras = [{"start": 0.0, "end": 1.0, "text": "sanoi foo"}]
     out = apply_corrections(paras, {"foo": "a\\1b"})
     assert out[0]["text"] == "sanoi a\\1b"
+
+
+# -- corrections are idempotent (issue #272)
+#
+# llm_tail applies the table before AND after the repair pass and render
+# re-applies it to stored text, so a second application must be a no-op:
+# "IBC" => "IBC-kontti" may never compound into "IBC-kontti-kontti".
+
+
+def test_whole_word_correction_applied_twice_is_idempotent() -> None:
+    paras = [{"start": 0.0, "end": 1.0, "text": "IBC kontti ja IBC-kontti"}]
+    once = apply_corrections(paras, {"IBC": "IBC-kontti"})
+    twice = apply_corrections(once, {"IBC": "IBC-kontti"})
+    assert twice == once
+    assert once[0]["text"] == "IBC-kontti kontti ja IBC-kontti"
+
+
+def test_prefix_correction_applied_twice_is_idempotent() -> None:
+    paras = [{"start": 0.0, "end": 1.0, "text": "epitävaikutuksia"}]
+    once = apply_corrections(paras, {"epit*": "EBITDA"})
+    twice = apply_corrections(once, {"epit*": "EBITDA"})
+    assert twice == once
+    assert once[0]["text"] == "EBITDA-vaikutuksia"
+
+
+def test_whole_word_correction_without_the_suffix_still_replaces() -> None:
+    paras = [{"start": 0.0, "end": 1.0, "text": "mitä IBC on"}]
+    out = apply_corrections(paras, {"IBC": "IBC-kontti"})
+    assert out[0]["text"] == "mitä IBC-kontti on"
+
+
+def test_keep_alternative_does_not_swallow_garbled_word_prefix() -> None:
+    """The right side as a word prefix must not block the correction."""
+    paras = [{"start": 0.0, "end": 1.0, "text": "Blacksitin hanke"}]
+    out = apply_corrections(paras, {"Blacksitin": "Blacksit"})
+    assert out[0]["text"] == "Blacksit hanke"
+    assert apply_corrections(out, {"Blacksitin": "Blacksit"}) == out
+
+
+def test_keep_alternative_does_not_swallow_garbled_word_prefix_again() -> None:
+    paras = [{"start": 0.0, "end": 1.0, "text": "Flagshipit on hyvä"}]
+    out = apply_corrections(paras, {"Flagshipit": "Flagship"})
+    assert out[0]["text"] == "Flagship on hyvä"
+
+
+def test_normal_pair_still_replaces_as_before() -> None:
+    paras = [{"start": 0.0, "end": 1.0, "text": "sanoi blacksit ääneen"}]
+    out = apply_corrections(paras, {"Blacksit": "Flagship"})
+    assert out[0]["text"] == "sanoi Flagship ääneen"

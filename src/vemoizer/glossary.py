@@ -150,15 +150,26 @@ def _compile_corrections(
     epitävaikutuksia): the matched stem becomes the canonical term, and a
     surviving suffix of at least three characters (leading vowel joints
     stripped) is re-attached with a hyphen ("EBITDA-vaikutuksia").
+
+    Each pattern also matches its own right side as a whole word (the
+    ``keep`` alternative, returned unchanged) because llm_tail and render
+    apply the corrections more than once: applying them twice must be a
+    no-op, or "IBC" -> "IBC-kontti" would compound into
+    "IBC-kontti-kontti". The word boundaries keep the alternative from
+    swallowing the prefix of a garbled word that merely starts with the
+    canonical term ("Blacksitin" with {"Blacksitin": "Blacksit"}).
     """
     compiled: list[tuple[re.Pattern[str], Any]] = []
     for wrong, right in corrections.items():
+        keep = rf"(?P<keep>(?<!\w){re.escape(right)}(?!\w))|"
         if wrong.endswith("*"):
             stem = re.escape(wrong[:-1])
-            pattern = re.compile(rf"\b{stem}(\w*)", re.IGNORECASE)
+            pattern = re.compile(keep + rf"\b{stem}(?P<suffix>\w*)", re.IGNORECASE)
 
             def _repl_prefix(match: re.Match[str], r: str = right) -> str:
-                suffix = match.group(1).lstrip("aeiouyäö")
+                if match.group("keep") is not None:
+                    return match.group(0)
+                suffix = (match.group("suffix") or "").lstrip("aeiouyäö")
                 if len(suffix) >= 3:
                     return f"{r}-{suffix}"
                 return r
@@ -167,10 +178,15 @@ def _compile_corrections(
         else:
 
             def _repl_whole(match: re.Match[str], r: str = right) -> str:
+                if match.group("keep") is not None:
+                    return match.group(0)
                 return r
 
             compiled.append(
-                (re.compile(rf"\b{re.escape(wrong)}\b", re.IGNORECASE), _repl_whole)
+                (
+                    re.compile(keep + rf"\b{re.escape(wrong)}\b", re.IGNORECASE),
+                    _repl_whole,
+                )
             )
     return compiled
 
