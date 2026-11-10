@@ -52,8 +52,14 @@ input to the post-call pass, which ingests them and never re-reads the live
 source. Head placement, gaps and skew rules: `src/vemoizer/capture.py`.
 
 A two-track meeting (issue #171, `--mic-track` / `--system-track`) decodes
-only the mix. Each stem is ingested once more, without preprocessing, for
-speaker labels alone. Stems share sample index 0 with the mix and are
+each stem separately and merges the results on one timeline; the mix decode
+is the fallback when a stem with speech fails (issue #207). Both stems are
+decoded COMPACTED (issue #209; extended to the system stem by issue #276):
+their own speech spans are bridged and concatenated back to back into one
+dense buffer and the decode times are mapped back to the recording
+timeline, so no 30 s window is mostly digital silence — the shape that made
+Whisper loop under the glossary prompt. Each stem is ingested once more,
+without preprocessing. Stems share sample index 0 with the mix and are
 zero-padded to the longest stem; a length mismatch above 2 s is refused.
 
 Ingest argv (see `src/vemoizer/ingest.py`):

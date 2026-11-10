@@ -1,7 +1,8 @@
 """Per-track meeting decode (issue #207).
 
 The owner's mic stem and the remote system stem are decoded separately so
-each speaker keeps their own language; the mix decode is only the fallback.
+each speaker keeps their own language, both from a compacted buffer (issues
+#209 and #276); the mix decode is only the fallback.
 All models, VAD and ingest are faked — no weights, no network, no ffmpeg.
 """
 
@@ -294,22 +295,108 @@ def test_decode_tracks_decodes_each_stem_with_the_right_audio(
     assert result is not None
     assert len(calls) == 2
     assert all(c["initial_prompt"] == "glossary" for c in calls)
-    # The mic stem arrives compacted: its own speech (plus the padding),
-    # back to back, and nothing else (issue #209).
+    # Both stems arrive compacted: their own speech (plus the padding),
+    # back to back, and nothing else (issue #209, and #276 for them).
     mic_call = calls[0]
     assert len(mic_call["audio"]) == round(1.25 * SR)
     assert mic_call["audio"] == pytest.approx(1.0)
-    # The them stem is decoded unchanged.
     them_call = calls[1]
-    assert them_call["audio"] == pytest.approx(them)
-    # Slices and vad_slices cover only the stem's own speech.
+    assert len(them_call["audio"]) == round(1.25 * SR)
+    assert them_call["audio"] == pytest.approx(2.0)
+    # Each compact buffer is one part: slice 0 is the whole buffer.
     assert mic_call["slices"][0][0] == 0
     assert len(mic_call["slices"][0][1]) == round(1.25 * SR)
-    assert them_call["slices"][0][0] == SR
+    assert them_call["slices"][0][0] == 0
+    assert len(them_call["slices"][0][1]) == round(1.25 * SR)
     assert mic_call["vad_slices"] == [(0, round(1.25 * SR))]
-    assert them_call["vad_slices"] == [(SR, SR * 2)]
+    assert them_call["vad_slices"] == [(0, round(1.25 * SR))]
     # Both sides came out on one timeline, each with its own language.
     assert [w["word"] for w in result["words"]] == ["moi", "hi"]
+
+
+def test_decode_tracks_decodes_the_them_stem_from_a_compact_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """issue #276: the remote stem goes through the same compacted path as the
+    mic stem. Two remote turns minutes apart are decoded as one dense buffer of
+    their own parts — not as the mostly-silent full-length stem that made
+    Whisper loop (24.6 s of loops on a real call) — and the words come back on
+    the recording timeline."""
+    them = np.zeros(SR * 120, dtype=np.float32)
+    them[round(100.0 * SR) : round(101.0 * SR)] = 2.0
+    them[round(110.0 * SR) : round(111.0 * SR)] = 2.0
+    mic = np.zeros(SR * 120, dtype=np.float32)
+    _patch_stems(monkeypatch, mic, them)
+    monkeypatch.setattr(track_decode, "load_vad_model", lambda: object())
+    monkeypatch.setattr(
+        track_decode,
+        "vad_segments",
+        lambda audio, model, **kw: (
+            [
+                SpeechSegment(start=round(100.0 * SR), end=round(101.0 * SR)),
+                SpeechSegment(start=round(110.0 * SR), end=round(111.0 * SR)),
+            ]
+            if audio.any()
+            else []
+        ),
+    )
+    calls: list[dict[str, Any]] = []
+
+    def fake(audio, slices, initial_prompt=None, language=None, vad_slices=None, **kw):
+        calls.append(
+            {"audio": audio.copy(), "slices": slices, "vad_slices": vad_slices}
+        )
+        return {
+            "text": "hei moi",
+            "words": [
+                {"word": "hei", "start": 0.3, "end": 0.6},
+                {"word": "moi", "start": 2.3, "end": 2.6},
+            ],
+            "segments": [{"start": 0.3, "end": 2.6, "text": "hei moi"}],
+            "slices": [],
+            "language": "en",
+        }
+
+    monkeypatch.setattr(track_decode, "decode_meeting", fake)
+
+    result = decode_tracks(
+        TrackPaths(me=OWNER, them=THEM),
+        SR * 120,
+        initial_prompt="glossary",
+        language=None,
+    )
+
+    assert result is not None
+    assert len(calls) == 1, "the silent mic stem is skipped"
+    audio = calls[0]["audio"]
+    # The two padded turns and the pause between them: 3.5 s, not the 120 s stem.
+    assert len(audio) == round(3.5 * SR)
+    # The slices are the compacted parts, each an offset into that buffer.
+    assert [offset for offset, _ in calls[0]["slices"]] == [0, round(2.0 * SR)]
+    assert calls[0]["slices"][1][1] == pytest.approx(audio[round(2.0 * SR) :])
+    assert calls[0]["vad_slices"] == [
+        (0, round(1.5 * SR)),
+        (round(2.0 * SR), round(3.5 * SR)),
+    ]
+    assert audio[: round(1.5 * SR)] == pytest.approx(
+        them[round(99.75 * SR) : round(101.25 * SR)]
+    )
+    assert audio[round(1.5 * SR) : round(2.0 * SR)] == pytest.approx(0.0)
+    # The decode answered in compact time; each part starts 0.25 s before its
+    # turn was spoken (its padding), and that is where the words land.
+    assert [w["track"] for w in result["words"]] == ["them", "them"]
+    assert [w["start"] for w in result["words"]] == [
+        pytest.approx(100.05),
+        pytest.approx(110.05),
+    ]
+    assert [w["end"] for w in result["words"]] == [
+        pytest.approx(100.35),
+        pytest.approx(110.35),
+    ]
+    assert [s["start"] for s in result["segments"]] == [
+        pytest.approx(100.05),
+        pytest.approx(110.05),
+    ]
 
 
 def test_decode_tracks_decodes_the_mic_stem_from_a_compact_buffer(
