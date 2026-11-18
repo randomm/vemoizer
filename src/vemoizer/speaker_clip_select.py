@@ -25,6 +25,9 @@ Design notes
   speech — another label's segment, or another label's paragraph for an old
   sidecar without segments — is rejected, and a third left with no
   acceptable window yields no clip.
+* Island rejection (issue #280): a candidate overlapping an island of its
+  own label is rejected, unless that label has nothing else; the island
+  logic lives in :mod:`vemoizer.speaker_clip_islands`.
 * Picks for one label spread over the beginning, middle and end of the
   meeting, ranked by the turn's own duration (ties: earlier start), and no
   two chosen windows of a label overlap.
@@ -37,6 +40,7 @@ from __future__ import annotations
 from typing import Any, NamedTuple
 
 from .speaker_align import BACKCHANNEL_PHRASES, BACKCHANNELS
+from .speaker_clip_islands import islands, reject_islands
 
 __all__ = ["ClipWindow", "select_clips", "talk_share"]
 
@@ -285,7 +289,13 @@ def select_clips(
     overlapping another label's speech — another label's segment when the
     sidecar has segments, otherwise another label's paragraph, since old
     sidecars have no segments — and a third left with no acceptable window
-    yields no clip. Paragraph candidates prefer non-suspect, non-backchannel
+    yields no clip. Both kinds also reject a window overlapping an *island*
+    of their own label (issue #280): an item wedged between two items of one
+    other label of the same track within ``ISLAND_GAP_S`` (see
+    :mod:`vemoizer.speaker_clip_islands`) on both sides
+    is a diarization mislabel that plays someone else's voice; a label whose
+    candidates are all islands still gets its longest one, so every label
+    with speech gets a clip. Paragraph candidates prefer non-suspect, non-backchannel
     turns; a label with only such turns still gets clips, so every label
     with speech gets a quote and a clip (issue #202). Picks spread across
     the meeting: the LONGEST candidate from each third where possible,
@@ -316,22 +326,25 @@ def select_clips(
     # A label with a clean turn uses only clean turns; a label whose turns
     # are all suspect or backchannels still gets its longest turn (issue #202).
     # Both pools reject a window overlapping another label's speech: guarded
-    # by the segments when there are any, by the paragraphs otherwise (#253).
+    # by the segments when there are any, by the paragraphs otherwise (#253),
+    # and a window overlapping an island of its own label (#280).
     guards = segs if segs else list(paragraphs)
+    island_spans = islands(guards)
     clean_para = _candidates(
         paragraphs, audio_end, whole=False, clean=True, max_s=max_s, others=guards
     )
     any_para = _candidates(
         paragraphs, audio_end, whole=False, clean=False, max_s=max_s, others=guards
     )
-    fallback = {
-        label: clean_para.get(label) or turns for label, turns in any_para.items()
-    }
     primary = (
         _candidates(segs, audio_end, whole=True, clean=True, max_s=max_s, others=segs)
         if segs
         else {}
     )
+    reject_islands([clean_para, any_para, primary], island_spans)
+    fallback = {
+        label: clean_para.get(label) or turns for label, turns in any_para.items()
+    }
 
     labels = list(any_para) + [label for label in primary if label not in any_para]
     result: dict[str, list[ClipWindow]] = {}
