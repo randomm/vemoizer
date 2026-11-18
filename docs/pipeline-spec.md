@@ -709,6 +709,10 @@ dict returned by `extract_clips`:
   rejected — another label's `segment` when the sidecar has segments,
   otherwise another label's `paragraph`. A third left with no acceptable
   window yields no clip.
+- A candidate overlapping an *island* of its own label — one item wedged
+  within 3 s between two items of one other label on the same track, a
+  diarization mislabel — is skipped unless the label has nothing else
+  (issue #280).
 - `min_s` is a display annotation, not a disqualification threshold.
 - Picks for one speaker spread across the meeting: the longest candidate
   (ranked by its **turn duration**, ties to the earlier start) from each
