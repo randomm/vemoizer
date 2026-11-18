@@ -850,7 +850,11 @@ already named, so it is shown as one line (`<owner>  (N% of talk) — you
 and a name added or declined once is not offered again in that run
 (issue #212). An owner that fell back to the
 language label is not named and is prompted like any other speaker. Type-ahead is flushed before
-each prompt, and the sidecar's own `<stem>.md` is rewritten in place.
+each prompt, and the sidecar's own `<stem>.md` is rewritten in place. A
+non-owner label with under 1% of talk (`CROSSTALK_SHARE`) gets a hint line
+under its header warning that its speech is often several voices mixed from
+cross-talk and inviting an empty answer (issue #281); the owner line never
+gets it.
 
 | Flag | Default | Meaning |
 |---|---|---|

@@ -47,6 +47,12 @@ from vemoizer.speaker_clips import (
     talk_share,
 )
 
+#: Below this talk share a label is almost certainly cross-talk fragments
+#: pyannote collected from overlapping speech, not one coherent voice
+#: (issue #281). Its prompt gets a hint line so the user is not left
+#: guessing why the clips sound like several voices at once.
+CROSSTALK_SHARE = 0.01
+
 # ---------------------------------------------------------------------------
 # TTY probe (monkeypatchable seam for the meeting naming hook, issue #95)
 # ---------------------------------------------------------------------------
@@ -302,6 +308,11 @@ def run_names(
                 label_clips: list[ClipWindow] = clips.get(label, [])
 
                 typer.echo(f"\n{label}  ({share:.0%} of talk)")
+                if share < CROSSTALK_SHARE:
+                    typer.echo(
+                        "  (very little speech, often several voices mixed"
+                        " — leave empty to skip)"
+                    )
                 # Cut the clips first, then print each quote immediately
                 # before playing its own clip, so the printed words always
                 # pair with the heard words (issue #253). A window whose
